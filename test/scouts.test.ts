@@ -254,3 +254,84 @@ test("scoutModelMap normalizes like the implementation map", () => {
   );
   assert.equal(normalizePlanModeSettings({ scoutModelMap: { bad: "anthropic/x" } }), undefined);
 });
+
+test("research extensions and tools reach planners, their scouts, and the prompts", async () => {
+  const base = {
+    spec: { provider: "anthropic", modelId: "claude-fable-5-1" },
+    prompt: "p",
+    extensionPath: "/e",
+    loadUserExtensions: false,
+    extraExtensions: ["/web-access"],
+    extraTools: ["web_search", "fetch_content"],
+  };
+  const args = plannerArgs(base);
+  assert.deepEqual(args.slice(args.indexOf("--no-extensions"), args.indexOf("--no-extensions") + 5), [
+    "--no-extensions",
+    "--extension",
+    "/e",
+    "--extension",
+    "/web-access",
+  ]);
+  assert.match(args[args.indexOf("--tools") + 1] ?? "", /plan_mode_complete,web_search,fetch_content$/u);
+
+  const { spawnProcess, calls } = fakeSpawn((child) => child.exit(0));
+  await runPlanner({
+    id: "A",
+    ...base,
+    cwd: process.cwd(),
+    timeoutMs: 5_000,
+    signal: new AbortController().signal,
+    onProgress: () => undefined,
+    spawnProcess,
+    piCommand: { command: "pi", args: [] },
+  });
+  assert.equal(calls[0]?.env.PI_PLAN_MODE_EXTRA_TOOLS, "web_search,fetch_content");
+  assert.equal(calls[0]?.env.PI_PLAN_MODE_PLANNER_EXTENSIONS, '["/web-access"]');
+
+  const scout = scoutArgs({ provider: "p", modelId: "m" }, "Find docs", {
+    extensions: ["/web-access"],
+    tools: ["web_search"],
+  });
+  assert.equal(scout[scout.indexOf("--tools") + 1], "read,grep,find,ls,web_search");
+  assert.equal(scout[scout.indexOf("--no-extensions") + 2], "/web-access");
+  assert.match(scout.at(-1) ?? "", /research beyond the repository with web_search/u);
+  assert.match(
+    formatPlannerPrompt("t", "", 2, undefined, ["web_search", "fetch_content"]),
+    /Research beyond the repository[^\n]*web_search, fetch_content/u,
+  );
+  assert.deepEqual(normalizePlanModeSettings({ plannerExtensions: ["~/x"], plannerTools: ["web_search"] }), {
+    thinkingLevel: "inherit",
+    plannerExtensions: ["~/x"],
+    plannerTools: ["web_search"],
+  });
+});
+
+test("Plan mode admits the extra research tools only inside planner processes", async () => {
+  const saved = { planner: process.env[PLANNER_ENV], tools: process.env.PI_PLAN_MODE_EXTRA_TOOLS };
+  try {
+    for (const planner of [false, true]) {
+      if (planner) {
+        process.env[PLANNER_ENV] = "1";
+        process.env.PI_PLAN_MODE_EXTRA_TOOLS = "web_search";
+      } else {
+        delete process.env[PLANNER_ENV];
+        process.env.PI_PLAN_MODE_EXTRA_TOOLS = "web_search";
+      }
+      const mock = createMockPi({ activeTools: ["read", "web_search"] });
+      planMode(mock.pi, { readSettings: async () => ({ kind: "missing" as const }) });
+      const context = createMockContext({ mode: "json", hasUI: false });
+      await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, context.ctx);
+      if (!planner) await mock.commands.get("plan")?.handler("start", context.ctx);
+      const verdict = (await mock.events.get("tool_call")?.[0]?.(
+        { toolName: "web_search", input: { query: "x" } },
+        context.ctx,
+      )) as { block?: boolean } | undefined;
+      assert.equal(verdict?.block === true, !planner, planner ? "planner" : "ordinary session");
+    }
+  } finally {
+    if (saved.planner === undefined) delete process.env[PLANNER_ENV];
+    else process.env[PLANNER_ENV] = saved.planner;
+    if (saved.tools === undefined) delete process.env.PI_PLAN_MODE_EXTRA_TOOLS;
+    else process.env.PI_PLAN_MODE_EXTRA_TOOLS = saved.tools;
+  }
+});

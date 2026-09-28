@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
-import { PLANNER_ENV } from "./multi-plan.js";
+import { EXTRA_TOOLS_ENV, PLANNER_ENV, PLANNER_EXTENSIONS_ENV } from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 
 export const PLAN_SUBAGENTS_TOOL_NAME = "plan_subagents";
@@ -102,10 +102,12 @@ export function normalizeScoutTasks(params: unknown): { ok: true; tasks: ScoutTa
   return { ok: true, tasks };
 }
 
-export function scoutPrompt(task: string) {
+export function scoutPrompt(task: string, extraTools: readonly string[] = []) {
   return [
-    "You are a read-only scout working for a planner. Investigate the codebase to answer the task below, then reply with a concise, factual report: what you found, with file paths and line references, and anything you could not determine.",
-    "You can only read and search files. Do not propose an implementation plan unless the task asks for options.",
+    "You are a read-only scout working for a planner. Investigate the codebase to answer the task below, then reply with a concise, factual report: what you found, with file paths, line references, and source URLs, and anything you could not determine.",
+    extraTools.length > 0
+      ? `You can read and search files, and research beyond the repository with ${extraTools.join(", ")}. You cannot run commands or edit anything. Do not propose an implementation plan unless the task asks for options.`
+      : "You can only read and search files. Do not propose an implementation plan unless the task asks for options.",
     "",
     "## Task",
     "",
@@ -113,7 +115,11 @@ export function scoutPrompt(task: string) {
   ].join("\n");
 }
 
-export function scoutArgs(spec: ModelSpec, task: string) {
+export function scoutArgs(
+  spec: ModelSpec,
+  task: string,
+  extras: { extensions?: readonly string[]; tools?: readonly string[] } = {},
+) {
   return [
     "--mode",
     "json",
@@ -121,13 +127,14 @@ export function scoutArgs(spec: ModelSpec, task: string) {
     "--model",
     formatModelSpec(spec),
     "--tools",
-    SCOUT_TOOLS.join(","),
+    [...SCOUT_TOOLS, ...(extras.tools ?? [])].join(","),
     "--no-extensions",
+    ...(extras.extensions ?? []).flatMap((extension) => ["--extension", extension]),
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
     "--",
-    scoutPrompt(task),
+    scoutPrompt(task, extras.tools),
   ];
 }
 
@@ -135,6 +142,9 @@ export interface RunScoutOptions {
   spec: ModelSpec;
   task: ScoutTask;
   cwd: string;
+  /** Extra extensions and read-only tools (e.g. web research) for the scout. */
+  extensions?: readonly string[];
+  tools?: readonly string[];
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Receives every spawned child so the caller can kill stragglers on shutdown. */
@@ -198,12 +208,24 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
     const env: NodeJS.ProcessEnv = { ...process.env, PI_SKIP_VERSION_CHECK: "1" };
     delete env[PLANNER_ENV];
     delete env[SCOUT_MODEL_ENV];
+    delete env[PLANNER_EXTENSIONS_ENV];
+    delete env[EXTRA_TOOLS_ENV];
     try {
-      child = (options.spawnProcess ?? spawn)(pi.command, [...pi.args, ...scoutArgs(options.spec, options.task.task)], {
-        cwd: options.cwd,
-        env,
-        stdio: ["ignore", "pipe", "pipe"],
-      });
+      child = (options.spawnProcess ?? spawn)(
+        pi.command,
+        [
+          ...pi.args,
+          ...scoutArgs(options.spec, options.task.task, {
+            ...(options.extensions ? { extensions: options.extensions } : {}),
+            ...(options.tools ? { tools: options.tools } : {}),
+          }),
+        ],
+        {
+          cwd: options.cwd,
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
     } catch (spawnError: unknown) {
       error = `Could not start Pi: ${spawnError instanceof Error ? spawnError.message : String(spawnError)}`;
       finish();

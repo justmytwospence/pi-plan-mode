@@ -1,7 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { parseProposedPlan } from "./message-transform.js";
-import { PLANNER_ENV, type PlanCandidate } from "./multi-plan.js";
+import { EXTRA_TOOLS_ENV, PLANNER_ENV, PLANNER_EXTENSIONS_ENV, type PlanCandidate } from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
 
@@ -35,6 +35,10 @@ export interface PlannerRunOptions {
   loadUserExtensions: boolean;
   /** Model for the planner's read-only subagents; enables the plan_subagents tool. */
   scoutSpec?: ModelSpec;
+  /** Extra extensions (resolved paths) loaded into the planner and its scouts. */
+  extraExtensions?: readonly string[];
+  /** Extra read-only tools (e.g. web_search) enabled for the planner and its scouts. */
+  extraTools?: readonly string[];
   signal: AbortSignal;
   onProgress(progress: PlannerProgress): void;
   /** Test seam: replaces `child_process.spawn`. */
@@ -44,7 +48,10 @@ export interface PlannerRunOptions {
 }
 
 export function plannerArgs(
-  options: Pick<PlannerRunOptions, "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec">,
+  options: Pick<
+    PlannerRunOptions,
+    "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "extraExtensions" | "extraTools"
+  >,
 ) {
   return [
     "--mode",
@@ -53,11 +60,20 @@ export function plannerArgs(
     "--model",
     formatModelSpec(options.spec),
     "--tools",
-    [...PLANNER_TOOLS, ...(options.scoutSpec ? [PLAN_SUBAGENTS_TOOL_NAME] : [])].join(","),
+    [...PLANNER_TOOLS, ...(options.extraTools ?? []), ...(options.scoutSpec ? [PLAN_SUBAGENTS_TOOL_NAME] : [])].join(
+      ",",
+    ),
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
-    ...(options.loadUserExtensions ? [] : ["--no-extensions", "--extension", options.extensionPath]),
+    ...(options.loadUserExtensions
+      ? []
+      : [
+          "--no-extensions",
+          "--extension",
+          options.extensionPath,
+          ...(options.extraExtensions ?? []).flatMap((extension) => ["--extension", extension]),
+        ]),
     "--",
     options.prompt,
   ];
@@ -230,6 +246,8 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
           [PLANNER_ENV]: "1",
           PI_SKIP_VERSION_CHECK: "1",
           ...(options.scoutSpec ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) } : {}),
+          [PLANNER_EXTENSIONS_ENV]: JSON.stringify(options.extraExtensions ?? []),
+          [EXTRA_TOOLS_ENV]: (options.extraTools ?? []).join(","),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });

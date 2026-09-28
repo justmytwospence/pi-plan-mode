@@ -63,6 +63,7 @@ import {
   CANDIDATES_ENTRY_TYPE,
   type CandidateSet,
   candidateId,
+  extraToolsFromEnv,
   formatPlannerPrompt,
   formatSelectedPlanMessage,
   formatSynthesisPrompt,
@@ -70,11 +71,12 @@ import {
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
   type PlanCandidate,
+  plannerExtensionsFromEnv,
   SELECTED_PLAN_MESSAGE_TYPE,
 } from "./multi-plan.js";
 import { createPlanActionController, type FreshImplementationTiming } from "./plan-action-controller.js";
 import { createPlanExportController } from "./plan-export-controller.js";
-import { runPlanCompleteHook } from "./plan-hook.js";
+import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { runPlanner } from "./planner-process.js";
 import {
   clearPlanModeUi,
@@ -334,6 +336,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   // Planner subprocesses may fan out read-only scouts on a cheaper model (settings.scoutModelMap).
   const scoutSpec = isPlannerProcess() ? parseModelSpec(process.env[SCOUT_MODEL_ENV]) : undefined;
+  // Extra read-only tools (web research) a planner may use; Plan mode admits them in planners only.
+  const plannerExtraTools = new Set(isPlannerProcess() ? extraToolsFromEnv() : []);
+  const plannerExtensions = isPlannerProcess() ? plannerExtensionsFromEnv() : [];
   const activeScouts = new Set<import("node:child_process").ChildProcess>();
   const killScouts = () => {
     for (const child of activeScouts) {
@@ -362,6 +367,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               spec: scoutSpec,
               task,
               cwd: ctx.cwd,
+              extensions: plannerExtensions,
+              tools: [...plannerExtraTools],
               ...(signal ? { signal } : {}),
               track: (child) => {
                 activeScouts.add(child);
@@ -737,7 +744,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const requiredHelper =
       event.toolName === PLAN_MODE_QUESTION_TOOL_NAME ||
       event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME ||
-      (scoutSpec !== undefined && event.toolName === PLAN_SUBAGENTS_TOOL_NAME);
+      (scoutSpec !== undefined && event.toolName === PLAN_SUBAGENTS_TOOL_NAME) ||
+      plannerExtraTools.has(event.toolName);
     if (!state.enabled) {
       if (!requiredHelper) return;
       return {
@@ -1217,12 +1225,21 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         Promise.all(
           specs.map((spec, index) => {
             const scout = configuredScoutModel(settings, spec);
+            const extraTools = settings.plannerTools ?? [];
             return runPlanner({
               id: candidateId(index + offset),
               spec,
               cwd: ctx.cwd,
-              prompt: formatPlannerPrompt(task, transcript, plannerCount, scout ? formatModelSpec(scout) : undefined),
+              prompt: formatPlannerPrompt(
+                task,
+                transcript,
+                plannerCount,
+                scout ? formatModelSpec(scout) : undefined,
+                extraTools,
+              ),
               ...(scout ? { scoutSpec: scout } : {}),
+              extraExtensions: (settings.plannerExtensions ?? []).map(expandHome),
+              extraTools,
               timeoutMs,
               extensionPath: EXTENSION_ENTRY_PATH,
               loadUserExtensions: settings.plannerLoadExtensions === true,

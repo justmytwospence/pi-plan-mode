@@ -1,6 +1,28 @@
 import { formatModelSpec, type ImplementationModelOverride, type ModelSpec } from "./implementation-models.js";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
+/** JSON array of extension paths a planner passes on to its scouts. */
+export const PLANNER_EXTENSIONS_ENV = "PI_PLAN_MODE_PLANNER_EXTENSIONS";
+/** Comma-separated extra tools a planner may use and pass on to its scouts. */
+export const EXTRA_TOOLS_ENV = "PI_PLAN_MODE_EXTRA_TOOLS";
+
+export function plannerExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  try {
+    const value = JSON.parse(env[PLANNER_EXTENSIONS_ENV] ?? "[]") as unknown;
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+export function extraToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return (env[EXTRA_TOOLS_ENV] ?? "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+}
 export const CANDIDATES_ENTRY_TYPE = "plan-mode-candidates";
 export const MULTI_TASK_MESSAGE_TYPE = "plan-mode-multi-task";
 export const SELECTED_PLAN_MESSAGE_TYPE = "plan-mode-selected-plan";
@@ -135,12 +157,23 @@ export function buildPlannerTranscript(entries: readonly unknown[], maxChars = M
   return `${truncate(first, maxChars / 4)}\n\n[… earlier conversation omitted …]\n\n${transcript.slice(-tailBudget)}`;
 }
 
-export function formatPlannerPrompt(task: string, transcript: string, plannerCount: number, scoutLabel?: string) {
+export function formatPlannerPrompt(
+  task: string,
+  transcript: string,
+  plannerCount: number,
+  scoutLabel?: string,
+  researchTools: readonly string[] = [],
+) {
   const others =
     plannerCount > 1 ? `${plannerCount - 1} other model${plannerCount > 2 ? "s are" : " is"}` : "Other models may be";
   return [
     `You are one of several independent planners. ${others} planning the same task in parallel without seeing your work; the user will compare the plans and pick one or combine them.`,
     "You are running non-interactively and nobody can answer questions. Do not call plan_mode_question. Resolve ambiguity by exploring the repository; when a real decision remains, choose the most reasonable option and record it under an explicit Assumptions section.",
+    ...(researchTools.length > 0
+      ? [
+          `Research beyond the repository whenever outside knowledge matters (library and API docs, versions, known issues, prior art) with ${researchTools.join(", ")}.`,
+        ]
+      : []),
     ...(scoutLabel
       ? [
           `For broad or independent investigations, delegate to read-only subagents with plan_subagents (they run on ${scoutLabel}; give each a self-contained task and run independent ones in one call). Verify anything decisive yourself, and write the plan yourself.`,

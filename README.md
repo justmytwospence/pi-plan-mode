@@ -63,7 +63,14 @@ earlier plans).
 With `scoutModelMap`, a planner can fan work out to cheaper read-only subagents through a `plan_subagents` tool
 (up to six tasks per call, run in parallel). Each scout is a `pi --mode json --no-extensions` process with only
 `read`, `grep`, `find`, and `ls`, so it cannot modify anything or spawn further agents; its report and token usage
-return to the planner and count toward the planner's cost. The tool exists only inside planner subprocesses. Extension-provided model providers need `plannerLoadExtensions: true`, which loads all of your
+return to the planner and count toward the planner's cost. The tool exists only inside planner subprocesses.
+
+Planners and scouts start with no extensions besides this one, so they have no web access by default.
+`plannerExtensions` loads extra packages into both (e.g. the installed `pi-web-access` directory), and
+`plannerTools` enables their tools (e.g. `web_search`, `fetch_content`, `get_search_content`); Plan mode admits
+those tools inside planners, and scouts get them alongside `read`/`grep`/`find`/`ls`. List only read-only tools:
+scouts do not run under Plan mode's policy. To let the main planning session research too, add the same tools to
+`defaultPlanTools` (or choose them with `/plan tools`). Extension-provided model providers need `plannerLoadExtensions: true`, which loads all of your
 extensions into each planner.
 
 ## 🛠️ Implement with a chosen model, effort, and context
@@ -421,6 +428,9 @@ New settings in this fork:
   },
   "plannerTimeoutSeconds": 900,
   "plannerLoadExtensions": false,
+  "plannerExtensions": ["~/.pi/agent/npm/node_modules/pi-web-access"],
+  "plannerTools": ["web_search", "fetch_content", "get_search_content"],
+  "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content"],
   "planCompleteCommand": ["bash", "~/.claude/hooks/save-plan-to-obsidian.sh"]
 }
 ```

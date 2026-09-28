@@ -113,6 +113,10 @@ export interface PlanModeSettings {
   plannerTimeoutSeconds?: number;
   /** Load the user's extensions in planner subprocesses (needed for extension-provided models). */
   plannerLoadExtensions?: boolean;
+  /** Extension paths or sources loaded into planners and their scouts, e.g. a web-research package. */
+  plannerExtensions?: string[];
+  /** Extra tools enabled for planners and scouts (list only read-only tools, e.g. web_search). */
+  plannerTools?: string[];
   /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
   planCompleteCommand?: string[];
 }
@@ -234,6 +238,16 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const load = Reflect.get(value, "plannerLoadExtensions");
     if (typeof load !== "boolean") return undefined;
     settings.plannerLoadExtensions = load;
+  }
+  if (Object.hasOwn(value, "plannerExtensions")) {
+    const extensions = normalizeCommand(Reflect.get(value, "plannerExtensions"));
+    if (!extensions) return undefined;
+    settings.plannerExtensions = extensions;
+  }
+  if (Object.hasOwn(value, "plannerTools")) {
+    const tools = normalizeToolNames(Reflect.get(value, "plannerTools"));
+    if (!tools) return undefined;
+    settings.plannerTools = tools;
   }
   if (Object.hasOwn(value, "planCompleteCommand")) {
     const command = normalizeCommand(Reflect.get(value, "planCompleteCommand"));

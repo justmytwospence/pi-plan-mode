@@ -130,3 +130,27 @@ test("a saved plan keeps its authoring model for the implementation default", as
   const saved = mock.entries.at(-1)?.data as { savedPlan?: { model?: unknown } };
   assert.deepEqual(saved.savedPlan?.model, { provider: "openai-codex", modelId: "gpt-6-sol" });
 });
+
+test("switching models without an explicit effort keeps the session's effort", async () => {
+  const mock = createMockPi({ activeTools: ["read", "edit"] });
+  planMode(
+    mock.pi,
+    settingsWith({
+      implementationModelMap: { "anthropic/claude-opus-5-5": { provider: "anthropic", modelId: "claude-sonnet-5" } },
+    }),
+  );
+  mock.rawPi.setThinkingLevel("low");
+  const originalSetModel = mock.rawPi.setModel;
+  mock.rawPi.setModel = async (model: unknown) => {
+    mock.rawPi.setThinkingLevel("xhigh");
+    return originalSetModel(model);
+  };
+  const context = createMockContext({ mode: "rpc", hasUI: true, model: OPUS, modelRegistry: registry() });
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("start", context.ctx);
+  await completePlan(mock, context.ctx);
+  await mock.commands.get("plan")?.handler("implement", context.ctx);
+
+  assert.deepEqual(mock.setModels, [SONNET]);
+  assert.equal(mock.thinkingLevel, "low");
+});

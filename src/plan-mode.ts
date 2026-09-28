@@ -1531,11 +1531,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         );
       }
     }
-    if (runtime?.thinkingLevel) {
+    // Switching models resets effort to the model default; "same as plan" keeps the session's effort.
+    const desiredThinkingLevel = runtime?.thinkingLevel ?? (modelChanged ? previousThinkingLevel : undefined);
+    if (desiredThinkingLevel && pi.getThinkingLevel() !== desiredThinkingLevel) {
       try {
-        pi.setThinkingLevel(runtime.thinkingLevel);
+        pi.setThinkingLevel(desiredThinkingLevel);
         const effective = pi.getThinkingLevel();
-        if (effective !== runtime.thinkingLevel) {
+        if (runtime?.thinkingLevel && effective !== runtime.thinkingLevel) {
           ctx.ui.notify(
             `Implementation thinking ${runtime.thinkingLevel} is unsupported by this model; Pi is using ${effective}.`,
             "warning",
@@ -1549,7 +1551,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       async restore() {
         try {
           if (modelChanged && previousModel) await pi.setModel(previousModel);
-          if (runtime?.thinkingLevel && pi.getThinkingLevel() !== previousThinkingLevel) {
+          if (pi.getThinkingLevel() !== previousThinkingLevel) {
             pi.setThinkingLevel(previousThinkingLevel);
           }
         } catch {

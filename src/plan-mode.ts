@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { watch } from "node:fs";
 import { basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import type {
   ExtensionAPI,
@@ -31,7 +32,7 @@ import {
   formatTransferredPlanPrompt,
   startFreshImplementationFromState,
 } from "./fresh-implementation.js";
-import type { ImplementationModelOverride } from "./implementation-models.js";
+import { type ImplementationModelOverride, type ModelSpec, sameModel } from "./implementation-models.js";
 import {
   createImplementationRetentionCoordinator,
   implementationRetentionPreview,
@@ -51,8 +52,24 @@ import {
   type PlanModeContract,
   reconcileModeContract,
 } from "./mode-contract.js";
+import {
+  buildPlannerTranscript,
+  CANDIDATES_ENTRY_TYPE,
+  type CandidateSet,
+  candidateId,
+  formatPlannerPrompt,
+  formatSelectedPlanMessage,
+  formatSynthesisPrompt,
+  isPlannerProcess,
+  latestCandidateSet,
+  MULTI_TASK_MESSAGE_TYPE,
+  type PlanCandidate,
+  SELECTED_PLAN_MESSAGE_TYPE,
+} from "./multi-plan.js";
 import { createPlanActionController, type FreshImplementationTiming } from "./plan-action-controller.js";
 import { createPlanExportController } from "./plan-export-controller.js";
+import { runPlanCompleteHook } from "./plan-hook.js";
+import { runPlanner } from "./planner-process.js";
 import {
   clearPlanModeUi,
   planModeStatusText as formatPlanModeStatusText,
@@ -72,6 +89,8 @@ import {
   awaitPlanModeSettingsWrites,
   configuredImplementationPlanRetention,
   configuredPlanModeToggleShortcut,
+  configuredPlanners,
+  configuredPlannerTimeoutSeconds,
   configuredThinkingLevel,
   type ImplementationPlanRetention,
   type PlanModeSettings,
@@ -99,6 +118,8 @@ import { compareTools, snapshotPlanModeSelectedNames, toolPolicyLabel } from "./
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
 const STATE_ENTRY_TYPE = "plan-mode-state";
+// Planner subprocesses load this same extension with `--extension` so they plan under Plan mode.
+const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const PROPOSED_PLAN_MESSAGE_TYPE = "proposed-plan";
 const RECOVERED_RUNTIME_ADMISSION_INPUT_MESSAGE_TYPE = "plan-mode-recovered-input";
 const BLOCKED_MUTATING_TOOLS = new Set(["edit", "write", "update_plan"]);
@@ -226,6 +247,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         ctx.ui.notify("Plan mode disabled. Proposed plan discarded.", "info");
       }
     },
+    compare: (ctx) => runMultiPlan(ctx, { includeCurrentPlan: true }),
+    planWithModels: (ctx) => runMultiPlan(ctx, { includeCurrentPlan: false }),
     clearSaved: (ctx) => {
       if (exitPlanMode(ctx)) ctx.ui.notify("Saved plan cleared.", "info");
     },
@@ -352,6 +375,22 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       if (command === "exit" || command === "off") {
         const notification = planModeDisableNotification();
         if (exitPlanMode(ctx)) ctx.ui.notify(notification, "info");
+        return;
+      }
+      const multiMatch = /^multi(?:\s+([\s\S]+))?$/iu.exec(prompt);
+      if (multiMatch) {
+        await runMultiPlan(ctx, { task: multiMatch[1], includeCurrentPlan: false });
+        return;
+      }
+      if (command === "compare") {
+        const set = latestCandidateSet(ctx.sessionManager.getBranch());
+        if (set) await compareCandidates(ctx, set);
+        else if (state.enabled && state.latestPlan) await runMultiPlan(ctx, { includeCurrentPlan: true });
+        else
+          ctx.ui.notify(
+            "No candidate plans in this branch. Use /plan multi <task> to plan with several models.",
+            "info",
+          );
         return;
       }
       if (command === "tools") {
@@ -506,6 +545,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     initializePlanModeShortcut();
     startPlanModeSettingsWatch(generation);
     if (!installRestoredState(restoredState, ctx)) return;
+    // A planner subprocess spawned by /plan multi plans under the same read-only policy.
+    if (isPlannerProcess() && !state.enabled) enterPlanMode(ctx);
     implementationRetention.restore(state.activeImplementation);
     updateUi(ctx);
     // A new session receives its setup entries after session_start, so its input gate refreshes
@@ -1015,6 +1056,176 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     };
     persistState();
     updateUi(ctx);
+    if (settings.planCompleteCommand && !isPlannerProcess()) {
+      void runPlanCompleteHook({
+        command: settings.planCompleteCommand,
+        plan: normalized.plan,
+        cwd: ctx.cwd,
+        ...(latestPlanModel ? { model: latestPlanModel } : {}),
+      });
+    }
+  }
+
+  /**
+   * Plan with several models in parallel (planner subprocesses), then compare the candidates.
+   * With includeCurrentPlan, the ready plan joins the comparison as candidate A.
+   */
+  async function runMultiPlan(
+    ctx: ExtensionContext,
+    request: { task?: string; includeCurrentPlan: boolean },
+  ): Promise<void> {
+    if (!ctx.hasUI) {
+      throw new Error("Planning with multiple models requires TUI or RPC mode.");
+    }
+    if (!ctx.isIdle()) {
+      ctx.ui.notify("Wait for the current turn to finish before planning with multiple models.", "warning");
+      return;
+    }
+    if (!state.enabled && savedPlanBlocksNewWorkflow(ctx, state.savedPlan !== undefined)) return;
+    const lifecycle = captureMenuLifecycle();
+    const ui = await loadInteractiveUi();
+    if (!lifecycle.isCurrent()) return;
+
+    const transcript = buildPlannerTranscript(ctx.sessionManager.getBranch());
+    let task = request.task?.trim() ?? "";
+    if (!task && !transcript.trim()) {
+      task = (await ctx.ui.input("What should the planners plan?", ""))?.trim() ?? "";
+      if (!task || !lifecycle.isCurrent()) return;
+    }
+
+    const current: PlanCandidate | undefined =
+      request.includeCurrentPlan && state.enabled && state.latestPlan
+        ? {
+            id: candidateId(0),
+            label: `Current plan${state.latestPlanModel ? ` · ${state.latestPlanModel.provider}/${state.latestPlanModel.modelId}` : ""}`,
+            origin: "session",
+            ...(state.latestPlanModel ? { model: state.latestPlanModel } : {}),
+            status: "done",
+            plan: state.latestPlan,
+          }
+        : undefined;
+    const configured = configuredPlanners(settings);
+    const sessionModel: ModelSpec[] = ctx.model ? [{ provider: ctx.model.provider, modelId: ctx.model.id }] : [];
+    const preselected = (configured.length > 0 ? configured : sessionModel).filter(
+      (spec) => !(current?.model && sameModel(spec, current.model) && !spec.thinkingLevel),
+    );
+    const specs = await ui.choosePlanners(ctx, {
+      title: current ? "Compare with other models" : "Plan with multiple models",
+      lines: [
+        ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
+        ...(current ? ["The current plan joins the comparison as plan A."] : []),
+      ],
+      preselected,
+      ...lifecycle,
+    });
+    if (!specs?.length || !lifecycle.isCurrent()) return;
+
+    let runLifecycle = lifecycle;
+    if (!state.enabled) {
+      if (!enterPlanMode(ctx)) return;
+      ctx.ui.notify("Plan mode enabled. Planners explore read-only; nothing is modified.", "info");
+      // Entering Plan mode starts a new workflow generation; follow it rather than the menu's.
+      runLifecycle = captureMenuLifecycle();
+    }
+    if (task) {
+      pi.sendMessage(
+        {
+          customType: MULTI_TASK_MESSAGE_TYPE,
+          content: `Plan this task with several models:\n\n${task}`,
+          display: true,
+        },
+        { triggerTurn: false },
+      );
+    }
+
+    const prompt = formatPlannerPrompt(task, transcript, specs.length + (current ? 1 : 0));
+    const offset = current ? 1 : 0;
+    const timeoutMs = configuredPlannerTimeoutSeconds(settings) * 1000;
+    const candidates = await ui.runPlannersWithProgress(ctx, {
+      specs,
+      ...runLifecycle,
+      run: (signal, onProgress) =>
+        Promise.all(
+          specs.map((spec, index) =>
+            runPlanner({
+              id: candidateId(index + offset),
+              spec,
+              cwd: ctx.cwd,
+              prompt,
+              timeoutMs,
+              extensionPath: EXTENSION_ENTRY_PATH,
+              loadUserExtensions: settings.plannerLoadExtensions === true,
+              signal,
+              onProgress: (progress) => onProgress(index, progress),
+            }),
+          ),
+        ),
+    });
+    if (!runLifecycle.isCurrent()) return;
+    if (!candidates) {
+      ctx.ui.notify("Parallel planning cancelled.", "info");
+      return;
+    }
+    const set: CandidateSet = {
+      version: 1,
+      task: task || "Plan from the conversation",
+      createdAt: Date.now(),
+      candidates: [...(current ? [current] : []), ...candidates],
+    };
+    pi.appendEntry(CANDIDATES_ENTRY_TYPE, set);
+    await compareCandidates(ctx, set);
+  }
+
+  async function compareCandidates(ctx: ExtensionContext, set: CandidateSet) {
+    if (!ctx.hasUI) throw new Error("Comparing plans requires TUI or RPC mode.");
+    const usable = set.candidates.filter((candidate) => candidate.status === "done" && candidate.plan);
+    if (usable.length === 0) {
+      const reasons = set.candidates.map((candidate) => `${candidate.label}: ${candidate.error ?? candidate.status}`);
+      ctx.ui.notify(`No planner produced a plan. ${safeTerminalText(reasons.join("; ")).slice(0, 600)}`, "error");
+      return;
+    }
+    const lifecycle = captureMenuLifecycle();
+    const ui = await loadInteractiveUi();
+    if (!lifecycle.isCurrent()) return;
+    const outcome = await ui.showCandidateComparison(ctx, set, lifecycle);
+    if (!lifecycle.isCurrent()) return;
+    if (outcome.kind === "use") {
+      await useCandidatePlan(ctx, outcome.candidate);
+    } else if (outcome.kind === "synthesize") {
+      if (!state.enabled && !enterPlanMode(ctx)) return;
+      sendPlanModeUserMessage(formatSynthesisPrompt(outcome.candidates, outcome.guidance), ctx);
+    } else {
+      ctx.ui.notify("Candidate plans kept. Reopen them with /plan compare.", "info");
+    }
+  }
+
+  async function useCandidatePlan(ctx: ExtensionContext, candidate: PlanCandidate) {
+    if (!candidate.plan) return;
+    if (!state.enabled && !enterPlanMode(ctx)) return;
+    if (candidate.origin !== "session") {
+      pi.sendMessage(
+        { customType: SELECTED_PLAN_MESSAGE_TYPE, content: formatSelectedPlanMessage(candidate), display: true },
+        { triggerTurn: false },
+      );
+    }
+    acceptCompletedPlan(candidate.plan, PLAN_MODE_COMPLETE_TOOL_NAME, ctx, candidate.model);
+    await presentReadyPlanNow(ctx);
+  }
+
+  /** Show the ready menu immediately instead of waiting for agent_settled (no model turn ran). */
+  async function presentReadyPlanNow(ctx: ExtensionContext) {
+    readyPresentationIntent = undefined;
+    stagedFreshImplementation = undefined;
+    if (!(state.enabled && state.awaitingAction && state.latestPlan) || !ctx.hasUI) return;
+    try {
+      await planActions.showReady(latestCommandContext ?? ctx);
+      const request = stagedFreshImplementation;
+      stagedFreshImplementation = undefined;
+      if (request) armDeferredFreshImplementation(request);
+    } catch (error: unknown) {
+      stagedFreshImplementation = undefined;
+      if (!isStaleExtensionContextError(error)) throw error;
+    }
   }
 
   function completedPlanIsCurrent(intent: ReadyPresentationIntent) {

@@ -143,6 +143,8 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       const ui = await options.loadInteractiveUi();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
+      // Multi-model flows open their own UI, so they run after this menu closes.
+      let followUp: ((ctx: ExtensionContext) => void | Promise<void>) | undefined;
       const compare = options.compare;
       const planWithModels = options.planWithModels;
       await ui.showPlanModeMenu(ctx, {
@@ -155,19 +157,33 @@ export function createPlanActionController(options: PlanActionControllerOptions)
         show: () => options.show(ctx),
         finalize: () => options.finalize(ctx),
         implement: implementAction(ctx, lifecycle, "immediate"),
-        ...(compare ? { compare: () => compare(ctx) } : {}),
-        ...(planWithModels ? { planWithModels: () => planWithModels(ctx) } : {}),
+        ...(compare
+          ? {
+              compare: () => {
+                followUp = compare;
+              },
+            }
+          : {}),
+        ...(planWithModels
+          ? {
+              planWithModels: () => {
+                followUp = planWithModels;
+              },
+            }
+          : {}),
         exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
         save: () => options.save(ctx),
         stay: () => options.stay(ctx),
         exit: () => options.exitReady(ctx),
       });
+      if (followUp && lifecycle.isCurrent()) await followUp(ctx);
     },
     async showReady(ctx: ExtensionContext) {
       const lifecycle = options.captureLifecycle();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       const ui = await options.loadInteractiveUi();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
+      let compareRequested = false;
       const compare = options.compare;
       await ui.showReadyPlanMenu(ctx, {
         ...lifecycle,
@@ -175,12 +191,19 @@ export function createPlanActionController(options: PlanActionControllerOptions)
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),
         implement: implementAction(ctx, lifecycle, "after-settled"),
-        ...(compare ? { compare: () => compare(ctx) } : {}),
+        ...(compare
+          ? {
+              compare: () => {
+                compareRequested = true;
+              },
+            }
+          : {}),
         exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
         save: () => options.save(ctx),
         stay: () => undefined,
         exit: () => options.exitReady(ctx),
       });
+      if (compareRequested && compare && lifecycle.isCurrent()) await compare(ctx);
     },
   };
 }

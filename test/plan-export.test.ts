@@ -34,7 +34,20 @@ async function withTempDirectory(run: (directory: string) => Promise<void>) {
 test("plan export autocomplete exposes a path-taking public route", () => {
   assert.deepEqual(
     completePlanArguments("")?.map((item) => item.value),
-    ["start", "show", "finalize", "implement", "save", "settings", "export", "exit", "off", "tools"],
+    [
+      "start",
+      "show",
+      "finalize",
+      "multi",
+      "compare",
+      "implement",
+      "save",
+      "settings",
+      "export",
+      "exit",
+      "off",
+      "tools",
+    ],
   );
   assert.deepEqual(
     completePlanArguments("ex")?.map((item) => item.value),

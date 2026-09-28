@@ -151,7 +151,20 @@ test("plan_mode_complete result renders the plan as Markdown", () => {
 test("completePlanArguments suggests management tokens only", () => {
   assert.deepEqual(
     completePlanArguments("")?.map((item) => item.label),
-    ["start", "show", "finalize", "implement", "save", "settings", "export", "exit", "off", "tools"],
+    [
+      "start",
+      "show",
+      "finalize",
+      "multi",
+      "compare",
+      "implement",
+      "save",
+      "settings",
+      "export",
+      "exit",
+      "off",
+      "tools",
+    ],
   );
   assert.deepEqual(
     completePlanArguments("to")?.map((item) => item.value),

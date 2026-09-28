@@ -400,16 +400,16 @@ test("fresh-session cancellation and pre-shutdown success preserve the source ow
       getSessionFile: () => undefined,
     };
     const mock = createMockPi({ activeTools: ["read", "write"] });
-    let implementFresh: ((runtime: object, signal: AbortSignal) => Promise<void>) | undefined;
+    let implement: ((choice: { runtime: object; context: "clear" }, signal: AbortSignal) => Promise<void>) | undefined;
     planMode(mock.pi, {
       readSettings: async () => ({ kind: "missing" as const }),
       loadInteractiveUi: async () =>
         ({
           showPlanModeMenu: async (
             _ctx: unknown,
-            options: { implementFresh(runtime: object, signal: AbortSignal): Promise<void> },
+            options: { implement(choice: { runtime: object; context: "clear" }, signal: AbortSignal): Promise<void> },
           ) => {
-            implementFresh = options.implementFresh;
+            implement = options.implement;
           },
         }) as never,
     });
@@ -431,8 +431,8 @@ test("fresh-session cancellation and pre-shutdown success preserve the source ow
     ) => Promise<unknown>;
     await complete("call", { plan: "# Ready plan" }, undefined, undefined, context.ctx);
     await mock.commands.get("plan")?.handler("", context.ctx);
-    assert.ok(implementFresh);
-    await implementFresh({}, new AbortController().signal);
+    assert.ok(implement);
+    await implement({ runtime: {}, context: "clear" }, new AbortController().signal);
 
     const beforeShutdown = attempt(sessionManager);
     mock.eventBus.emit(WORKFLOW_MUTEX_CHANNEL, beforeShutdown);

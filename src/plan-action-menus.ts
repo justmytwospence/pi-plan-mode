@@ -3,7 +3,10 @@ import { defineMenu, runMenu, sanitizeTerminalText } from "@narumitw/pi-tui-kit"
 import {
   type AvailableImplementationModel,
   findAvailableImplementationModel,
+  type ImplementationContextChoice,
   type ImplementationModelOverride,
+  type ResolvedImplementationDefaults,
+  sameModel,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
 import { type PlanExportDestinationProvider, planExportInputScreen } from "./plan-export-screen.js";
@@ -15,10 +18,20 @@ interface MenuLifecycle {
   isCurrent(): boolean;
 }
 
-const IMPLEMENTATION_CONTEXT_LINES = [
-  "Implement here keeps this planning conversation.",
-  "Start fresh transfers only the approved plan to a new session.",
-] as const;
+export interface ImplementationChoice {
+  runtime: ImplementationRuntimeSelection;
+  context: ImplementationContextChoice;
+}
+
+/** Everything the implementation screen needs to preselect and explain its defaults. */
+export interface ImplementationMenuDefaults {
+  /** Model that authored the plan, when known. */
+  planModel?: ImplementationModelOverride;
+  planThinkingLevel: PlanModeFixedThinkingLevel | undefined;
+  resolved: ResolvedImplementationDefaults;
+}
+
+export type ImplementAction = (choice: ImplementationChoice, signal: AbortSignal) => void | Promise<void>;
 
 const THINKING_LEVEL_DESCRIPTIONS: Record<PlanModeFixedThinkingLevel, string> = {
   off: "No reasoning",
@@ -30,42 +43,44 @@ const THINKING_LEVEL_DESCRIPTIONS: Record<PlanModeFixedThinkingLevel, string> = 
   max: "Maximum reasoning",
 };
 
+const CONTEXT_LABELS: Record<ImplementationContextChoice, string> = {
+  keep: "Keep planning conversation",
+  clear: "Clear context (fresh session with only the plan)",
+};
+
 interface PlanMenuOptions extends MenuLifecycle {
   statusText: string;
-  planThinkingLevel: PlanModeFixedThinkingLevel | undefined;
-  implementationDefaults?: ImplementationRuntimeSelection;
+  implementation: ImplementationMenuDefaults;
   hasReadyPlan: boolean;
   implementationOutcome(): string;
   getExportDestination: PlanExportDestinationProvider;
   show(): void;
   finalize(): void;
-  implementHere(): void | Promise<void>;
-  implementFresh(runtime: ImplementationRuntimeSelection, signal: AbortSignal): void | Promise<void>;
+  implement: ImplementAction;
+  compare?(): void | Promise<void>;
+  planWithModels?(): void | Promise<void>;
   exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
   save(): void;
   stay(): void;
   exit(): void;
 }
 
+type ImplementationScreen = "implement" | "models" | "thinking" | "context";
+type ImplementationActionId = "start-implementation" | "select-model" | "select-thinking" | "select-context";
+
 export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuOptions) {
-  type Screen = "main" | "fresh" | "models" | "thinking" | "export";
+  type Screen = "main" | ImplementationScreen | "export";
   type Action =
     | "show"
     | "finalize"
-    | "implement-here"
-    | "select-model"
-    | "select-thinking"
-    | "start-fresh"
+    | "compare"
+    | "plan-with-models"
+    | ImplementationActionId
     | "export"
     | "save"
     | "stay"
     | "exit";
-  const freshFlow = createFreshImplementationFlow(
-    ctx,
-    options.planThinkingLevel,
-    options.implementationDefaults,
-    options.implementFresh,
-  );
+  const flow = createImplementationFlow(ctx, options.implementation, options.implement);
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
     start: "main",
     screens: {
@@ -74,23 +89,27 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
         title: "Plan mode",
         lines: [
           options.statusText,
-          ...(options.hasReadyPlan ? [...IMPLEMENTATION_CONTEXT_LINES, options.implementationOutcome()] : []),
+          ...(options.hasReadyPlan ? [flow.summaryLine(), options.implementationOutcome()] : []),
         ],
         items: options.hasReadyPlan
           ? [
               { id: "show", label: "Show latest proposed plan", action: "show" },
               {
-                id: "implement-here",
-                label: "Implement here",
-                description: "Continue in this session with the planning conversation.",
-                action: "implement-here",
+                id: "implement",
+                label: "Implement…",
+                description: "Choose the model, effort, and context, then start.",
+                to: "implement",
               },
-              {
-                id: "implement-fresh",
-                label: "Start fresh and implement",
-                description: "Configure one-shot model and thinking choices first.",
-                to: "fresh",
-              },
+              ...(options.compare
+                ? [
+                    {
+                      id: "compare",
+                      label: "Compare with other models…",
+                      description: "Plan the same task with other models in parallel, then pick or synthesize.",
+                      action: "compare" as const,
+                    },
+                  ]
+                : []),
               { id: "export", label: "Export plan…", to: "export" },
               { id: "save", label: "Save for later", action: "save" },
               { id: "stay", label: "Stay in Plan mode", action: "stay" },
@@ -98,14 +117,22 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
             ]
           : [
               { id: "finalize", label: "Request final plan", action: "finalize" },
+              ...(options.planWithModels
+                ? [
+                    {
+                      id: "plan-with-models",
+                      label: "Plan with multiple models…",
+                      description: "Run independent planners in parallel on this conversation.",
+                      action: "plan-with-models" as const,
+                    },
+                  ]
+                : []),
               { id: "stay", label: "Stay in Plan mode", action: "stay" },
               { id: "exit", label: "Exit Plan mode", action: "exit" },
             ],
         hint: "close",
       }),
-      fresh: freshFlow.settingsScreen,
-      models: freshFlow.modelScreen,
-      thinking: freshFlow.thinkingScreen,
+      ...flow.screens,
       export: () => planExportInputScreen(options.getExportDestination),
     },
     actions: {
@@ -117,22 +144,15 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
         options.finalize();
         return { kind: "close" };
       },
-      "implement-here": async () => {
-        await options.implementHere();
+      compare: async () => {
+        await options.compare?.();
         return { kind: "close" };
       },
-      "select-model": async ({ itemId }) => {
-        freshFlow.selectModel(itemId);
-        return { kind: "back" };
-      },
-      "select-thinking": async ({ itemId }) => {
-        freshFlow.selectThinking(itemId);
-        return { kind: "back" };
-      },
-      "start-fresh": async ({ signal }) => {
-        await freshFlow.start(signal);
+      "plan-with-models": async () => {
+        await options.planWithModels?.();
         return { kind: "close" };
       },
+      ...flow.actions,
       export: async ({ value, signal }) =>
         (await options.exportPlan(value ?? "", signal)) ? { kind: "close" } : { kind: "rejected" },
       save: async () => {
@@ -157,12 +177,11 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
 }
 
 interface ReadyPlanMenuOptions extends MenuLifecycle {
-  planThinkingLevel: PlanModeFixedThinkingLevel | undefined;
-  implementationDefaults?: ImplementationRuntimeSelection;
+  implementation: ImplementationMenuDefaults;
   implementationOutcome(): string;
   getExportDestination: PlanExportDestinationProvider;
-  implementHere(): void | Promise<void>;
-  implementFresh(runtime: ImplementationRuntimeSelection, signal: AbortSignal): void | Promise<void>;
+  implement: ImplementAction;
+  compare?(): void | Promise<void>;
   exportPlan(path: string, signal: AbortSignal): Promise<boolean>;
   save(): void;
   stay(): void;
@@ -170,42 +189,33 @@ interface ReadyPlanMenuOptions extends MenuLifecycle {
 }
 
 export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPlanMenuOptions) {
-  type Screen = "ready" | "fresh" | "models" | "thinking" | "export";
-  type Action =
-    | "implement-here"
-    | "select-model"
-    | "select-thinking"
-    | "start-fresh"
-    | "export"
-    | "save"
-    | "stay"
-    | "exit";
-  const freshFlow = createFreshImplementationFlow(
-    ctx,
-    options.planThinkingLevel,
-    options.implementationDefaults,
-    options.implementFresh,
-  );
+  type Screen = "ready" | ImplementationScreen | "export";
+  type Action = ImplementationActionId | "compare" | "export" | "save" | "stay" | "exit";
+  const flow = createImplementationFlow(ctx, options.implementation, options.implement);
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
     start: "ready",
     screens: {
       ready: () => ({
         kind: "actions",
         title: "Proposed plan ready. What next?",
-        lines: [...IMPLEMENTATION_CONTEXT_LINES, options.implementationOutcome()],
+        lines: [flow.summaryLine(), options.implementationOutcome()],
         items: [
           {
-            id: "implement-here",
-            label: "Implement here",
-            description: "Continue in this session with the planning conversation.",
-            action: "implement-here",
+            id: "implement",
+            label: "Implement…",
+            description: "Choose the model, effort, and context, then start.",
+            to: "implement",
           },
-          {
-            id: "implement-fresh",
-            label: "Start fresh and implement",
-            description: "Configure one-shot model and thinking choices first.",
-            to: "fresh",
-          },
+          ...(options.compare
+            ? [
+                {
+                  id: "compare",
+                  label: "Compare with other models…",
+                  description: "Plan the same task with other models in parallel, then pick or synthesize.",
+                  action: "compare" as const,
+                },
+              ]
+            : []),
           { id: "export", label: "Export plan…", to: "export" },
           { id: "save", label: "Save for later", action: "save" },
           { id: "stay", label: "Stay in Plan mode", action: "stay" },
@@ -213,26 +223,13 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
         ],
         hint: "close",
       }),
-      fresh: freshFlow.settingsScreen,
-      models: freshFlow.modelScreen,
-      thinking: freshFlow.thinkingScreen,
+      ...flow.screens,
       export: () => planExportInputScreen(options.getExportDestination),
     },
     actions: {
-      "implement-here": async () => {
-        await options.implementHere();
-        return { kind: "close" };
-      },
-      "select-model": async ({ itemId }) => {
-        freshFlow.selectModel(itemId);
-        return { kind: "back" };
-      },
-      "select-thinking": async ({ itemId }) => {
-        freshFlow.selectThinking(itemId);
-        return { kind: "back" };
-      },
-      "start-fresh": async ({ signal }) => {
-        await freshFlow.start(signal);
+      ...flow.actions,
+      compare: async () => {
+        await options.compare?.();
         return { kind: "close" };
       },
       export: async ({ value, signal }) =>
@@ -266,94 +263,123 @@ interface ModelChoice {
   summary: string;
   details?: readonly string[];
   searchText: string;
-  isPlanModel: boolean;
+  isSessionModel: boolean;
 }
 
-function createFreshImplementationFlow(
+/**
+ * The shared "Implement" screens: start, model, thinking level, and context. Defaults come from
+ * the plan-model map, then the configured default model, then the current session model.
+ */
+export function createImplementationFlow(
   ctx: ExtensionContext,
-  planThinkingLevel: PlanModeFixedThinkingLevel | undefined,
-  implementationDefaults: ImplementationRuntimeSelection | undefined,
-  implementFresh: (runtime: ImplementationRuntimeSelection, signal: AbortSignal) => void | Promise<void>,
+  defaults: ImplementationMenuDefaults,
+  implement: ImplementAction,
 ) {
   const models = snapshotAvailableModels(ctx);
-  const planModel = ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
-  const planModelSummary = ctx.model
+  const sessionModel = ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
+  const sessionModelSummary = ctx.model
     ? `${safeModelMetadata(ctx.model.id, "unknown model")} [${safeModelMetadata(ctx.model.provider, "unknown provider")}]`
     : undefined;
-  const configuredModel = implementationDefaults?.model;
-  const configuredAvailableModel = findAvailableImplementationModel(
-    models.map((choice) => choice.modelInfo),
-    configuredModel,
-  );
-  let unavailableDefaultActive = configuredModel !== undefined && !configuredAvailableModel;
-  let selectedModel = configuredAvailableModel
-    ? models.find((choice) => choice.modelInfo === configuredAvailableModel)
+  const resolved = defaults.resolved;
+  const defaultModelChoice = resolved.model
+    ? models.find((choice) => sameModel(choice.model, resolved.model))
     : undefined;
+  let selectedModel: ModelChoice | undefined = defaultModelChoice?.isSessionModel ? undefined : defaultModelChoice;
   let selectedModelUsesDefault = selectedModel !== undefined;
-  let selectedThinkingLevel = implementationDefaults?.thinkingLevel;
-  return {
-    settingsScreen: () => ({
+  let selectedThinkingLevel: PlanModeFixedThinkingLevel | undefined = resolved.thinkingLevel;
+  let selectedContext: ImplementationContextChoice = resolved.context;
+  const planThinkingLevel = defaults.planThinkingLevel;
+
+  const sessionModelLabel = sessionModelSummary ? `${sessionModelSummary} · current model` : "Current model";
+  const modelDescription = () => {
+    const summary = selectedModel?.summary ?? sessionModelLabel;
+    return selectedModelUsesDefault && resolved.modelSource === "map"
+      ? `${summary} · from model map`
+      : selectedModelUsesDefault && resolved.modelSource === "default"
+        ? `${summary} · default`
+        : selectedModelUsesDefault && resolved.modelSource === "plan"
+          ? `${summary} · planning model`
+          : summary;
+  };
+  const summaryLine = () => {
+    const planned = defaults.planModel ? `Planned with ${safeModelReference(defaults.planModel)}.` : "";
+    const effort = selectedThinkingLevel ?? planThinkingLevel;
+    return [
+      planned,
+      `Implementation default: ${modelDescription()}${effort ? `, effort ${effort}` : ""}; ${CONTEXT_LABELS[selectedContext].toLowerCase()}.`,
+    ]
+      .filter(Boolean)
+      .join(" ");
+  };
+
+  const screens = {
+    implement: () => ({
       kind: "actions" as const,
-      title: "Fresh implementation settings",
+      title: "Implement plan",
       lines: [
-        "These choices apply once to the new implementation session.",
-        ...(unavailableDefaultActive && configuredModel
-          ? [`Configured default ${safeModelReference(configuredModel)} is unavailable; using same as plan.`]
-          : []),
+        ...(defaults.planModel ? [`Planned with ${safeModelReference(defaults.planModel)}.`] : []),
+        ...resolved.unavailable.map(
+          (model) => `Configured implementation model ${safeModelReference(model)} is unavailable; skipped.`,
+        ),
       ],
       items: [
         {
-          id: "start-fresh",
-          label: "Start fresh implementation",
-          description: "Create the linked session and begin implementation.",
-          action: "start-fresh" as const,
-          busyLabel: "Starting fresh implementation session…",
+          id: "start-implementation",
+          label: selectedContext === "clear" ? "Start implementation in a fresh session" : "Start implementation here",
+          description:
+            selectedContext === "clear"
+              ? "Create a linked session that receives only the approved plan."
+              : "Continue in this session with the planning conversation.",
+          action: "start-implementation" as const,
+          busyLabel: "Starting implementation…",
         },
         {
           id: "implementation-model",
           label: "Model",
-          description:
-            selectedModel?.summary ?? (planModelSummary ? `${planModelSummary} · same as plan` : "Same as plan"),
+          description: modelDescription(),
           to: "models" as const,
         },
         {
           id: "implementation-thinking",
-          label: "Thinking level",
+          label: "Effort",
           description:
             selectedThinkingLevel ?? (planThinkingLevel ? `${planThinkingLevel} · same as plan` : "Same as plan"),
           to: "thinking" as const,
         },
+        {
+          id: "implementation-context",
+          label: "Context",
+          description: CONTEXT_LABELS[selectedContext],
+          to: "context" as const,
+        },
       ],
     }),
-    modelScreen: () => ({
+    models: () => ({
       kind: "choice" as const,
       title: "Implementation model",
       items: [
         {
-          id: "same-as-plan",
-          label: "Same as plan",
-          ...(planModelSummary ? { description: planModelSummary } : {}),
+          id: "session-model",
+          label: "Current model",
+          ...(sessionModelSummary ? { description: sessionModelSummary } : {}),
         },
         ...models.map((choice) => ({
           id: choice.itemId,
-          label: choice.label,
+          label: `${choice.label}${defaultModelChoice === choice && resolved.modelSource === "map" ? " · mapped default" : ""}`,
           details: choice.details,
           searchText: choice.searchText,
         })),
       ],
       action: "select-model" as const,
-      initialItemId: selectedModel?.itemId ?? "same-as-plan",
+      initialItemId: selectedModel?.itemId ?? "session-model",
       enableSearch: true,
       viewportSize: 10,
     }),
-    thinkingScreen: () => ({
+    thinking: () => ({
       kind: "choice" as const,
-      title: "Implementation thinking level",
+      title: "Implementation effort (thinking level)",
       items: [
-        {
-          id: "same-as-plan",
-          label: "Same as plan",
-        },
+        { id: "same-as-plan", label: "Same as plan" },
         ...IMPLEMENTATION_THINKING_LEVELS.map((level) => ({
           id: level,
           label: `${level === planThinkingLevel ? "✓ " : ""}${level}`,
@@ -364,40 +390,75 @@ function createFreshImplementationFlow(
       initialItemId: selectedThinkingLevel ?? "same-as-plan",
       viewportSize: IMPLEMENTATION_THINKING_LEVELS.length + 1,
     }),
-    selectModel(itemId: string) {
-      const choice = models.find((candidate) => candidate.itemId === itemId);
-      selectedModel = itemId === "same-as-plan" || choice?.isPlanModel ? undefined : choice;
-      selectedModelUsesDefault = false;
-      unavailableDefaultActive = false;
-    },
-    selectThinking(itemId: string) {
-      selectedThinkingLevel = IMPLEMENTATION_THINKING_LEVELS.find((level) => level === itemId);
-    },
-    start(signal: AbortSignal) {
-      if (
-        selectedModelUsesDefault &&
-        selectedModel &&
-        !findAvailableImplementationModel(snapshotAvailableImplementationModels(ctx), selectedModel.model)
-      ) {
-        selectedModel = undefined;
-        selectedModelUsesDefault = false;
-        unavailableDefaultActive = true;
-        ctx.ui.notify(
-          `Configured default ${safeModelReference(configuredModel)} is unavailable; using same as plan.`,
-          "warning",
-        );
-      }
-      const model = selectedModel?.model ?? planModel;
-      const thinkingLevel = selectedThinkingLevel ?? planThinkingLevel;
-      return implementFresh(
+    context: () => ({
+      kind: "choice" as const,
+      title: "Implementation context",
+      items: [
         {
+          id: "keep",
+          label: CONTEXT_LABELS.keep,
+          description: "The implementer sees the whole planning conversation and tool results.",
+        },
+        {
+          id: "clear",
+          label: CONTEXT_LABELS.clear,
+          description: "A new linked session starts with only the approved plan.",
+        },
+      ],
+      action: "select-context" as const,
+      initialItemId: selectedContext,
+    }),
+  };
+
+  const start = (signal: AbortSignal) => {
+    if (
+      selectedModelUsesDefault &&
+      selectedModel &&
+      !findAvailableImplementationModel(snapshotAvailableImplementationModels(ctx), selectedModel.model)
+    ) {
+      ctx.ui.notify(
+        `Implementation model ${safeModelReference(selectedModel.model)} is no longer available; using the current model.`,
+        "warning",
+      );
+      selectedModel = undefined;
+      selectedModelUsesDefault = false;
+    }
+    const model = selectedModel?.model ?? (selectedContext === "clear" ? sessionModel : undefined);
+    const thinkingLevel = selectedThinkingLevel ?? (selectedContext === "clear" ? planThinkingLevel : undefined);
+    return implement(
+      {
+        runtime: {
           ...(model ? { model: { ...model } } : {}),
           ...(thinkingLevel ? { thinkingLevel } : {}),
         },
-        signal,
-      );
+        context: selectedContext,
+      },
+      signal,
+    );
+  };
+
+  const actions = {
+    "start-implementation": async ({ signal }: { signal: AbortSignal }) => {
+      await start(signal);
+      return { kind: "close" as const };
+    },
+    "select-model": async ({ itemId }: { itemId?: string }) => {
+      const choice = models.find((candidate) => candidate.itemId === itemId);
+      selectedModel = itemId === "session-model" || choice?.isSessionModel ? undefined : choice;
+      selectedModelUsesDefault = false;
+      return { kind: "back" as const };
+    },
+    "select-thinking": async ({ itemId }: { itemId?: string }) => {
+      selectedThinkingLevel = IMPLEMENTATION_THINKING_LEVELS.find((level) => level === itemId);
+      return { kind: "back" as const };
+    },
+    "select-context": async ({ itemId }: { itemId?: string }) => {
+      if (itemId === "keep" || itemId === "clear") selectedContext = itemId;
+      return { kind: "back" as const };
     },
   };
+
+  return { screens, actions, start, summaryLine };
 }
 
 function snapshotAvailableModels(ctx: ExtensionContext): ModelChoice[] {
@@ -406,23 +467,23 @@ function snapshotAvailableModels(ctx: ExtensionContext): ModelChoice[] {
       const provider = safeModelMetadata(model.provider, "unknown provider");
       const modelId = safeModelMetadata(model.id, "unknown model");
       const name = safeModelMetadata(model.name, "");
-      const isPlanModel = ctx.model?.provider === model.provider && ctx.model.id === model.id;
+      const isSessionModel = ctx.model?.provider === model.provider && ctx.model.id === model.id;
       const summary = `${modelId} [${provider}]`;
       return {
         itemId: `model-${index}`,
         model: { provider: model.provider, modelId: model.id },
         modelInfo: model,
-        label: `${isPlanModel ? "✓ " : ""}${summary}${isPlanModel ? " · default" : ""}`,
+        label: `${isSessionModel ? "✓ " : ""}${summary}${isSessionModel ? " · current" : ""}`,
         summary,
         ...(name ? { details: [`Model Name: ${name}`] } : {}),
         searchText: [provider, modelId, name].filter(Boolean).join(" "),
-        isPlanModel,
+        isSessionModel,
       };
     })
-    .sort((left, right) => Number(right.isPlanModel) - Number(left.isPlanModel));
+    .sort((left, right) => Number(right.isSessionModel) - Number(left.isSessionModel));
 }
 
-function safeModelReference(model: ImplementationModelOverride | undefined) {
+export function safeModelReference(model: ImplementationModelOverride | undefined) {
   if (!model) return "configured model";
   return `${safeModelMetadata(model.modelId, "unknown model")} [${safeModelMetadata(model.provider, "unknown provider")}]`;
 }

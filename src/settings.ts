@@ -1,10 +1,18 @@
 import { randomUUID } from "node:crypto";
 import { constants } from "node:fs";
-import { mkdir, open, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
-import { type ImplementationModelOverride, isPendingImplementationModelIdentifier } from "./implementation-models.js";
+import {
+  formatModelSpec,
+  IMPLEMENTATION_CONTEXT_CHOICES,
+  type ImplementationContextChoice,
+  type ImplementationModelOverride,
+  isPendingImplementationModelIdentifier,
+  type ModelSpec,
+  parseModelSpec,
+} from "./implementation-models.js";
 import type { SafeSubcommands } from "./tool-policy.js";
 
 export const PLAN_MODE_SETTINGS_FILE = "pi-plan-mode.json";
@@ -78,6 +86,9 @@ const BASE_KEYS = new Set([
   ...Array.from({ length: 12 }, (_unused, index) => `f${index + 1}`),
 ]);
 const MAX_PLAN_EXPORT_PATH_LENGTH = 4096;
+export const DEFAULT_PLANNER_TIMEOUT_SECONDS = 900;
+const MAX_PLANNER_TIMEOUT_SECONDS = 4 * 60 * 60;
+const MAX_PLANNERS = 8;
 
 export type PlanModeThinkingLevel = (typeof PLAN_MODE_THINKING_LEVELS)[number];
 export type ImplementationPlanRetention = (typeof IMPLEMENTATION_PLAN_RETENTIONS)[number];
@@ -91,6 +102,17 @@ export interface PlanModeSettings {
   defaultPlanExportPath?: string;
   safeSubcommands?: SafeSubcommands;
   toggleShortcut?: KeyId;
+  /** Planning model (`provider/modelId`) to the default implementation model for its plans. */
+  implementationModelMap?: Record<string, ModelSpec>;
+  /** Whether implementation keeps the planning conversation or starts a fresh session. */
+  defaultImplementationContext?: ImplementationContextChoice;
+  /** Models preselected for `/plan multi`. */
+  planners?: ModelSpec[];
+  plannerTimeoutSeconds?: number;
+  /** Load the user's extensions in planner subprocesses (needed for extension-provided models). */
+  plannerLoadExtensions?: boolean;
+  /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
+  planCompleteCommand?: string[];
 }
 export interface PlanModeSettingsPatch {
   thinkingLevel?: PlanModeThinkingLevel;
@@ -100,6 +122,9 @@ export interface PlanModeSettingsPatch {
   defaultImplementationThinkingLevel?: PlanModeFixedThinkingLevel | null;
   defaultPlanExportPath?: string | null;
   toggleShortcut?: KeyId | null;
+  implementationModelMap?: Readonly<Record<string, ModelSpec>> | null;
+  defaultImplementationContext?: ImplementationContextChoice | null;
+  planners?: readonly ModelSpec[] | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -176,7 +201,78 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (!safeSubcommands) return undefined;
     settings.safeSubcommands = safeSubcommands;
   }
+  if (Object.hasOwn(value, "implementationModelMap")) {
+    const implementationModelMap = normalizeImplementationModelMap(Reflect.get(value, "implementationModelMap"));
+    if (!implementationModelMap) return undefined;
+    settings.implementationModelMap = implementationModelMap;
+  }
+  if (Object.hasOwn(value, "defaultImplementationContext")) {
+    const context = Reflect.get(value, "defaultImplementationContext");
+    if (!IMPLEMENTATION_CONTEXT_CHOICES.includes(context as ImplementationContextChoice)) return undefined;
+    settings.defaultImplementationContext = context as ImplementationContextChoice;
+  }
+  if (Object.hasOwn(value, "planners")) {
+    const planners = normalizePlanners(Reflect.get(value, "planners"));
+    if (!planners) return undefined;
+    settings.planners = planners;
+  }
+  if (Object.hasOwn(value, "plannerTimeoutSeconds")) {
+    const timeout = Reflect.get(value, "plannerTimeoutSeconds");
+    if (!Number.isInteger(timeout) || (timeout as number) < 1 || (timeout as number) > MAX_PLANNER_TIMEOUT_SECONDS) {
+      return undefined;
+    }
+    settings.plannerTimeoutSeconds = timeout as number;
+  }
+  if (Object.hasOwn(value, "plannerLoadExtensions")) {
+    const load = Reflect.get(value, "plannerLoadExtensions");
+    if (typeof load !== "boolean") return undefined;
+    settings.plannerLoadExtensions = load;
+  }
+  if (Object.hasOwn(value, "planCompleteCommand")) {
+    const command = normalizeCommand(Reflect.get(value, "planCompleteCommand"));
+    if (!command) return undefined;
+    settings.planCompleteCommand = command;
+  }
   return settings;
+}
+
+function normalizeImplementationModelMap(value: unknown): Record<string, ModelSpec> | undefined {
+  if (!isSettingsDocument(value)) return undefined;
+  const entries: [string, ModelSpec][] = [];
+  for (const [key, target] of Object.entries(value)) {
+    const source = parseModelSpec(key);
+    const spec = parseModelSpec(target);
+    if (!source || source.thinkingLevel || !spec) return undefined;
+    entries.push([`${source.provider}/${source.modelId}`, spec]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function normalizePlanners(value: unknown): ModelSpec[] | undefined {
+  if (!Array.isArray(value) || value.length > MAX_PLANNERS) return undefined;
+  const planners: ModelSpec[] = [];
+  for (const item of value) {
+    const spec = parseModelSpec(item);
+    if (!spec) return undefined;
+    if (planners.some((existing) => formatModelSpec(existing) === formatModelSpec(spec))) continue;
+    planners.push(spec);
+  }
+  return planners;
+}
+
+function normalizeCommand(value: unknown): string[] | undefined {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    !value.every((item): item is string => typeof item === "string" && item.length > 0 && item.length <= 4096)
+  ) {
+    return undefined;
+  }
+  return [...value];
+}
+
+export function serializeImplementationModelMap(map: Readonly<Record<string, ModelSpec>>) {
+  return Object.fromEntries(Object.entries(map).map(([key, spec]) => [key, formatModelSpec(spec)]));
 }
 
 function normalizeImplementationModel(value: unknown): ImplementationModelOverride | undefined {
@@ -326,6 +422,22 @@ export function updatePlanModeSettings(
     else if (patch.toggleShortcut !== undefined) {
       updated.toggleShortcut = patch.toggleShortcut;
     }
+    if (
+      patch.implementationModelMap === null ||
+      (patch.implementationModelMap && !Object.keys(patch.implementationModelMap).length)
+    ) {
+      delete updated.implementationModelMap;
+    } else if (patch.implementationModelMap !== undefined) {
+      updated.implementationModelMap = serializeImplementationModelMap(patch.implementationModelMap);
+    }
+    if (patch.defaultImplementationContext === null) delete updated.defaultImplementationContext;
+    else if (patch.defaultImplementationContext !== undefined) {
+      updated.defaultImplementationContext = patch.defaultImplementationContext;
+    }
+    if (patch.planners === null || (patch.planners && patch.planners.length === 0)) delete updated.planners;
+    else if (patch.planners !== undefined) {
+      updated.planners = patch.planners.map(formatModelSpec);
+    }
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);
@@ -396,8 +508,17 @@ async function readSettingsSnapshot(settingsPath: string): Promise<SettingsSnaps
 }
 
 async function readSettingsContents(settingsPath: string): Promise<string> {
-  const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0) | (constants.O_NOFOLLOW ?? 0);
-  const handle = await open(settingsPath, flags);
+  // Follow symlinks so a settings file managed by a dotfiles tool such as GNU stow keeps working.
+  const flags = constants.O_RDONLY | (constants.O_NONBLOCK ?? 0);
+  let handle: Awaited<ReturnType<typeof open>>;
+  try {
+    handle = await open(settingsPath, flags);
+  } catch (error: unknown) {
+    if (isNodeError(error) && error.code === "ENOENT" && (await isSymlink(settingsPath))) {
+      throw new Error("settings path is a symlink whose target is missing, not a regular file");
+    }
+    throw error;
+  }
   try {
     const stats = await handle.stat();
     if (!stats.isFile()) throw new Error("settings path is not a regular file");
@@ -435,10 +556,12 @@ async function publishSettings(
   if (Buffer.byteLength(contents, "utf8") > MAX_SETTINGS_BYTES) {
     throw new Error(`settings document exceeds ${MAX_SETTINGS_BYTES} bytes`);
   }
-  const directory = dirname(settingsPath);
+  // Replace the symlink target rather than the link so stow-managed settings stay linked.
+  const targetPath = await resolveWriteTarget(settingsPath);
+  const directory = dirname(targetPath);
   await mkdir(directory, { recursive: true });
   signal?.throwIfAborted();
-  const temporaryPath = join(directory, `.${basename(settingsPath)}.${process.pid}.${randomUUID()}.tmp`);
+  const temporaryPath = join(directory, `.${basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`);
   try {
     await writeFile(temporaryPath, contents, {
       encoding: "utf8",
@@ -448,9 +571,29 @@ async function publishSettings(
     });
     await beforeRename?.(temporaryPath, settingsPath);
     signal?.throwIfAborted();
-    await rename(temporaryPath, settingsPath);
+    await rename(temporaryPath, targetPath);
   } finally {
     await rm(temporaryPath, { force: true }).catch(() => undefined);
+  }
+}
+
+async function resolveWriteTarget(settingsPath: string) {
+  try {
+    return await realpath(settingsPath);
+  } catch (error: unknown) {
+    if (!(isNodeError(error) && error.code === "ENOENT")) throw error;
+    if (await isSymlink(settingsPath)) {
+      throw new Error("settings path is a symlink whose target is missing; refusing to replace it");
+    }
+    return settingsPath;
+  }
+}
+
+async function isSymlink(path: string) {
+  try {
+    return (await lstat(path)).isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -497,6 +640,22 @@ export function configuredImplementationThinkingLevel(
   settings: PlanModeSettings,
 ): PlanModeFixedThinkingLevel | undefined {
   return settings.defaultImplementationThinkingLevel;
+}
+
+export function configuredImplementationModelMap(settings: PlanModeSettings): Record<string, ModelSpec> {
+  return settings.implementationModelMap ?? {};
+}
+
+export function configuredImplementationContext(settings: PlanModeSettings): ImplementationContextChoice {
+  return settings.defaultImplementationContext ?? "keep";
+}
+
+export function configuredPlanners(settings: PlanModeSettings): ModelSpec[] {
+  return settings.planners ?? [];
+}
+
+export function configuredPlannerTimeoutSeconds(settings: PlanModeSettings) {
+  return settings.plannerTimeoutSeconds ?? DEFAULT_PLANNER_TIMEOUT_SECONDS;
 }
 
 export function configuredPlanExportPath(settings: PlanModeSettings) {

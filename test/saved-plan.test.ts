@@ -166,18 +166,10 @@ test("automatic and manual ready menus expose Save for later", async () => {
         assert.deepEqual(
           options.filter((option) => option !== "Close"),
           automatic
-            ? [
-                "Implement here",
-                "Start fresh and implement",
-                "Export plan…",
-                "Save for later",
-                "Stay in Plan mode",
-                "Discard plan and exit",
-              ]
+            ? ["Implement…", "Export plan…", "Save for later", "Stay in Plan mode", "Discard plan and exit"]
             : [
                 "Show latest proposed plan",
-                "Implement here",
-                "Start fresh and implement",
+                "Implement…",
                 "Export plan…",
                 "Save for later",
                 "Stay in Plan mode",
@@ -220,19 +212,13 @@ test("saved Plan management can show, implement, clear, or cancel", async () => 
         getEntries: () => [savedEntry],
       },
       select: async (title: string, options: string[]) => {
+        if (title.startsWith("Implement plan")) return "Start implementation here";
         assert.match(title, /Plan reinjection: Off; use conversation history only/i);
         assert.deepEqual(
           options.filter((option) => option !== "Close"),
-          [
-            "Show saved plan",
-            "Implement here",
-            "Start fresh and implement",
-            "Export plan…",
-            "Settings",
-            "Clear saved plan",
-          ],
+          ["Show saved plan", "Implement…", "Export plan…", "Settings", "Clear saved plan"],
         );
-        return scenario.selection;
+        return scenario.selection === "Implement here" ? "Implement…" : scenario.selection;
       },
     });
     await mock.events.get("session_start")?.[0]?.({}, context.ctx);

@@ -9,7 +9,7 @@ import {
 } from "../src/fresh-implementation.js";
 import { showReadyPlanMenu } from "../src/plan-action-menus.js";
 import planMode from "../src/plan-mode.js";
-import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
+import { createCustomSelectorHarness, createMockContext, createMockPi, selectFreshImplementation } from "./support.js";
 
 const PLAN = `# Fresh implementation plan
 
@@ -34,16 +34,11 @@ async function completePlan(mock: ReturnType<typeof createMockPi>, ctx: unknown)
   await complete("complete", { plan: PLAN }, undefined, undefined, ctx);
 }
 
-const IMPLEMENTATION_CHOICES = ["Implement here", "Start fresh and implement"];
 const MISSING_SETTINGS = { readSettings: async () => ({ kind: "missing" as const }) };
 
 function assertImplementationChoiceCopy(title: string, options: string[]) {
-  assert.match(title, /Implement here keeps this planning conversation/i);
-  assert.match(title, /Start fresh transfers only the approved plan/i);
-  assert.deepEqual(
-    options.filter((option) => IMPLEMENTATION_CHOICES.includes(option)),
-    IMPLEMENTATION_CHOICES,
-  );
+  assert.match(title, /Implementation default: .*keep planning conversation/i);
+  assert.ok(options.includes("Implement…"));
   assert.ok(options.length <= 8, "seven actions plus the Pi TUI Kit Close route");
 }
 
@@ -85,10 +80,9 @@ test("ready choice descriptions stay bounded and cancellation has no side effect
           const lines = harness.render(width);
           assert.ok(lines.every((line) => visibleWidth(line) <= width));
         }
-        assert.match(harness.render().join("\n"), /Continue in this session/i);
+        assert.match(harness.render().join("\n"), /Choose the model, effort, and context/i);
         harness.handleInput("tui.select.down");
-        assert.match(harness.render(40).join("\n"), /Open a new linked session/i);
-        assert.match(harness.render(24).join("\n"), /Start fresh and implement/i);
+        assert.match(harness.render(24).join("\n"), /Export plan/i);
         harness.handleInput(cancel);
         return harness.resultPromise;
       },
@@ -96,13 +90,13 @@ test("ready choice descriptions stay bounded and cancellation has no side effect
     await showReadyPlanMenu(context.ctx, {
       signal: owner.signal,
       isCurrent: () => !owner.signal.aborted,
-      planThinkingLevel: undefined,
+      implementation: {
+        planThinkingLevel: undefined,
+        resolved: { context: "keep", modelSource: "plan", unavailable: [] },
+      },
       implementationOutcome: () => "Plan reinjection: Until /plan exit\u001b]8;;unsafe\u0007.",
       getExportDestination: () => ({ configuredPath: "PLAN.md", resolvedPath: "/tmp/PLAN.md" }),
-      implementHere: () => {
-        actionCalls += 1;
-      },
-      implementFresh: () => {
+      implement: () => {
         actionCalls += 1;
       },
       exportPlan: async () => {
@@ -192,11 +186,7 @@ test("fresh implementation creates a linked destination and hands off only throu
       getBranch: () => [],
       getEntries: () => [],
     },
-    select: async (_title: string, options: string[]) => {
-      if (options.includes("Start fresh and implement")) return "Start fresh and implement";
-      if (options.includes("Start fresh implementation")) return "Start fresh implementation";
-      return undefined;
-    },
+    select: async (_title: string, options: string[]) => selectFreshImplementation(options),
     newSession: async (options: {
       parentSession?: string;
       setup?: (sessionManager: FreshSetupManager) => Promise<void>;
@@ -306,7 +296,7 @@ test("saved plans can start fresh without consuming the source session state", a
       getBranch: () => [savedEntry],
       getEntries: () => [savedEntry],
     },
-    select: async () => "Start fresh and implement",
+    select: async (_title: string, options: string[]) => selectFreshImplementation(options),
     newSession: async (options: {
       setup?: (sessionManager: FreshSetupManager) => Promise<void>;
       withSession?: (ctx: unknown) => Promise<void>;
@@ -383,11 +373,7 @@ test("fresh menu work stops after source session shutdown while waiting for idle
     hasUI: true,
     model: { provider: "test-provider", id: "test-model" },
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
-    select: async (_title: string, options: string[]) => {
-      if (options.includes("Start fresh and implement")) return "Start fresh and implement";
-      if (options.includes("Start fresh implementation")) return "Start fresh implementation";
-      return undefined;
-    },
+    select: async (_title: string, options: string[]) => selectFreshImplementation(options),
     waitForIdle: async () => {
       markWaiting();
       await idleGate;
@@ -423,15 +409,7 @@ test("automatic fresh handoff is cancelled before its deferred turn becomes stal
         hasUI: true,
         model: { provider: "test-provider", id: "test-model" },
         modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
-        select: async (_title: string, options: string[]) => {
-          if (options.includes("Start fresh and implement")) {
-            return "Start fresh and implement";
-          }
-          if (options.includes("Start fresh implementation")) {
-            return "Start fresh implementation";
-          }
-          return undefined;
-        },
+        select: async (_title: string, options: string[]) => selectFreshImplementation(options),
         newSession: async () => {
           newSessionCalls += 1;
           return { cancelled: false };
@@ -483,13 +461,7 @@ test("running automatic fresh preflight stops after source shutdown", async () =
       hasUI: true,
       model: { provider: "test-provider", id: "test-model" },
       modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
-      select: async (_title: string, options: string[]) => {
-        if (options.includes("Start fresh and implement")) return "Start fresh and implement";
-        if (options.includes("Start fresh implementation")) {
-          return "Start fresh implementation";
-        }
-        return undefined;
-      },
+      select: async (_title: string, options: string[]) => selectFreshImplementation(options),
       waitForIdle: async () => {
         markWaiting();
         await idleGate;
@@ -526,13 +498,7 @@ test("unexpected deferred fresh failures are reported without terminal controls"
       hasUI: true,
       model: { provider: "test-provider", id: "test-model" },
       modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true as const }) },
-      select: async (_title: string, options: string[]) => {
-        if (options.includes("Start fresh and implement")) return "Start fresh and implement";
-        if (options.includes("Start fresh implementation")) {
-          return "Start fresh implementation";
-        }
-        return undefined;
-      },
+      select: async (_title: string, options: string[]) => selectFreshImplementation(options),
       waitForIdle: async () => {
         throw new Error(`deferred \u001b[31mfailure ${"x".repeat(1_000)}`);
       },

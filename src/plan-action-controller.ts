@@ -1,8 +1,15 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { findAvailableImplementationModel, snapshotAvailableImplementationModels } from "./implementation-models.js";
+import {
+  type ImplementationModelOverride,
+  resolveImplementationDefaults,
+  snapshotAvailableImplementationModels,
+} from "./implementation-models.js";
+import type { ImplementationChoice, ImplementationMenuDefaults } from "./plan-action-menus.js";
 import type { PlanExportDestination } from "./plan-export.js";
 import {
+  configuredImplementationContext,
   configuredImplementationModel,
+  configuredImplementationModelMap,
   configuredImplementationThinkingLevel,
   type PlanModeFixedThinkingLevel,
   type PlanModeSettings,
@@ -29,13 +36,17 @@ interface PlanActionControllerOptions {
   getExportDestination(ctx: ExtensionContext): PlanExportDestination;
   show(ctx: ExtensionContext): void;
   finalize(ctx: ExtensionContext): void;
-  implementHere(ctx: ExtensionContext): void | Promise<void>;
+  implementHere(ctx: ExtensionContext, runtime?: ImplementationRuntimeSelection): void | Promise<void>;
   implementFresh(
     ctx: ExtensionContext,
     isCurrent: () => boolean,
     runtime: ImplementationRuntimeSelection | undefined,
     timing: FreshImplementationTiming,
   ): void | Promise<void>;
+  /** Plan the same task with other models and compare against the ready plan. */
+  compare?(ctx: ExtensionContext): void | Promise<void>;
+  /** Plan the current conversation with several models before any plan is ready. */
+  planWithModels?(ctx: ExtensionContext): void | Promise<void>;
   exportPlan(ctx: ExtensionContext, path: string, signal: AbortSignal, isCurrent: () => boolean): Promise<boolean>;
   settings(ctx: ExtensionContext, signal: AbortSignal, isCurrent: () => boolean): Promise<boolean>;
   save(ctx: ExtensionContext): void;
@@ -44,46 +55,66 @@ interface PlanActionControllerOptions {
   clearSaved(ctx: ExtensionContext): void;
 }
 
+function sessionModel(ctx: ExtensionContext): ImplementationModelOverride | undefined {
+  return ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
+}
+
 export function createPlanActionController(options: PlanActionControllerOptions) {
-  const configuredDefaults = (): ImplementationRuntimeSelection => {
+  const implementationDefaults = (ctx: ExtensionContext): ImplementationMenuDefaults => {
+    const state = options.getState();
     const settings = options.getSettings();
-    const model = configuredImplementationModel(settings);
-    const thinkingLevel = configuredImplementationThinkingLevel(settings);
+    const current = sessionModel(ctx);
+    const planModel = (state.enabled ? state.latestPlanModel : state.savedPlan?.model) ?? current;
     return {
-      ...(model ? { model: { ...model } } : {}),
-      ...(thinkingLevel ? { thinkingLevel } : {}),
+      ...(planModel ? { planModel } : {}),
+      planThinkingLevel: options.getThinkingLevel(),
+      resolved: resolveImplementationDefaults({
+        planModel,
+        sessionModel: current,
+        modelMap: configuredImplementationModelMap(settings),
+        defaultModel: configuredImplementationModel(settings),
+        defaultThinkingLevel: configuredImplementationThinkingLevel(settings),
+        defaultContext: configuredImplementationContext(settings),
+        available: snapshotAvailableImplementationModels(ctx),
+      }),
     };
-  };
-  const effectiveDefaults = (ctx: ExtensionContext): ImplementationRuntimeSelection => {
-    const configured = configuredDefaults();
-    const availableModel = findAvailableImplementationModel(
-      snapshotAvailableImplementationModels(ctx),
-      configured.model,
-    );
-    if (configured.model && !availableModel) {
-      ctx.ui.notify("The configured fresh implementation model is unavailable; using the planning model.", "warning");
-    }
-    const planModel = ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined;
-    const model = availableModel ? { provider: availableModel.provider, modelId: availableModel.id } : planModel;
-    const thinkingLevel = configured.thinkingLevel ?? options.getThinkingLevel();
-    return {
-      ...(model ? { model } : {}),
-      ...(thinkingLevel ? { thinkingLevel } : {}),
-    };
-  };
-  const freshAction = (
-    ctx: ExtensionContext,
-    lifecycle: MenuLifecycle,
-    signal: AbortSignal,
-    runtime: ImplementationRuntimeSelection | undefined,
-    timing: FreshImplementationTiming,
-  ) => {
-    if (signal.aborted) return;
-    const isCurrent = timing === "after-settled" ? lifecycle.isCurrent : () => lifecycle.isCurrent() && !signal.aborted;
-    return options.implementFresh(ctx, isCurrent, runtime, timing);
   };
 
+  /** The choice the implementation screen preselects, used when no menu is shown. */
+  const defaultChoice = (ctx: ExtensionContext): ImplementationChoice => {
+    const defaults = implementationDefaults(ctx);
+    const { resolved } = defaults;
+    for (const model of resolved.unavailable) {
+      ctx.ui.notify(
+        `Configured implementation model ${model.provider}/${model.modelId} is unavailable; skipped.`,
+        "warning",
+      );
+    }
+    const model = resolved.model ?? (resolved.context === "clear" ? sessionModel(ctx) : undefined);
+    const thinkingLevel =
+      resolved.thinkingLevel ?? (resolved.context === "clear" ? defaults.planThinkingLevel : undefined);
+    return {
+      runtime: {
+        ...(model ? { model: { ...model } } : {}),
+        ...(thinkingLevel ? { thinkingLevel } : {}),
+      },
+      context: resolved.context,
+    };
+  };
+
+  const implementAction =
+    (ctx: ExtensionContext, lifecycle: MenuLifecycle, timing: FreshImplementationTiming) =>
+    (choice: ImplementationChoice, signal: AbortSignal) => {
+      if (choice.context === "keep") return options.implementHere(ctx, choice.runtime);
+      if (signal.aborted) return;
+      const isCurrent =
+        timing === "after-settled" ? lifecycle.isCurrent : () => lifecycle.isCurrent() && !signal.aborted;
+      return options.implementFresh(ctx, isCurrent, choice.runtime, timing);
+    };
+
   return {
+    implementationDefaults,
+    defaultChoice,
     async showSaved(ctx: ExtensionContext) {
       const lifecycle = options.captureLifecycle();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
@@ -91,13 +122,13 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       await ui.showSavedPlanMenu(ctx, {
         statusText: options.statusText(),
+        implementation: implementationDefaults(ctx),
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),
         signal: lifecycle.signal,
         isCurrent: lifecycle.isCurrent,
         show: () => options.show(ctx),
-        implementHere: () => options.implementHere(ctx),
-        implementFresh: (signal) => freshAction(ctx, lifecycle, signal, effectiveDefaults(ctx), "immediate"),
+        implement: implementAction(ctx, lifecycle, "immediate"),
         exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
         settings: (signal) => options.settings(ctx, signal, lifecycle.isCurrent),
         clear: () => options.clearSaved(ctx),
@@ -112,18 +143,20 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       const ui = await options.loadInteractiveUi();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
+      const compare = options.compare;
+      const planWithModels = options.planWithModels;
       await ui.showPlanModeMenu(ctx, {
         statusText: options.statusText(),
-        planThinkingLevel: options.getThinkingLevel(),
-        implementationDefaults: configuredDefaults(),
+        implementation: implementationDefaults(ctx),
         hasReadyPlan: options.getState().latestPlan !== undefined,
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),
         ...lifecycle,
         show: () => options.show(ctx),
         finalize: () => options.finalize(ctx),
-        implementHere: () => options.implementHere(ctx),
-        implementFresh: (runtime, signal) => freshAction(ctx, lifecycle, signal, runtime, "immediate"),
+        implement: implementAction(ctx, lifecycle, "immediate"),
+        ...(compare ? { compare: () => compare(ctx) } : {}),
+        ...(planWithModels ? { planWithModels: () => planWithModels(ctx) } : {}),
         exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
         save: () => options.save(ctx),
         stay: () => options.stay(ctx),
@@ -135,14 +168,14 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       const ui = await options.loadInteractiveUi();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
+      const compare = options.compare;
       await ui.showReadyPlanMenu(ctx, {
         ...lifecycle,
-        planThinkingLevel: options.getThinkingLevel(),
-        implementationDefaults: configuredDefaults(),
+        implementation: implementationDefaults(ctx),
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),
-        implementHere: () => options.implementHere(ctx),
-        implementFresh: (runtime, signal) => freshAction(ctx, lifecycle, signal, runtime, "after-settled"),
+        implement: implementAction(ctx, lifecycle, "after-settled"),
+        ...(compare ? { compare: () => compare(ctx) } : {}),
         exportPlan: (path, signal) => options.exportPlan(ctx, path, signal, lifecycle.isCurrent),
         save: () => options.save(ctx),
         stay: () => undefined,

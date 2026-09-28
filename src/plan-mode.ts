@@ -31,6 +31,7 @@ import {
   formatTransferredPlanPrompt,
   startFreshImplementationFromState,
 } from "./fresh-implementation.js";
+import type { ImplementationModelOverride } from "./implementation-models.js";
 import {
   createImplementationRetentionCoordinator,
   implementationRetentionPreview,
@@ -214,7 +215,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     getExportDestination: (ctx) => planExports.getDestination(ctx),
     show: (ctx) => showStoredPlan(pi, ctx, state),
     finalize: requestFinalPlan,
-    implementHere: startImplementation,
+    implementHere: (ctx, runtime) => startImplementation(ctx, runtime),
     implementFresh: startFreshImplementation,
     exportPlan: exportPlan,
     settings: showSettings,
@@ -322,7 +323,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           ctx.ui.notify("No completed plan is available to implement.", "warning");
           return;
         }
-        await startImplementation(ctx);
+        const choice = planActions.defaultChoice(ctx);
+        if (choice.context === "clear") {
+          await startFreshImplementation(ctx, () => true, choice.runtime, "immediate");
+        } else {
+          await startImplementation(ctx, choice.runtime);
+        }
         return;
       }
       if (command === "save") {
@@ -768,6 +774,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         ...state,
         latestPlan: undefined,
         latestPlanSource: undefined,
+        latestPlanModel: undefined,
         awaitingAction: false,
       };
       persistState();
@@ -913,6 +920,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       enabled: false,
       latestPlan: undefined,
       latestPlanSource: undefined,
+      latestPlanModel: undefined,
       awaitingAction: false,
       savedPlan: undefined,
       activeImplementation: undefined,
@@ -969,7 +977,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     }
   }
 
-  function acceptCompletedPlan(plan: string, source: PlanCompletionSource, ctx: ExtensionContext) {
+  function acceptCompletedPlan(
+    plan: string,
+    source: PlanCompletionSource,
+    ctx: ExtensionContext,
+    authorModel?: ImplementationModelOverride,
+  ) {
     const normalized = normalizePlanModeCompletion({ plan });
     if (!normalized.ok) {
       ctx.ui.notify(`Proposed plan is not ready: ${normalized.error}.`, "warning");
@@ -986,10 +999,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     ) {
       return;
     }
+    const latestPlanModel =
+      authorModel ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined);
     state = {
       ...state,
       latestPlan: normalized.plan,
       latestPlanSource: source,
+      latestPlanModel,
       awaitingAction: true,
     };
     readyPresentationIntent = {
@@ -1066,8 +1082,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       enabled: false,
       latestPlan: undefined,
       latestPlanSource: undefined,
+      latestPlanModel: undefined,
       awaitingAction: false,
-      savedPlan: { plan, source },
+      savedPlan: { plan, source, ...(state.latestPlanModel ? { model: state.latestPlanModel } : {}) },
       activeImplementation: undefined,
       pendingImplementationRuntime: undefined,
       workflowToolPolicy: undefined,
@@ -1175,7 +1192,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     deferredFreshHandoff.cancel();
   }
 
-  async function startImplementation(ctx: ExtensionContext) {
+  async function startImplementation(ctx: ExtensionContext, runtime?: ImplementationRuntimeSelection) {
     const savedPlan = state.enabled ? undefined : state.savedPlan;
     const initialPlan = (state.enabled ? state.latestPlan : savedPlan?.plan)?.trim();
     if (!initialPlan) {
@@ -1213,6 +1230,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       enabled: false,
       latestPlan: undefined,
       latestPlanSource: undefined,
+      latestPlanModel: undefined,
       awaitingAction: false,
       savedPlan: undefined,
       pendingImplementationRuntime: undefined,
@@ -1235,6 +1253,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     persistState();
     updateUi(ctx);
 
+    const appliedRuntime = await applyImplementationRuntimeHere(ctx, runtime);
     const handoff = usesConversationHistory
       ? wasEnabled
         ? formatHistoryImplementationPrompt()
@@ -1242,6 +1261,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       : formatImplementationHandoff(plan);
     const sent = sendPlanModeUserMessage(handoff, ctx);
     if (!sent) {
+      await appliedRuntime.restore();
       state = previousState;
       readyPresentationIntent = previousIntent;
       if (wasEnabled) {
@@ -1254,6 +1274,78 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       return;
     }
     if (wasEnabled) releaseWorkflowOwner();
+  }
+
+  /**
+   * Switch this session to the chosen implementation model and thinking level before the
+   * implementation prompt is sent. Failures keep the current model and are reported, not fatal.
+   */
+  async function applyImplementationRuntimeHere(
+    ctx: ExtensionContext,
+    runtime: ImplementationRuntimeSelection | undefined,
+  ) {
+    const previousModel = ctx.model;
+    const previousThinkingLevel = pi.getThinkingLevel();
+    let modelChanged = false;
+    const requested = runtime?.model;
+    if (requested && !(ctx.model?.provider === requested.provider && ctx.model.id === requested.modelId)) {
+      const reference = terminalModelReference(requested);
+      try {
+        const model = ctx.modelRegistry.find(requested.provider, requested.modelId);
+        if (!model) {
+          ctx.ui.notify(
+            `Implementation model ${reference} is unavailable; continuing with the current model.`,
+            "warning",
+          );
+        } else {
+          const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+          if (!auth.ok) {
+            ctx.ui.notify(
+              `Implementation model ${reference} could not be authenticated: ${safeTerminalText(auth.error)}. Continuing with the current model.`,
+              "warning",
+            );
+          } else if (await pi.setModel(model)) {
+            modelChanged = true;
+          } else {
+            ctx.ui.notify(
+              `Implementation model ${reference} could not be applied; continuing with the current model.`,
+              "warning",
+            );
+          }
+        }
+      } catch (error: unknown) {
+        ctx.ui.notify(
+          `Implementation model ${reference} could not be applied: ${terminalErrorDetail(error)}. Continuing with the current model.`,
+          "warning",
+        );
+      }
+    }
+    if (runtime?.thinkingLevel) {
+      try {
+        pi.setThinkingLevel(runtime.thinkingLevel);
+        const effective = pi.getThinkingLevel();
+        if (effective !== runtime.thinkingLevel) {
+          ctx.ui.notify(
+            `Implementation thinking ${runtime.thinkingLevel} is unsupported by this model; Pi is using ${effective}.`,
+            "warning",
+          );
+        }
+      } catch (error: unknown) {
+        ctx.ui.notify(`Implementation thinking could not be applied: ${terminalErrorDetail(error)}`, "warning");
+      }
+    }
+    return {
+      async restore() {
+        try {
+          if (modelChanged && previousModel) await pi.setModel(previousModel);
+          if (runtime?.thinkingLevel && pi.getThinkingLevel() !== previousThinkingLevel) {
+            pi.setThinkingLevel(previousThinkingLevel);
+          }
+        } catch {
+          // Best effort: the implementation prompt was not sent, so the planning state is restored anyway.
+        }
+      },
+    };
   }
 
   function clearActiveImplementation(id: string, ctx: ExtensionContext) {

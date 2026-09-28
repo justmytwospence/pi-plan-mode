@@ -30,6 +30,8 @@ export interface ActiveImplementationPlan {
 export interface SavedPlan {
   plan: string;
   source: PlanCompletionSource;
+  /** Model that authored the plan; selects the default implementation model. */
+  model?: ImplementationModelOverride;
 }
 
 export interface ImplementationRuntimeSelection {
@@ -52,6 +54,8 @@ export interface PlanModeState {
   enabled: boolean;
   latestPlan?: string;
   latestPlanSource?: PlanCompletionSource;
+  /** Model that authored latestPlan; selects the default implementation model. */
+  latestPlanModel?: ImplementationModelOverride;
   awaitingAction: boolean;
   savedPlan?: SavedPlan;
   activeImplementation?: ActiveImplementationPlan;
@@ -98,9 +102,11 @@ export function restorePlanModeState(entries: unknown[], stateEntryType: string)
   const pendingImplementationRuntime = enabled
     ? undefined
     : normalizePendingImplementationRuntime(entry.data.pendingImplementationRuntime);
+  const latestPlanModel = enabled && persistedPlan ? normalizeModel(entry.data.latestPlanModel) : undefined;
   return {
     enabled,
     latestPlan,
+    ...(latestPlanModel ? { latestPlanModel } : {}),
     latestPlanSource: enabled
       ? ((persistedPlan ? persistedSource : undefined) ?? (recoveredPlan ? PLAN_MODE_COMPLETE_TOOL_NAME : undefined))
       : undefined,
@@ -141,7 +147,19 @@ function normalizeSavedPlan(value: unknown): SavedPlan | undefined {
   const source = planCompletionSource(value.source);
   const normalized = normalizePlanModeCompletion({ plan: value.plan });
   if (!source || !normalized.ok) return undefined;
-  return { plan: normalized.plan, source };
+  const model = normalizeModel(value.model);
+  return { plan: normalized.plan, source, ...(model ? { model } : {}) };
+}
+
+function normalizeModel(value: unknown): ImplementationModelOverride | undefined {
+  if (!isRecord(value)) return undefined;
+  if (
+    !isPendingImplementationModelIdentifier(value.provider) ||
+    !isPendingImplementationModelIdentifier(value.modelId)
+  ) {
+    return undefined;
+  }
+  return { provider: value.provider, modelId: value.modelId };
 }
 
 function normalizePendingImplementationRuntime(value: unknown): PendingImplementationRuntime | undefined {

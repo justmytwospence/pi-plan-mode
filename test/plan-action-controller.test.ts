@@ -45,14 +45,10 @@ test("only ready-plan fresh actions survive normal menu disposal for deferred ha
   const currents: Array<() => boolean> = [];
   const invokeFresh = async (menuOptions: Record<string, unknown>, kind: "saved" | "current" | "ready") => {
     const controller = new AbortController();
-    if (kind === "saved") {
-      await (menuOptions.implementFresh as (signal: AbortSignal) => Promise<void>)(controller.signal);
-    } else {
-      await (menuOptions.implementFresh as (runtime: Record<string, never>, signal: AbortSignal) => Promise<void>)(
-        {},
-        controller.signal,
-      );
-    }
+    void kind;
+    await (
+      menuOptions.implement as (choice: { runtime: object; context: "clear" }, signal: AbortSignal) => Promise<void>
+    )({ runtime: {}, context: "clear" }, controller.signal);
     controller.abort(new DOMException("Menu closed", "AbortError"));
   };
   const controller = createPlanActionController({
@@ -108,31 +104,31 @@ test("only ready-plan fresh actions survive normal menu disposal for deferred ha
   );
 });
 
-test("saved-plan fresh actions use persistent defaults and fall back from missing models", async () => {
+test("saved-plan defaults use the plan model map, then the default model, and skip missing models", async () => {
   const target = { provider: "target-provider", id: "target-model" };
+  const mapped = { provider: "mapped-provider", id: "mapped-model" };
   const scenarios = [
-    { name: "available", availableModels: [target], scopedModels: undefined, usesTarget: true },
-    { name: "missing", availableModels: [], scopedModels: undefined, usesTarget: false },
-    {
-      name: "stale scoped model",
-      availableModels: [],
-      scopedModels: [{ model: target }],
-      usesTarget: false,
-    },
+    { name: "mapped", availableModels: [target, mapped], expected: mapped, source: "map", warns: false },
+    { name: "map target missing", availableModels: [target], expected: target, source: "default", warns: true },
+    { name: "nothing available", availableModels: [], expected: undefined, source: "plan", warns: true },
   ];
   for (const scenario of scenarios) {
-    let selectedRuntime: unknown;
+    let implementation: { resolved: Record<string, unknown> } | undefined;
     const controller = createPlanActionController({
       loadInteractiveUi: async () =>
         ({
           showSavedPlanMenu: async (_ctx: unknown, menuOptions: Record<string, unknown>) => {
-            await (menuOptions.implementFresh as (signal: AbortSignal) => Promise<void>)(new AbortController().signal);
+            implementation = menuOptions.implementation as typeof implementation;
           },
         }) as never,
       getState: () => ({
         enabled: false,
         awaitingAction: false,
-        savedPlan: { plan: "# Plan", source: "plan_mode_complete" },
+        savedPlan: {
+          plan: "# Plan",
+          source: "plan_mode_complete",
+          model: { provider: "author-provider", modelId: "author-model" },
+        },
       }),
       captureLifecycle: () => ({
         signal: new AbortController().signal,
@@ -142,20 +138,18 @@ test("saved-plan fresh actions use persistent defaults and fall back from missin
       getThinkingLevel: () => "medium",
       getSettings: () => ({
         thinkingLevel: "inherit",
-        defaultImplementationModel: {
-          provider: target.provider,
-          modelId: target.id,
-        },
+        defaultImplementationModel: { provider: target.provider, modelId: target.id },
         defaultImplementationThinkingLevel: "high",
+        implementationModelMap: {
+          "author-provider/author-model": { provider: mapped.provider, modelId: mapped.id, thinkingLevel: "low" },
+        },
       }),
       implementationOutcome: () => "",
       getExportDestination: () => ({ configuredPath: "plan.md", resolvedPath: "/tmp/plan.md" }),
       show: () => undefined,
       finalize: () => undefined,
       implementHere: () => undefined,
-      implementFresh: (_ctx, _isCurrent, runtime) => {
-        selectedRuntime = runtime;
-      },
+      implementFresh: () => undefined,
       exportPlan: async () => false,
       settings: async () => false,
       save: () => undefined,
@@ -166,26 +160,19 @@ test("saved-plan fresh actions use persistent defaults and fall back from missin
     const context = createMockContext({
       hasUI: true,
       model: { provider: "planning-provider", id: "planning-model" },
-      ...(scenario.scopedModels ? { scopedModels: scenario.scopedModels } : {}),
       modelRegistry: { getAvailable: () => scenario.availableModels },
     });
 
     await controller.showSaved(context.ctx);
 
+    assert.equal(implementation?.resolved.modelSource, scenario.source, scenario.name);
     assert.deepEqual(
-      selectedRuntime,
-      {
-        model: scenario.usesTarget
-          ? { provider: target.provider, modelId: target.id }
-          : { provider: "planning-provider", modelId: "planning-model" },
-        thinkingLevel: "high",
-      },
+      implementation?.resolved.model,
+      scenario.expected ? { provider: scenario.expected.provider, modelId: scenario.expected.id } : undefined,
       scenario.name,
     );
-    assert.equal(
-      context.notifications.some((notice) => /unavailable/u.test(notice.message)),
-      !scenario.usesTarget,
-      scenario.name,
-    );
+    assert.equal(implementation?.resolved.thinkingLevel, scenario.source === "map" ? "low" : "high", scenario.name);
+    const unavailable = (implementation?.resolved.unavailable ?? []) as unknown[];
+    assert.equal(unavailable.length > 0, scenario.warns, scenario.name);
   }
 });

@@ -4,18 +4,26 @@ import { PLAN_MODE_COMPLETE_TOOL_NAME } from "./completion-tool.js";
 import {
   type AvailableImplementationModel,
   findAvailableImplementationModel,
+  formatModelKey,
+  formatModelSpec,
   type ImplementationModelOverride,
+  type ModelSpec,
+  type ModelSpecThinkingLevel,
+  parseModelSpec,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
 import { retentionLabel } from "./implementation-retention.js";
 import { planExportDestination } from "./plan-export.js";
 import { PLAN_MODE_QUESTION_TOOL_NAME } from "./question-tool.js";
 import {
+  configuredImplementationContext,
   configuredImplementationModel,
+  configuredImplementationModelMap,
   configuredImplementationPlanRetention,
   configuredImplementationThinkingLevel,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
+  configuredPlanners,
   IMPLEMENTATION_PLAN_RETENTIONS,
   IMPLEMENTATION_THINKING_LEVELS,
   normalizeKeyId,
@@ -51,8 +59,27 @@ export interface PlanModeSettingsMenuOptions {
   onSaved(settings: PlanModeSettings): void;
 }
 
-type Screen = "settings" | "tools" | "implementation-model" | "export" | "shortcut";
+type Screen =
+  | "settings"
+  | "tools"
+  | "implementation-model"
+  | "model-map"
+  | "map-source"
+  | "map-target"
+  | "map-effort"
+  | "planners"
+  | "export"
+  | "shortcut";
 type Action =
+  | "set-context"
+  | "open-model-map"
+  | "edit-mapping"
+  | "select-map-source"
+  | "select-map-target"
+  | "select-map-effort"
+  | "open-planners"
+  | "toggle-planner"
+  | "reset-planners"
   | "set-thinking"
   | "open-tools"
   | "toggle-tool"
@@ -82,6 +109,8 @@ export async function showPlanModeSettings(
   const implementationModels = snapshotAvailableImplementationModels(ctx);
   const modelItemIds = new Map(implementationModels.map((model, index) => [model, `plan-settings-model:${index}`]));
   const modelsByItemId = new Map(implementationModels.map((model) => [modelItemIds.get(model) as string, model]));
+  let draftSource: ImplementationModelOverride | undefined;
+  let draftTarget: ImplementationModelOverride | undefined;
 
   const loadState = async (): Promise<SettingsMenuState> => {
     const loaded = await readSettings(options.settingsPath);
@@ -137,15 +166,15 @@ export async function showPlanModeSettings(
                 },
                 {
                   id: "defaultImplementationModel",
-                  label: "Fresh model",
-                  description: "Choose the default model for a fresh implementation session.",
+                  label: "Default implementation model",
+                  description: "Preselected when the planning model has no map entry.",
                   currentValue: implementationModelValue(state.settings, implementationModels),
                   action: "open-implementation-model",
                 },
                 {
                   id: "defaultImplementationThinkingLevel",
-                  label: "Fresh thinking",
-                  description: "Choose the default thinking level for a fresh implementation session.",
+                  label: "Default implementation effort",
+                  description: "Preselected effort when the map entry does not set one.",
                   currentValue: configuredImplementationThinkingLevel(state.settings) ?? "same as plan",
                   values: ["same as plan", ...IMPLEMENTATION_THINKING_LEVELS],
                   action: "set-implementation-thinking",
@@ -164,6 +193,28 @@ export async function showPlanModeSettings(
                     "Saved TUI shortcut. Changes require /reload or restarting Pi; the current binding stays unchanged.",
                   currentValue: configuredPlanModeToggleShortcut(state.settings) ?? "none",
                   action: "open-shortcut",
+                },
+                {
+                  id: "implementationModelMap",
+                  label: "Implementation model map",
+                  description: "Per planning model, the model and effort preselected when implementation starts.",
+                  currentValue: modelMapValue(state.settings),
+                  action: "open-model-map",
+                },
+                {
+                  id: "defaultImplementationContext",
+                  label: "Implementation context",
+                  description: "Keep the planning conversation or start a fresh session with only the plan.",
+                  currentValue: configuredImplementationContext(state.settings),
+                  values: ["keep", "clear"],
+                  action: "set-context",
+                },
+                {
+                  id: "planners",
+                  label: "Planner models",
+                  description: "Models preselected for /plan multi and Compare with other models.",
+                  currentValue: plannersValue(state.settings),
+                  action: "open-planners",
                 },
               ],
             },
@@ -190,7 +241,7 @@ export async function showPlanModeSettings(
       }),
       "implementation-model": ({ state }) => ({
         kind: "choice",
-        title: "Fresh implementation model",
+        title: "Default implementation model",
         lines: ["Same as plan is the default and fallback when a configured model is unavailable."],
         items: implementationModelItems(implementationModels, modelItemIds),
         action: "set-implementation-model",
@@ -203,6 +254,107 @@ export async function showPlanModeSettings(
         viewportSize: 10,
         hint: "back",
       }),
+      "model-map": ({ state }) => {
+        const entries = Object.entries(configuredImplementationModelMap(state.settings));
+        return {
+          kind: "actions",
+          title: "Implementation model map",
+          lines: [
+            "When a plan was written by the model on the left, implementation preselects the model and effort on the right.",
+            "You can still override both on the Implement screen.",
+          ],
+          items: [
+            ...entries.map(([source, target], index) => ({
+              id: `plan-settings-map:${index}`,
+              label: `${safeTerminalText(source)} → ${safeTerminalText(formatModelKey(target))}`,
+              description: target.thinkingLevel ? `effort ${target.thinkingLevel}` : "effort: default",
+              action: "edit-mapping" as const,
+            })),
+            { id: "add-mapping", label: "Add mapping…", action: "edit-mapping" as const },
+          ],
+          hint: "back",
+        };
+      },
+      "map-source": () => ({
+        kind: "choice",
+        title: "Planning model",
+        lines: ["Choose the model whose plans this mapping applies to."],
+        items: implementationModelChoiceItems(implementationModels, modelItemIds),
+        action: "select-map-source",
+        enableSearch: true,
+        viewportSize: 10,
+        hint: "back",
+      }),
+      "map-target": ({ state }) => {
+        const existing = draftSource
+          ? configuredImplementationModelMap(state.settings)[formatModelKey(draftSource)]
+          : undefined;
+        return {
+          kind: "choice",
+          title: `Implement plans from ${draftSource ? safeModelReference(draftSource) : "this model"} with`,
+          items: [
+            ...(existing ? [{ id: "remove-mapping", label: "Remove mapping" }] : []),
+            ...implementationModelChoiceItems(implementationModels, modelItemIds),
+          ],
+          action: "select-map-target",
+          initialItemId: implementationModelItemId(existing, implementationModels, modelItemIds),
+          enableSearch: true,
+          viewportSize: 10,
+          hint: "back",
+        };
+      },
+      "map-effort": ({ state }) => {
+        const existing = draftSource
+          ? configuredImplementationModelMap(state.settings)[formatModelKey(draftSource)]
+          : undefined;
+        return {
+          kind: "choice",
+          title: "Implementation effort for this mapping",
+          items: [
+            { id: "effort-default", label: "Default", description: "Use the default implementation effort." },
+            ...IMPLEMENTATION_THINKING_LEVELS.map((level) => ({ id: level, label: level })),
+          ],
+          action: "select-map-effort",
+          initialItemId: existing?.thinkingLevel ?? "effort-default",
+          hint: "back",
+        };
+      },
+      planners: ({ state }) => {
+        const configured = configuredPlanners(state.settings);
+        const configuredKeys = new Set(configured.map(formatModelSpec));
+        const extra = configured.filter(
+          (spec) => spec.thinkingLevel || !findAvailableImplementationModel(implementationModels, spec),
+        );
+        return {
+          kind: "multiSelect",
+          title: "Planner models",
+          lines: [
+            "Preselected when /plan multi or Compare with other models starts; you can change them per run.",
+            "Add an effort suffix in the settings file, e.g. anthropic/claude-opus-5-5:xhigh.",
+          ],
+          enableSearch: true,
+          viewportSize: 10,
+          items: [
+            ...extra.map((spec) => ({
+              id: `planner-spec:${formatModelSpec(spec)}`,
+              label: safeTerminalText(formatModelSpec(spec)),
+              selected: true,
+            })),
+            ...implementationModels.map((model) => {
+              const key = formatModelKey({ provider: model.provider, modelId: model.id });
+              return {
+                id: `planner-spec:${key}`,
+                label: safeModelReference({ provider: model.provider, modelId: model.id }),
+                searchText: key,
+                selected: configuredKeys.has(key),
+              };
+            }),
+          ],
+          action: "toggle-planner",
+          actions: [{ id: "reset-planners", label: "Clear planner defaults", action: "reset-planners" }],
+          hint: "back",
+        };
+      },
       export: ({ state }) => {
         const configured = configuredPlanExportPath(state.settings);
         const destination = planExportDestination(configured, ctx.cwd);
@@ -235,6 +387,88 @@ export async function showPlanModeSettings(
       }),
     },
     actions: {
+      "set-context": async ({ ctx: actionCtx, value, signal }) => {
+        if (value !== "keep" && value !== "clear") return { kind: "rejected" };
+        return savePatch(
+          actionCtx,
+          { defaultImplementationContext: value },
+          signal,
+          value === "clear"
+            ? "Implementation context: clear (fresh session with only the plan)."
+            : "Implementation context: keep the planning conversation.",
+        );
+      },
+      "open-model-map": async () => ({ kind: "to", screen: "model-map" }),
+      "edit-mapping": async ({ state, itemId }) => {
+        const index = itemId?.startsWith("plan-settings-map:") ? Number(itemId.slice("plan-settings-map:".length)) : -1;
+        const entry = Object.keys(configuredImplementationModelMap(state.settings))[index];
+        draftTarget = undefined;
+        if (!entry) {
+          draftSource = undefined;
+          return { kind: "to", screen: "map-source" };
+        }
+        draftSource = parseModelSpec(entry);
+        return draftSource ? { kind: "to", screen: "map-target" } : { kind: "rejected" };
+      },
+      "select-map-source": async ({ itemId }) => {
+        const model = itemId ? modelsByItemId.get(itemId) : undefined;
+        if (!model) return { kind: "rejected" };
+        draftSource = { provider: model.provider, modelId: model.id };
+        return { kind: "to", screen: "map-target" };
+      },
+      "select-map-target": async ({ ctx: actionCtx, state, itemId, signal }) => {
+        if (!draftSource) return { kind: "rejected" };
+        if (itemId === "remove-mapping") {
+          const next = { ...configuredImplementationModelMap(state.settings) };
+          delete next[formatModelKey(draftSource)];
+          const result = await savePatch(
+            actionCtx,
+            { implementationModelMap: next },
+            signal,
+            `Removed the implementation mapping for ${safeModelReference(draftSource)}.`,
+          );
+          return result.kind === "stay" ? { kind: "to", screen: "model-map" } : result;
+        }
+        const model = itemId ? modelsByItemId.get(itemId) : undefined;
+        if (!model) return { kind: "rejected" };
+        draftTarget = { provider: model.provider, modelId: model.id };
+        return { kind: "to", screen: "map-effort" };
+      },
+      "select-map-effort": async ({ ctx: actionCtx, state, itemId, signal }) => {
+        if (!draftSource || !draftTarget) return { kind: "rejected" };
+        const thinkingLevel = IMPLEMENTATION_THINKING_LEVELS.find((level) => level === itemId) as
+          | ModelSpecThinkingLevel
+          | undefined;
+        const target: ModelSpec = { ...draftTarget, ...(thinkingLevel ? { thinkingLevel } : {}) };
+        const next = { ...configuredImplementationModelMap(state.settings), [formatModelKey(draftSource)]: target };
+        const result = await savePatch(
+          actionCtx,
+          { implementationModelMap: next },
+          signal,
+          `Plans from ${safeModelReference(draftSource)} now implement with ${safeModelReference(target)}${thinkingLevel ? ` at ${thinkingLevel}` : ""}.`,
+        );
+        return result.kind === "stay" ? { kind: "to", screen: "model-map" } : result;
+      },
+      "open-planners": async () => ({ kind: "to", screen: "planners" }),
+      "toggle-planner": async ({ ctx: actionCtx, state, itemId, selected, signal }) => {
+        const spec = itemId?.startsWith("planner-spec:")
+          ? parseModelSpec(itemId.slice("planner-spec:".length))
+          : undefined;
+        if (!spec) return { kind: "rejected" };
+        const key = formatModelSpec(spec);
+        const current = configuredPlanners(state.settings).filter((existing) => formatModelSpec(existing) !== key);
+        const next = selected ? [...current, spec] : current;
+        return savePatch(
+          actionCtx,
+          { planners: next },
+          signal,
+          `Planner models: ${next.length === 0 ? "none preselected" : next.map(formatModelSpec).join(", ")}.`,
+        );
+      },
+      "reset-planners": async ({ ctx: actionCtx, state, signal }) => {
+        if (configuredPlanners(state.settings).length === 0) return { kind: "stay" };
+        return savePatch(actionCtx, { planners: null }, signal, "Planner models: none preselected.");
+      },
       "set-thinking": async ({ ctx: actionCtx, value, signal }) => {
         if (!PLAN_MODE_THINKING_LEVELS.includes(value as (typeof PLAN_MODE_THINKING_LEVELS)[number])) {
           return { kind: "rejected" };
@@ -270,8 +504,8 @@ export async function showPlanModeSettings(
           { defaultImplementationModel },
           signal,
           model
-            ? `Fresh implementation model: ${safeModelReference({ provider: model.provider, modelId: model.id })}.`
-            : "Fresh implementation model: same as plan.",
+            ? `Default implementation model: ${safeModelReference({ provider: model.provider, modelId: model.id })}.`
+            : "Default implementation model: same as plan.",
         );
         return result.kind === "stay" ? { kind: "to", screen: "settings" } : result;
       },
@@ -281,7 +515,7 @@ export async function showPlanModeSettings(
             actionCtx,
             { defaultImplementationThinkingLevel: null },
             signal,
-            "Fresh implementation thinking: same as plan.",
+            "Default implementation effort: same as plan.",
           );
         }
         if (!IMPLEMENTATION_THINKING_LEVELS.includes(value as (typeof IMPLEMENTATION_THINKING_LEVELS)[number])) {
@@ -293,7 +527,7 @@ export async function showPlanModeSettings(
             defaultImplementationThinkingLevel: value as PlanModeSettings["defaultImplementationThinkingLevel"],
           },
           signal,
-          `Fresh implementation thinking: ${value}.`,
+          `Default implementation effort: ${value}.`,
         );
       },
       "open-export": async () => ({ kind: "to", screen: "export" }),
@@ -422,6 +656,23 @@ function implementationModelValue(settings: PlanModeSettings, models: readonly A
   return findAvailableImplementationModel(models, configured)
     ? safeModelReference(configured)
     : `same as plan · ${safeModelReference(configured)} unavailable`;
+}
+
+function modelMapValue(settings: PlanModeSettings) {
+  const count = Object.keys(configuredImplementationModelMap(settings)).length;
+  return count === 0 ? "none" : `${count} mapping${count === 1 ? "" : "s"}`;
+}
+
+function plannersValue(settings: PlanModeSettings) {
+  const planners = configuredPlanners(settings);
+  return planners.length === 0 ? "none" : `${planners.length} selected`;
+}
+
+function implementationModelChoiceItems(
+  models: readonly AvailableImplementationModel[],
+  itemIds: ReadonlyMap<AvailableImplementationModel, string>,
+) {
+  return implementationModelItems(models, itemIds).filter((item) => item.id !== "same-as-plan");
 }
 
 function implementationModelItems(

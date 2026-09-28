@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { DefaultResourceLoader, ExtensionRunner, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { builtinTool, createMockContext, extensionTool } from "./shared/support.js";
+import { selectFreshImplementation } from "./support.js";
 
 const EVENT_RECORDER = Symbol.for("pi-plan-mode.issue-1263-events");
 
@@ -124,11 +125,7 @@ export default function laterExtension(pi) {
     const mockContext = createMockContext({
       mode: "rpc",
       hasUI: true,
-      select: async (_title: string, options: string[]) => {
-        if (options.includes("Start fresh and implement")) return "Start fresh and implement";
-        if (options.includes("Start fresh implementation")) return "Start fresh implementation";
-        return undefined;
-      },
+      select: async (_title: string, options: string[]) => selectFreshImplementation(options),
     });
     runner.setUIContext((mockContext.ctx as { ui: never }).ui, "rpc");
     const handoffFinished = deferred<void>();

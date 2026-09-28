@@ -7,6 +7,8 @@ export default defineConfig({
       GIT_CONFIG_COUNT: "1",
       GIT_CONFIG_KEY_0: "commit.gpgsign",
       GIT_CONFIG_VALUE_0: "false",
+      // Tests must never reach TypeSafe; Jev tool selection falls back without a key.
+      TYPESAFE_API_KEY: "",
     },
     hookTimeout: 30_000,
     include: ["test/**/*.test.ts"],

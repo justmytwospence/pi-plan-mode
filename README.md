@@ -71,7 +71,15 @@ picker shows a `Tool ·` row for each toolset, plus **Shell** (read-only command
 **Subagents** (when `scoutModelMap` has entries), preselected from their defaults, so each run can widen or narrow what
 planners may use. Plan mode admits a chosen toolset's tools inside planners; toolsets with `"scouts": true` (the
 default) are also given to scouts, which do not run under Plan mode's policy. MCP tools can reach services that change
-things, so planners and scouts are told to only read with them. For the main `/plan` session, list the same tools
+things, so planners and scouts are told to only read with them.
+
+When `TYPESAFE_API_KEY` is set, the picker's tool rows are preselected by
+[Jev](https://docs.typesafe.ai), TypeSafe's fast System One model: one request with a yes/no question per tool asks
+whether planners writing a plan for this task would materially benefit from it (about 100-200 ms and under a
+thousand tokens). Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
+can still change any of them. Without a key, with `jevToolSelection: false`, or when the request fails or times out
+(4 s), the picker says why and falls back to each tool's `enabled` default. A toolset's `description` is what Jev
+reads, so describe what it gives planners. For the main `/plan` session, list the same tools
 in `defaultPlanTools` or choose them per run with `/plan tools`.
 
 ## 🛠️ Implement with a chosen model, effort, and context
@@ -432,16 +440,21 @@ New settings in this fork:
   "plannerToolsets": {
     "web": {
       "label": "Web research",
+      "description": "Web search and page fetching: library and API docs, release notes, known bugs, prior art.",
       "extensions": ["~/.pi/agent/npm/node_modules/pi-web-access"],
       "tools": ["web_search", "fetch_content", "get_search_content"]
     },
     "mcp": {
       "label": "MCP servers",
+      "description": "Connected services: Context7 docs, Obsidian notes, Figma designs, a Chrome browser.",
       "extensions": ["~/.pi/agent/npm/node_modules/pi-mcp-adapter"],
       "tools": ["mcp"]
     }
   },
   "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "mcp"],
+  "jevToolSelection": true,
+  "jevThreshold": 0.5,
+  "jevModel": "jev-latest",
   "planCompleteCommand": ["bash", "~/.claude/hooks/save-plan-to-obsidian.sh"]
 }
 ```

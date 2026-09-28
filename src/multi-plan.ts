@@ -37,6 +37,8 @@ function listFromEnv(value: string | undefined) {
 /** A named bundle of extensions and tools that planners (and optionally their scouts) can be given. */
 export interface PlannerToolset {
   label: string;
+  /** What the toolset gives planners; shown in the picker and read by Jev. */
+  description?: string;
   extensions: string[];
   tools: string[];
   /** Selected by default when a multi-model run starts. */

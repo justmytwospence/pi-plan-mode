@@ -316,7 +316,11 @@ const OPUS = { provider: "anthropic", id: "claude-opus-5-5" };
 const SOL = { provider: "openai-codex", id: "gpt-6-sol" };
 const SONNET = { provider: "anthropic", id: "claude-sonnet-5" };
 
-function multiPlanHarness(outcome: Record<string, unknown>, settings: Record<string, unknown> = {}) {
+function multiPlanHarness(
+  outcome: Record<string, unknown>,
+  settings: Record<string, unknown> = {},
+  extraDependencies: Record<string, unknown> = {},
+) {
   const mock = createMockPi({ activeTools: ["read", "edit"] });
   const calls: Record<string, unknown[]> = { choosePlanners: [], run: [], compare: [], ready: [] };
   const plannerCandidates: PlanCandidate[] = [
@@ -338,6 +342,7 @@ function multiPlanHarness(outcome: Record<string, unknown>, settings: Record<str
     },
   ];
   planMode(mock.pi, {
+    ...extraDependencies,
     readSettings: async () => ({
       kind: "loaded" as const,
       settings: {
@@ -554,4 +559,51 @@ test("/plan multi offers shell, subagents, and configured toolsets with their de
       ["toolset:mcp", false],
     ],
   );
+});
+
+test("Jev's picks become the picker defaults, and a fallback keeps the settings defaults", async () => {
+  const toolsets = {
+    web: { label: "Web research", extensions: [], tools: ["web_search"], enabled: true, scouts: true },
+    mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+  };
+  for (const scenario of ["jev", "fallback", "off"] as const) {
+    const pickCalls: unknown[] = [];
+    const { mock, context, calls } = multiPlanHarness(
+      { kind: "close" },
+      { plannerToolsets: toolsets, ...(scenario === "off" ? { jevToolSelection: false } : {}) },
+      {
+        pickTools: async (input: unknown) => {
+          pickCalls.push(input);
+          return scenario === "jev"
+            ? {
+                kind: "jev" as const,
+                model: "jev-1.13.0",
+                probabilities: { shell: 0.9, "toolset:web": 0.2, "toolset:mcp": 0.8 },
+                selected: { shell: true, "toolset:web": false, "toolset:mcp": true },
+              }
+            : { kind: "fallback" as const, reason: "TYPESAFE_API_KEY is not set" };
+        },
+      },
+    );
+    await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+    await mock.commands.get("plan")?.handler("multi Build onboarding from Figma", context.ctx);
+    const chosen = calls.choosePlanners?.[0] as
+      | { lines: string[]; capabilities: Array<{ id: string; selected: boolean; description: string }> }
+      | undefined;
+    const selected = Object.fromEntries((chosen?.capabilities ?? []).map((row) => [row.id, row.selected]));
+    if (scenario === "jev") {
+      assert.deepEqual(selected, { shell: true, "toolset:web": false, "toolset:mcp": true });
+      assert.ok(chosen?.lines.some((line) => /Jev \(jev-1\.13\.0\) preselected/u.test(line)));
+      assert.match(chosen?.capabilities.find((row) => row.id === "toolset:mcp")?.description ?? "", /^Jev 80% · mcp/u);
+      assert.equal((pickCalls[0] as { task: string }).task, "Build onboarding from Figma");
+    } else {
+      assert.deepEqual(selected, { shell: true, "toolset:web": true, "toolset:mcp": false });
+      assert.ok(
+        chosen?.lines.some((line) =>
+          scenario === "off" ? /off in settings/u.test(line) : /TYPESAFE_API_KEY is not set/u.test(line),
+        ),
+      );
+      assert.equal(pickCalls.length, scenario === "off" ? 0 : 1);
+    }
+  }
 });

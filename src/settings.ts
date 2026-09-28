@@ -116,6 +116,12 @@ export interface PlanModeSettings {
   plannerLoadExtensions?: boolean;
   /** Named bundles of extensions and tools planners can be given, chosen per run in the planner picker. */
   plannerToolsets?: Record<string, PlannerToolset>;
+  /** Let Jev preselect planner tools from the task (default true; needs TYPESAFE_API_KEY). */
+  jevToolSelection?: boolean;
+  /** Jev probability at or above which a tool is preselected (default 0.5). */
+  jevThreshold?: number;
+  /** TypeSafe model for tool selection (default jev-latest). */
+  jevModel?: string;
   /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
   planCompleteCommand?: string[];
 }
@@ -243,6 +249,21 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (!toolsets) return undefined;
     settings.plannerToolsets = toolsets;
   }
+  if (Object.hasOwn(value, "jevToolSelection")) {
+    const enabled = Reflect.get(value, "jevToolSelection");
+    if (typeof enabled !== "boolean") return undefined;
+    settings.jevToolSelection = enabled;
+  }
+  if (Object.hasOwn(value, "jevThreshold")) {
+    const threshold = Reflect.get(value, "jevThreshold");
+    if (typeof threshold !== "number" || !(threshold >= 0 && threshold <= 1)) return undefined;
+    settings.jevThreshold = threshold;
+  }
+  if (Object.hasOwn(value, "jevModel")) {
+    const model = Reflect.get(value, "jevModel");
+    if (typeof model !== "string" || !model.trim() || model.length > 200) return undefined;
+    settings.jevModel = model.trim();
+  }
   if (Object.hasOwn(value, "planCompleteCommand")) {
     const command = normalizeCommand(Reflect.get(value, "planCompleteCommand"));
     if (!command) return undefined;
@@ -274,10 +295,14 @@ function normalizePlannerToolsets(value: unknown): Record<string, PlannerToolset
     const tools = normalizeToolNames(raw.tools);
     if (!extensions || !tools || tools.length === 0) return undefined;
     if (raw.label !== undefined && (typeof raw.label !== "string" || !raw.label.trim())) return undefined;
+    if (raw.description !== undefined && (typeof raw.description !== "string" || !raw.description.trim())) {
+      return undefined;
+    }
     if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return undefined;
     if (raw.scouts !== undefined && typeof raw.scouts !== "boolean") return undefined;
     toolsets[id] = {
       label: typeof raw.label === "string" ? raw.label.trim() : id,
+      ...(typeof raw.description === "string" ? { description: raw.description.trim() } : {}),
       extensions,
       tools,
       enabled: raw.enabled !== false,

@@ -43,6 +43,7 @@ import {
   createImplementationRetentionCoordinator,
   implementationRetentionPreview,
 } from "./implementation-retention.js";
+import { type JevToolPick, pickToolsWithJev, type ToolCapability } from "./jev-tool-picker.js";
 import {
   invalidPlanMessage,
   latestAssistantStopReason,
@@ -191,6 +192,8 @@ interface PlanModeDependencies {
   ): ReturnType<typeof updatePlanModeSettings>;
   settingsPath?: string;
   loadInteractiveUi?(): Promise<InteractiveUi>;
+  /** Test seam: replaces Jev's planner tool preselection. */
+  pickTools?: typeof pickToolsWithJev;
 }
 
 // Keep session state, persistence, tool, thinking, and mutex commits in this one closure so an
@@ -1191,37 +1194,79 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     );
     const toolsets = settings.plannerToolsets ?? {};
     const scoutTargets = [...new Set(Object.values(settings.scoutModelMap ?? {}).map(formatModelSpec))];
+    const capabilities: ToolCapability[] = [
+      {
+        id: "shell",
+        label: "Shell",
+        description:
+          "Read-only shell commands inside the repository: git history, diffs and blame, ripgrep searches, listing files, reading configs and lockfiles.",
+        fallbackSelected: true,
+      },
+      ...(scoutTargets.length > 0
+        ? [
+            {
+              id: "subagents",
+              label: "Subagents",
+              description:
+                "Parallel read-only helper agents that each investigate one part of a large codebase or one independent question and report back.",
+              fallbackSelected: true,
+            },
+          ]
+        : []),
+      ...Object.entries(toolsets).map(([id, toolset]) => ({
+        id: `toolset:${id}`,
+        label: toolset.label,
+        description: toolset.description ?? `${toolset.label}: ${toolset.tools.join(", ")}`,
+        fallbackSelected: toolset.enabled,
+      })),
+    ];
+    const pick: JevToolPick =
+      settings.jevToolSelection === false
+        ? { kind: "fallback", reason: "Jev tool selection is off in settings" }
+        : await (dependencies.pickTools ?? pickToolsWithJev)({
+            task,
+            conversation: transcript,
+            cwd: ctx.cwd,
+            capabilities,
+            ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+            ...(settings.jevModel ? { model: settings.jevModel } : {}),
+            signal: lifecycle.signal,
+          });
+    if (!lifecycle.isCurrent()) return;
+    const percent = (id: string) =>
+      pick.kind === "jev" && pick.probabilities[id] !== undefined
+        ? Math.round(pick.probabilities[id] * 100)
+        : undefined;
     const choice = await ui.choosePlanners(ctx, {
       title: current ? "Compare with other models" : "Plan with multiple models",
       lines: [
         ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
         ...(current ? ["The current plan joins the comparison as plan A."] : []),
+        pick.kind === "jev"
+          ? `Jev (${safeTerminalText(pick.model)}) preselected the tools this task needs; change any before starting.`
+          : `Tool defaults come from settings: ${safeTerminalText(pick.reason)}.`,
       ],
       preselected,
-      capabilities: [
-        {
-          id: "shell",
-          label: "Shell",
-          description: "Read-only inspection commands (git, rg, cat, ls, …) under Plan mode's policy.",
-          selected: true,
-        },
-        ...(scoutTargets.length > 0
-          ? [
-              {
-                id: "subagents",
-                label: "Subagents",
-                description: `Parallel read-only subagents on ${scoutTargets.join(", ")} (scoutModelMap).`,
-                selected: true,
-              },
-            ]
-          : []),
-        ...Object.entries(toolsets).map(([id, toolset]) => ({
-          id: `toolset:${id}`,
-          label: toolset.label,
-          description: `${toolset.tools.join(", ")}${toolset.scouts ? " · also for subagents" : ""}`,
-          selected: toolset.enabled,
-        })),
-      ],
+      capabilities: capabilities.map((capability) => {
+        const jevPercent = percent(capability.id);
+        const detail =
+          capability.id === "shell"
+            ? "Read-only inspection commands (git, rg, cat, ls, …) under Plan mode's policy."
+            : capability.id === "subagents"
+              ? `Parallel read-only subagents on ${scoutTargets.join(", ")} (scoutModelMap).`
+              : (() => {
+                  const toolset = toolsets[capability.id.slice("toolset:".length)];
+                  return toolset
+                    ? `${toolset.tools.join(", ")}${toolset.scouts ? " · also for subagents" : ""}`
+                    : capability.description;
+                })();
+        return {
+          id: capability.id,
+          label: capability.label,
+          description: jevPercent === undefined ? detail : `Jev ${jevPercent}% · ${detail}`,
+          selected: pick.kind === "jev" ? pick.selected[capability.id] === true : capability.fallbackSelected,
+        };
+      }),
       ...lifecycle,
     });
     const specs = choice?.specs;

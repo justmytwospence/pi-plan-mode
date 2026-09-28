@@ -351,9 +351,15 @@ function multiPlanHarness(outcome: Record<string, unknown>, settings: Record<str
     }),
     loadInteractiveUi: async () =>
       ({
-        choosePlanners: async (_ctx: unknown, options: { preselected: unknown[] }) => {
+        choosePlanners: async (
+          _ctx: unknown,
+          options: { preselected: unknown[]; capabilities: Array<{ id: string; selected: boolean }> },
+        ) => {
           calls.choosePlanners?.push(options);
-          return options.preselected;
+          return {
+            specs: options.preselected,
+            capabilities: options.capabilities.filter((row) => row.selected).map((row) => row.id),
+          };
         },
         runPlannersWithProgress: async (_ctx: unknown, options: { specs: unknown[] }) => {
           calls.run?.push(options.specs);
@@ -485,4 +491,67 @@ test("a planner subprocess enters Plan mode on its own at session start", async 
     if (previous === undefined) delete process.env[PLANNER_ENV];
     else process.env[PLANNER_ENV] = previous;
   }
+});
+
+test("the planner picker shows tool toggles above the models and returns both choices", async () => {
+  const { choosePlanners } = await import("../src/multi-plan-menu.js");
+  const dialogs: string[][] = [];
+  let step = 0;
+  const context = createMockContext({
+    mode: "rpc",
+    hasUI: true,
+    modelRegistry: { getAvailable: () => [OPUS, SOL] },
+    select: async (_title: string, options: string[]) => {
+      dialogs.push(options);
+      step += 1;
+      if (step === 1) return options.find((option) => option.includes("Tool · Shell"));
+      return options.find((option) => option.startsWith("Start planning"));
+    },
+  });
+  const choice = await choosePlanners(context.ctx, {
+    title: "Plan with multiple models",
+    preselected: [{ provider: "openai-codex", modelId: "gpt-6-sol", thinkingLevel: "xhigh" }],
+    capabilities: [
+      { id: "shell", label: "Shell", selected: true },
+      { id: "toolset:web", label: "Web research", selected: true },
+      { id: "toolset:mcp", label: "MCP servers", selected: false },
+    ],
+    signal: new AbortController().signal,
+    isCurrent: () => true,
+  });
+  const first = dialogs[0] ?? [];
+  assert.ok(
+    first.findIndex((option) => option.startsWith("Tool · MCP servers")) <
+      first.findIndex((option) => option.includes("gpt-6-sol")),
+  );
+  assert.deepEqual(choice, {
+    specs: [{ provider: "openai-codex", modelId: "gpt-6-sol", thinkingLevel: "xhigh" }],
+    capabilities: ["toolset:web"],
+  });
+});
+
+test("/plan multi offers shell, subagents, and configured toolsets with their defaults", async () => {
+  const { mock, context, calls } = multiPlanHarness(
+    { kind: "close" },
+    {
+      scoutModelMap: { "anthropic/claude-opus-5-5": { provider: "anthropic", modelId: "claude-sonnet-5" } },
+      plannerToolsets: {
+        web: { label: "Web research", extensions: [], tools: ["web_search"], enabled: true, scouts: true },
+        mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+      },
+    },
+  );
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
+  const chosen = calls.choosePlanners?.[0] as { capabilities: Array<{ id: string; selected: boolean }> } | undefined;
+  const offered = chosen?.capabilities ?? [];
+  assert.deepEqual(
+    offered.map((row) => [row.id, row.selected]),
+    [
+      ["shell", true],
+      ["subagents", true],
+      ["toolset:web", true],
+      ["toolset:mcp", false],
+    ],
+  );
 });

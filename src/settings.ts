@@ -13,6 +13,7 @@ import {
   type ModelSpec,
   parseModelSpec,
 } from "./implementation-models.js";
+import type { PlannerToolset } from "./multi-plan.js";
 import type { SafeSubcommands } from "./tool-policy.js";
 
 export const PLAN_MODE_SETTINGS_FILE = "pi-plan-mode.json";
@@ -113,10 +114,8 @@ export interface PlanModeSettings {
   plannerTimeoutSeconds?: number;
   /** Load the user's extensions in planner subprocesses (needed for extension-provided models). */
   plannerLoadExtensions?: boolean;
-  /** Extension paths or sources loaded into planners and their scouts, e.g. a web-research package. */
-  plannerExtensions?: string[];
-  /** Extra tools enabled for planners and scouts (list only read-only tools, e.g. web_search). */
-  plannerTools?: string[];
+  /** Named bundles of extensions and tools planners can be given, chosen per run in the planner picker. */
+  plannerToolsets?: Record<string, PlannerToolset>;
   /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
   planCompleteCommand?: string[];
 }
@@ -239,15 +238,10 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (typeof load !== "boolean") return undefined;
     settings.plannerLoadExtensions = load;
   }
-  if (Object.hasOwn(value, "plannerExtensions")) {
-    const extensions = normalizeCommand(Reflect.get(value, "plannerExtensions"));
-    if (!extensions) return undefined;
-    settings.plannerExtensions = extensions;
-  }
-  if (Object.hasOwn(value, "plannerTools")) {
-    const tools = normalizeToolNames(Reflect.get(value, "plannerTools"));
-    if (!tools) return undefined;
-    settings.plannerTools = tools;
+  if (Object.hasOwn(value, "plannerToolsets")) {
+    const toolsets = normalizePlannerToolsets(Reflect.get(value, "plannerToolsets"));
+    if (!toolsets) return undefined;
+    settings.plannerToolsets = toolsets;
   }
   if (Object.hasOwn(value, "planCompleteCommand")) {
     const command = normalizeCommand(Reflect.get(value, "planCompleteCommand"));
@@ -267,6 +261,30 @@ function normalizeImplementationModelMap(value: unknown): Record<string, ModelSp
     entries.push([`${source.provider}/${source.modelId}`, spec]);
   }
   return Object.fromEntries(entries);
+}
+
+function normalizePlannerToolsets(value: unknown): Record<string, PlannerToolset> | undefined {
+  if (!isSettingsDocument(value)) return undefined;
+  const toolsets: Record<string, PlannerToolset> = {};
+  for (const [id, raw] of Object.entries(value)) {
+    if (!/^[A-Za-z0-9_-]{1,40}$/u.test(id) || id === "shell" || id === "subagents" || !isSettingsDocument(raw)) {
+      return undefined;
+    }
+    const extensions = raw.extensions === undefined ? [] : normalizeCommand(raw.extensions);
+    const tools = normalizeToolNames(raw.tools);
+    if (!extensions || !tools || tools.length === 0) return undefined;
+    if (raw.label !== undefined && (typeof raw.label !== "string" || !raw.label.trim())) return undefined;
+    if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return undefined;
+    if (raw.scouts !== undefined && typeof raw.scouts !== "boolean") return undefined;
+    toolsets[id] = {
+      label: typeof raw.label === "string" ? raw.label.trim() : id,
+      extensions,
+      tools,
+      enabled: raw.enabled !== false,
+      scouts: raw.scouts !== false,
+    };
+  }
+  return toolsets;
 }
 
 function normalizePlanners(value: unknown): ModelSpec[] | undefined {

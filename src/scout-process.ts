@@ -1,6 +1,6 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
-import { EXTRA_TOOLS_ENV, PLANNER_ENV, PLANNER_EXTENSIONS_ENV } from "./multi-plan.js";
+import { EXTRA_TOOLS_ENV, PLANNER_ENV, SCOUT_EXTENSIONS_ENV, SCOUT_TOOLS_ENV } from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 
 export const PLAN_SUBAGENTS_TOOL_NAME = "plan_subagents";
@@ -106,7 +106,7 @@ export function scoutPrompt(task: string, extraTools: readonly string[] = []) {
   return [
     "You are a read-only scout working for a planner. Investigate the codebase to answer the task below, then reply with a concise, factual report: what you found, with file paths, line references, and source URLs, and anything you could not determine.",
     extraTools.length > 0
-      ? `You can read and search files, and research beyond the repository with ${extraTools.join(", ")}. You cannot run commands or edit anything. Do not propose an implementation plan unless the task asks for options.`
+      ? `You can read and search files, and research beyond the repository with ${extraTools.join(", ")}.${extraTools.includes("mcp") ? " MCP tools reach external services; use them only to read." : ""} You cannot run commands or edit files. Do not propose an implementation plan unless the task asks for options.`
       : "You can only read and search files. Do not propose an implementation plan unless the task asks for options.",
     "",
     "## Task",
@@ -208,8 +208,9 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
     const env: NodeJS.ProcessEnv = { ...process.env, PI_SKIP_VERSION_CHECK: "1" };
     delete env[PLANNER_ENV];
     delete env[SCOUT_MODEL_ENV];
-    delete env[PLANNER_EXTENSIONS_ENV];
     delete env[EXTRA_TOOLS_ENV];
+    delete env[SCOUT_EXTENSIONS_ENV];
+    delete env[SCOUT_TOOLS_ENV];
     try {
       child = (options.spawnProcess ?? spawn)(
         pi.command,

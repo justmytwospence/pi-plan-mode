@@ -1,14 +1,24 @@
 import { formatModelSpec, type ImplementationModelOverride, type ModelSpec } from "./implementation-models.js";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
-/** JSON array of extension paths a planner passes on to its scouts. */
-export const PLANNER_EXTENSIONS_ENV = "PI_PLAN_MODE_PLANNER_EXTENSIONS";
-/** Comma-separated extra tools a planner may use and pass on to its scouts. */
+/** Comma-separated extra tools a planner may use; Plan mode admits them inside planners. */
 export const EXTRA_TOOLS_ENV = "PI_PLAN_MODE_EXTRA_TOOLS";
+/** JSON array of extension paths a planner passes on to its scouts. */
+export const SCOUT_EXTENSIONS_ENV = "PI_PLAN_MODE_SCOUT_EXTENSIONS";
+/** Comma-separated extra tools a planner passes on to its scouts. */
+export const SCOUT_TOOLS_ENV = "PI_PLAN_MODE_SCOUT_TOOLS";
 
-export function plannerExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+export function extraToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return listFromEnv(env[EXTRA_TOOLS_ENV]);
+}
+
+export function scoutToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return listFromEnv(env[SCOUT_TOOLS_ENV]);
+}
+
+export function scoutExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   try {
-    const value = JSON.parse(env[PLANNER_EXTENSIONS_ENV] ?? "[]") as unknown;
+    const value = JSON.parse(env[SCOUT_EXTENSIONS_ENV] ?? "[]") as unknown;
     return Array.isArray(value)
       ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
       : [];
@@ -17,12 +27,64 @@ export function plannerExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): 
   }
 }
 
-export function extraToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
-  return (env[EXTRA_TOOLS_ENV] ?? "")
+function listFromEnv(value: string | undefined) {
+  return (value ?? "")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean);
 }
+
+/** A named bundle of extensions and tools that planners (and optionally their scouts) can be given. */
+export interface PlannerToolset {
+  label: string;
+  extensions: string[];
+  tools: string[];
+  /** Selected by default when a multi-model run starts. */
+  enabled: boolean;
+  /** Also give these extensions and tools to the planner's scouts. */
+  scouts: boolean;
+}
+
+/** What planners may use in one run, chosen when the run starts. */
+export interface PlannerAccess {
+  shell: boolean;
+  subagents: boolean;
+  /** Extensions loaded into planners, and the tools they enable. */
+  extensions: string[];
+  tools: string[];
+  /** Extensions and tools passed on to scouts. */
+  scoutExtensions: string[];
+  scoutTools: string[];
+}
+
+export const DEFAULT_PLANNER_ACCESS: PlannerAccess = {
+  shell: true,
+  subagents: true,
+  extensions: [],
+  tools: [],
+  scoutExtensions: [],
+  scoutTools: [],
+};
+
+export function resolvePlannerAccess(
+  selection: { shell: boolean; subagents: boolean; toolsets: readonly string[] },
+  toolsets: Readonly<Record<string, PlannerToolset>>,
+  resolvePath: (path: string) => string = (path) => path,
+): PlannerAccess {
+  const chosen = selection.toolsets.flatMap((id) => (toolsets[id] ? [toolsets[id]] : []));
+  const unique = (values: string[]) => [...new Set(values)];
+  return {
+    shell: selection.shell,
+    subagents: selection.subagents,
+    extensions: unique(chosen.flatMap((toolset) => toolset.extensions.map(resolvePath))),
+    tools: unique(chosen.flatMap((toolset) => toolset.tools)),
+    scoutExtensions: unique(
+      chosen.filter((toolset) => toolset.scouts).flatMap((toolset) => toolset.extensions.map(resolvePath)),
+    ),
+    scoutTools: unique(chosen.filter((toolset) => toolset.scouts).flatMap((toolset) => toolset.tools)),
+  };
+}
+
 export const CANDIDATES_ENTRY_TYPE = "plan-mode-candidates";
 export const MULTI_TASK_MESSAGE_TYPE = "plan-mode-multi-task";
 export const SELECTED_PLAN_MESSAGE_TYPE = "plan-mode-selected-plan";
@@ -171,8 +233,11 @@ export function formatPlannerPrompt(
     "You are running non-interactively and nobody can answer questions. Do not call plan_mode_question. Resolve ambiguity by exploring the repository; when a real decision remains, choose the most reasonable option and record it under an explicit Assumptions section.",
     ...(researchTools.length > 0
       ? [
-          `Research beyond the repository whenever outside knowledge matters (library and API docs, versions, known issues, prior art) with ${researchTools.join(", ")}.`,
+          `Research beyond the repository whenever outside knowledge matters (library and API docs, versions, known issues, prior art, notes) with ${researchTools.join(", ")}.`,
         ]
+      : []),
+    ...(researchTools.includes("mcp")
+      ? ["MCP tools reach external services and some of them can change things; use them only to read."]
       : []),
     ...(scoutLabel
       ? [

@@ -18,10 +18,24 @@ interface Lifecycle {
 
 const PROGRESS_WIDGET_KEY = "plan-mode-planners";
 
+export interface PlannerCapabilityRow {
+  id: string;
+  label: string;
+  description?: string;
+  selected: boolean;
+}
+
 export interface ChoosePlannersOptions extends Lifecycle {
   title: string;
   lines?: readonly string[];
   preselected: readonly ModelSpec[];
+  /** Tool access toggles shown above the models; the chosen ids are returned. */
+  capabilities?: readonly PlannerCapabilityRow[];
+}
+
+export interface PlannerChoice {
+  specs: ModelSpec[];
+  capabilities: string[];
 }
 
 /**
@@ -31,11 +45,13 @@ export interface ChoosePlannersOptions extends Lifecycle {
 export async function choosePlanners(
   ctx: ExtensionContext,
   options: ChoosePlannersOptions,
-): Promise<ModelSpec[] | undefined> {
+): Promise<PlannerChoice | undefined> {
   const available = snapshotAvailableImplementationModels(ctx);
   const rows = plannerRows(options.preselected, available);
   const selected = new Set(rows.filter((row) => row.selected).map((row) => row.id));
-  let outcome: ModelSpec[] | undefined;
+  const capabilityRows = (options.capabilities ?? []).map((row) => ({ ...row, itemId: `capability:${row.id}` }));
+  const enabledCapabilities = new Set(capabilityRows.filter((row) => row.selected).map((row) => row.itemId));
+  let outcome: PlannerChoice | undefined;
   type Screen = "planners";
   type Action = "toggle" | "start";
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
@@ -46,17 +62,26 @@ export async function choosePlanners(
         title: options.title,
         lines: [
           ...(options.lines ?? []),
-          `${selected.size} model${selected.size === 1 ? "" : "s"} selected. Each planner explores read-only and cannot ask you questions.`,
+          `${selected.size} model${selected.size === 1 ? "" : "s"} selected. Tool rows apply to every planner; planners never edit files or ask you questions.`,
         ],
         enableSearch: true,
-        viewportSize: 10,
-        items: rows.map((row) => ({
-          id: row.id,
-          label: row.label,
-          ...(row.name ? { description: row.name } : {}),
-          searchText: row.searchText,
-          selected: selected.has(row.id),
-        })),
+        viewportSize: 12,
+        items: [
+          ...capabilityRows.map((row) => ({
+            id: row.itemId,
+            label: `Tool · ${safeText(row.label)}`,
+            ...(row.description ? { description: safeText(row.description) } : {}),
+            searchText: `tool ${safeText(row.label)}`,
+            selected: enabledCapabilities.has(row.itemId),
+          })),
+          ...rows.map((row) => ({
+            id: row.id,
+            label: row.label,
+            ...(row.name ? { description: row.name } : {}),
+            searchText: row.searchText,
+            selected: selected.has(row.id),
+          })),
+        ],
         action: "toggle",
         actions: [
           {
@@ -71,6 +96,11 @@ export async function choosePlanners(
     },
     actions: {
       toggle: async ({ itemId, selected: isSelected }) => {
+        if (capabilityRows.some((row) => row.itemId === itemId)) {
+          if (isSelected) enabledCapabilities.add(itemId);
+          else enabledCapabilities.delete(itemId);
+          return { kind: "stay" };
+        }
         if (!rows.some((row) => row.id === itemId)) return { kind: "rejected" };
         if (isSelected) selected.add(itemId);
         else selected.delete(itemId);
@@ -78,7 +108,10 @@ export async function choosePlanners(
       },
       start: async () => {
         if (selected.size === 0) return { kind: "rejected" };
-        outcome = rows.filter((row) => selected.has(row.id)).map((row) => row.spec);
+        outcome = {
+          specs: rows.filter((row) => selected.has(row.id)).map((row) => row.spec),
+          capabilities: capabilityRows.filter((row) => enabledCapabilities.has(row.itemId)).map((row) => row.id),
+        };
         return { kind: "close" };
       },
     },

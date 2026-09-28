@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "vitest";
-import { formatPlannerPrompt, PLANNER_ENV } from "../src/multi-plan.js";
+import { formatPlannerPrompt, PLANNER_ENV, resolvePlannerAccess } from "../src/multi-plan.js";
 import planMode from "../src/plan-mode.js";
 import { plannerArgs, runPlanner } from "../src/planner-process.js";
 import {
@@ -255,24 +255,58 @@ test("scoutModelMap normalizes like the implementation map", () => {
   assert.equal(normalizePlanModeSettings({ scoutModelMap: { bad: "anthropic/x" } }), undefined);
 });
 
-test("research extensions and tools reach planners, their scouts, and the prompts", async () => {
+test("toolsets chosen at run start reach planners, their scouts, and the prompts", async () => {
+  const toolsets = {
+    web: {
+      label: "Web",
+      extensions: ["~/web-access"],
+      tools: ["web_search", "fetch_content"],
+      enabled: true,
+      scouts: true,
+    },
+    mcp: { label: "MCP", extensions: ["~/mcp-adapter"], tools: ["mcp"], enabled: true, scouts: false },
+  };
+  const access = resolvePlannerAccess(
+    { shell: false, subagents: true, toolsets: ["web", "mcp", "missing"] },
+    toolsets,
+    (path) => path.replace("~", "/home"),
+  );
+  assert.deepEqual(access, {
+    shell: false,
+    subagents: true,
+    extensions: ["/home/web-access", "/home/mcp-adapter"],
+    tools: ["web_search", "fetch_content", "mcp"],
+    scoutExtensions: ["/home/web-access"],
+    scoutTools: ["web_search", "fetch_content"],
+  });
+
   const base = {
     spec: { provider: "anthropic", modelId: "claude-fable-5-1" },
     prompt: "p",
     extensionPath: "/e",
     loadUserExtensions: false,
-    extraExtensions: ["/web-access"],
-    extraTools: ["web_search", "fetch_content"],
+    scoutSpec: { provider: "anthropic", modelId: "claude-opus-5-5" },
+    access,
   };
   const args = plannerArgs(base);
-  assert.deepEqual(args.slice(args.indexOf("--no-extensions"), args.indexOf("--no-extensions") + 5), [
+  assert.deepEqual(args.slice(args.indexOf("--no-extensions"), args.indexOf("--no-extensions") + 7), [
     "--no-extensions",
     "--extension",
     "/e",
     "--extension",
-    "/web-access",
+    "/home/web-access",
+    "--extension",
+    "/home/mcp-adapter",
   ]);
-  assert.match(args[args.indexOf("--tools") + 1] ?? "", /plan_mode_complete,web_search,fetch_content$/u);
+  assert.equal(
+    args[args.indexOf("--tools") + 1],
+    "read,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,mcp,plan_subagents",
+  );
+  const noSubagents = plannerArgs({ ...base, access: { ...access, shell: true, subagents: false } });
+  assert.equal(
+    noSubagents[noSubagents.indexOf("--tools") + 1],
+    "read,bash,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,mcp",
+  );
 
   const { spawnProcess, calls } = fakeSpawn((child) => child.exit(0));
   await runPlanner({
@@ -285,25 +319,43 @@ test("research extensions and tools reach planners, their scouts, and the prompt
     spawnProcess,
     piCommand: { command: "pi", args: [] },
   });
-  assert.equal(calls[0]?.env.PI_PLAN_MODE_EXTRA_TOOLS, "web_search,fetch_content");
-  assert.equal(calls[0]?.env.PI_PLAN_MODE_PLANNER_EXTENSIONS, '["/web-access"]');
+  assert.equal(calls[0]?.env.PI_PLAN_MODE_EXTRA_TOOLS, "web_search,fetch_content,mcp");
+  assert.equal(calls[0]?.env.PI_PLAN_MODE_SCOUT_EXTENSIONS, '["/home/web-access"]');
+  assert.equal(calls[0]?.env.PI_PLAN_MODE_SCOUT_TOOLS, "web_search,fetch_content");
+  assert.equal(calls[0]?.env[SCOUT_MODEL_ENV], "anthropic/claude-opus-5-5");
 
   const scout = scoutArgs({ provider: "p", modelId: "m" }, "Find docs", {
     extensions: ["/web-access"],
-    tools: ["web_search"],
+    tools: ["web_search", "mcp"],
   });
-  assert.equal(scout[scout.indexOf("--tools") + 1], "read,grep,find,ls,web_search");
+  assert.equal(scout[scout.indexOf("--tools") + 1], "read,grep,find,ls,web_search,mcp");
   assert.equal(scout[scout.indexOf("--no-extensions") + 2], "/web-access");
-  assert.match(scout.at(-1) ?? "", /research beyond the repository with web_search/u);
   assert.match(
-    formatPlannerPrompt("t", "", 2, undefined, ["web_search", "fetch_content"]),
-    /Research beyond the repository[^\n]*web_search, fetch_content/u,
+    scout.at(-1) ?? "",
+    /research beyond the repository with web_search, mcp\. MCP tools reach external services/u,
   );
-  assert.deepEqual(normalizePlanModeSettings({ plannerExtensions: ["~/x"], plannerTools: ["web_search"] }), {
-    thinkingLevel: "inherit",
-    plannerExtensions: ["~/x"],
-    plannerTools: ["web_search"],
-  });
+  const prompt = formatPlannerPrompt("t", "", 2, undefined, ["web_search", "mcp"]);
+  assert.match(prompt, /Research beyond the repository[^\n]*web_search, mcp/u);
+  assert.match(prompt, /MCP tools reach external services[^\n]*only to read/u);
+  assert.deepEqual(
+    normalizePlanModeSettings({
+      plannerToolsets: {
+        web: { tools: ["web_search"], extensions: ["~/x"] },
+        mcp: { label: "MCP", tools: ["mcp"], enabled: false, scouts: false },
+      },
+    })?.plannerToolsets,
+    {
+      web: { label: "web", extensions: ["~/x"], tools: ["web_search"], enabled: true, scouts: true },
+      mcp: { label: "MCP", extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+    },
+  );
+  for (const invalid of [
+    { shell: { tools: ["x"] } },
+    { web: { tools: [] } },
+    { web: { tools: ["x"], enabled: "yes" } },
+  ]) {
+    assert.equal(normalizePlanModeSettings({ plannerToolsets: invalid }), undefined, JSON.stringify(invalid));
+  }
 });
 
 test("Plan mode admits the extra research tools only inside planner processes", async () => {

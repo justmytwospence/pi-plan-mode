@@ -1,13 +1,21 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { parseProposedPlan } from "./message-transform.js";
-import { EXTRA_TOOLS_ENV, PLANNER_ENV, PLANNER_EXTENSIONS_ENV, type PlanCandidate } from "./multi-plan.js";
+import {
+  DEFAULT_PLANNER_ACCESS,
+  EXTRA_TOOLS_ENV,
+  PLANNER_ENV,
+  type PlanCandidate,
+  type PlannerAccess,
+  SCOUT_EXTENSIONS_ENV,
+  SCOUT_TOOLS_ENV,
+} from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
 
 export { piSpawnCommand } from "./pi-command.js";
 
-const PLANNER_TOOLS = ["read", "bash", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete"];
+const PLANNER_TOOLS = ["read", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete"];
 const KILL_GRACE_MS = 5_000;
 const STDERR_TAIL_CHARS = 2_000;
 const MIN_PROSE_PLAN_CHARS = 200;
@@ -35,10 +43,8 @@ export interface PlannerRunOptions {
   loadUserExtensions: boolean;
   /** Model for the planner's read-only subagents; enables the plan_subagents tool. */
   scoutSpec?: ModelSpec;
-  /** Extra extensions (resolved paths) loaded into the planner and its scouts. */
-  extraExtensions?: readonly string[];
-  /** Extra read-only tools (e.g. web_search) enabled for the planner and its scouts. */
-  extraTools?: readonly string[];
+  /** Shell, subagents, and extra extensions and tools for this run (defaults: shell and subagents only). */
+  access?: PlannerAccess;
   signal: AbortSignal;
   onProgress(progress: PlannerProgress): void;
   /** Test seam: replaces `child_process.spawn`. */
@@ -48,11 +54,16 @@ export interface PlannerRunOptions {
 }
 
 export function plannerArgs(
-  options: Pick<
-    PlannerRunOptions,
-    "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "extraExtensions" | "extraTools"
-  >,
+  options: Pick<PlannerRunOptions, "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access">,
 ) {
+  const access = options.access ?? DEFAULT_PLANNER_ACCESS;
+  const tools = [
+    "read",
+    ...(access.shell ? ["bash"] : []),
+    ...PLANNER_TOOLS.slice(1),
+    ...access.tools,
+    ...(options.scoutSpec && access.subagents ? [PLAN_SUBAGENTS_TOOL_NAME] : []),
+  ];
   return [
     "--mode",
     "json",
@@ -60,9 +71,7 @@ export function plannerArgs(
     "--model",
     formatModelSpec(options.spec),
     "--tools",
-    [...PLANNER_TOOLS, ...(options.extraTools ?? []), ...(options.scoutSpec ? [PLAN_SUBAGENTS_TOOL_NAME] : [])].join(
-      ",",
-    ),
+    tools.join(","),
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -72,7 +81,7 @@ export function plannerArgs(
           "--no-extensions",
           "--extension",
           options.extensionPath,
-          ...(options.extraExtensions ?? []).flatMap((extension) => ["--extension", extension]),
+          ...access.extensions.flatMap((extension) => ["--extension", extension]),
         ]),
     "--",
     options.prompt,
@@ -245,9 +254,12 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
           ...process.env,
           [PLANNER_ENV]: "1",
           PI_SKIP_VERSION_CHECK: "1",
-          ...(options.scoutSpec ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) } : {}),
-          [PLANNER_EXTENSIONS_ENV]: JSON.stringify(options.extraExtensions ?? []),
-          [EXTRA_TOOLS_ENV]: (options.extraTools ?? []).join(","),
+          ...(options.scoutSpec && (options.access ?? DEFAULT_PLANNER_ACCESS).subagents
+            ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) }
+            : {}),
+          [EXTRA_TOOLS_ENV]: (options.access?.tools ?? []).join(","),
+          [SCOUT_EXTENSIONS_ENV]: JSON.stringify(options.access?.scoutExtensions ?? []),
+          [SCOUT_TOOLS_ENV]: (options.access?.scoutTools ?? []).join(","),
         },
         stdio: ["ignore", "pipe", "pipe"],
       });

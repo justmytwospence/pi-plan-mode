@@ -71,8 +71,10 @@ import {
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
   type PlanCandidate,
-  plannerExtensionsFromEnv,
+  resolvePlannerAccess,
   SELECTED_PLAN_MESSAGE_TYPE,
+  scoutExtensionsFromEnv,
+  scoutToolsFromEnv,
 } from "./multi-plan.js";
 import { createPlanActionController, type FreshImplementationTiming } from "./plan-action-controller.js";
 import { createPlanExportController } from "./plan-export-controller.js";
@@ -338,7 +340,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   const scoutSpec = isPlannerProcess() ? parseModelSpec(process.env[SCOUT_MODEL_ENV]) : undefined;
   // Extra read-only tools (web research) a planner may use; Plan mode admits them in planners only.
   const plannerExtraTools = new Set(isPlannerProcess() ? extraToolsFromEnv() : []);
-  const plannerExtensions = isPlannerProcess() ? plannerExtensionsFromEnv() : [];
+  const scoutExtensions = isPlannerProcess() ? scoutExtensionsFromEnv() : [];
+  const scoutTools = isPlannerProcess() ? scoutToolsFromEnv() : [];
   const activeScouts = new Set<import("node:child_process").ChildProcess>();
   const killScouts = () => {
     for (const child of activeScouts) {
@@ -367,8 +370,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               spec: scoutSpec,
               task,
               cwd: ctx.cwd,
-              extensions: plannerExtensions,
-              tools: [...plannerExtraTools],
+              extensions: scoutExtensions,
+              tools: scoutTools,
               ...(signal ? { signal } : {}),
               track: (child) => {
                 activeScouts.add(child);
@@ -1186,16 +1189,52 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const preselected = (configured.length > 0 ? configured : sessionModel).filter(
       (spec) => !(current?.model && sameModel(spec, current.model) && !spec.thinkingLevel),
     );
-    const specs = await ui.choosePlanners(ctx, {
+    const toolsets = settings.plannerToolsets ?? {};
+    const scoutTargets = [...new Set(Object.values(settings.scoutModelMap ?? {}).map(formatModelSpec))];
+    const choice = await ui.choosePlanners(ctx, {
       title: current ? "Compare with other models" : "Plan with multiple models",
       lines: [
         ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
         ...(current ? ["The current plan joins the comparison as plan A."] : []),
       ],
       preselected,
+      capabilities: [
+        {
+          id: "shell",
+          label: "Shell",
+          description: "Read-only inspection commands (git, rg, cat, ls, …) under Plan mode's policy.",
+          selected: true,
+        },
+        ...(scoutTargets.length > 0
+          ? [
+              {
+                id: "subagents",
+                label: "Subagents",
+                description: `Parallel read-only subagents on ${scoutTargets.join(", ")} (scoutModelMap).`,
+                selected: true,
+              },
+            ]
+          : []),
+        ...Object.entries(toolsets).map(([id, toolset]) => ({
+          id: `toolset:${id}`,
+          label: toolset.label,
+          description: `${toolset.tools.join(", ")}${toolset.scouts ? " · also for subagents" : ""}`,
+          selected: toolset.enabled,
+        })),
+      ],
       ...lifecycle,
     });
-    if (!specs?.length || !lifecycle.isCurrent()) return;
+    const specs = choice?.specs;
+    if (!choice || !specs?.length || !lifecycle.isCurrent()) return;
+    const access = resolvePlannerAccess(
+      {
+        shell: choice.capabilities.includes("shell"),
+        subagents: choice.capabilities.includes("subagents"),
+        toolsets: choice.capabilities.flatMap((id) => (id.startsWith("toolset:") ? [id.slice("toolset:".length)] : [])),
+      },
+      toolsets,
+      expandHome,
+    );
 
     let runLifecycle = lifecycle;
     if (!state.enabled) {
@@ -1224,8 +1263,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       run: (signal, onProgress) =>
         Promise.all(
           specs.map((spec, index) => {
-            const scout = configuredScoutModel(settings, spec);
-            const extraTools = settings.plannerTools ?? [];
+            const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
             return runPlanner({
               id: candidateId(index + offset),
               spec,
@@ -1235,11 +1273,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
                 transcript,
                 plannerCount,
                 scout ? formatModelSpec(scout) : undefined,
-                extraTools,
+                access.tools,
               ),
               ...(scout ? { scoutSpec: scout } : {}),
-              extraExtensions: (settings.plannerExtensions ?? []).map(expandHome),
-              extraTools,
+              access,
               timeoutMs,
               extensionPath: EXTENSION_ENTRY_PATH,
               loadUserExtensions: settings.plannerLoadExtensions === true,

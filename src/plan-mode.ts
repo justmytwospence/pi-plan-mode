@@ -32,7 +32,13 @@ import {
   formatTransferredPlanPrompt,
   startFreshImplementationFromState,
 } from "./fresh-implementation.js";
-import { type ImplementationModelOverride, type ModelSpec, sameModel } from "./implementation-models.js";
+import {
+  formatModelSpec,
+  type ImplementationModelOverride,
+  type ModelSpec,
+  parseModelSpec,
+  sameModel,
+} from "./implementation-models.js";
 import {
   createImplementationRetentionCoordinator,
   implementationRetentionPreview,
@@ -86,11 +92,22 @@ import {
 import { assertPlanModeHelperToolsAvailable, planModeHelperToolsAvailable } from "./required-tools.js";
 import { preflightSavedPlanImplementation, savedPlanBlocksNewWorkflow } from "./saved-plan-preflight.js";
 import {
+  addUsage,
+  emptyUsage,
+  formatScoutResults,
+  normalizeScoutTasks,
+  PLAN_SUBAGENTS_PARAMS,
+  PLAN_SUBAGENTS_TOOL_NAME,
+  runScout,
+  SCOUT_MODEL_ENV,
+} from "./scout-process.js";
+import {
   awaitPlanModeSettingsWrites,
   configuredImplementationPlanRetention,
   configuredPlanModeToggleShortcut,
   configuredPlanners,
   configuredPlannerTimeoutSeconds,
+  configuredScoutModel,
   configuredThinkingLevel,
   type ImplementationPlanRetention,
   type PlanModeSettings,
@@ -314,6 +331,55 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       return planModeCompleted(parsed.plan);
     },
   });
+
+  // Planner subprocesses may fan out read-only scouts on a cheaper model (settings.scoutModelMap).
+  const scoutSpec = isPlannerProcess() ? parseModelSpec(process.env[SCOUT_MODEL_ENV]) : undefined;
+  const activeScouts = new Set<import("node:child_process").ChildProcess>();
+  const killScouts = () => {
+    for (const child of activeScouts) {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // Already gone.
+      }
+    }
+    activeScouts.clear();
+  };
+  if (scoutSpec) {
+    process.once("exit", killScouts);
+    pi.registerTool({
+      name: PLAN_SUBAGENTS_TOOL_NAME,
+      label: "Plan subagents",
+      description: `Run up to 6 read-only subagents in parallel on ${formatModelSpec(scoutSpec)} to investigate the codebase while planning. Each gets only its task text and can read and search files (no shell, no edits), and returns a report. Use it for broad or independent investigations; verify decisive facts yourself.`,
+      parameters: PLAN_SUBAGENTS_PARAMS,
+      async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx) {
+        if (!state.enabled) throw new Error("plan_subagents is only available while Plan mode is active");
+        const parsed = normalizeScoutTasks(params);
+        if (!parsed.ok) throw new Error(parsed.error);
+        const results = await Promise.all(
+          parsed.tasks.map((task) =>
+            runScout({
+              spec: scoutSpec,
+              task,
+              cwd: ctx.cwd,
+              ...(signal ? { signal } : {}),
+              track: (child) => {
+                activeScouts.add(child);
+                return () => activeScouts.delete(child);
+              },
+            }),
+          ),
+        );
+        const usage = emptyUsage();
+        for (const result of results) addUsage(usage, result.usage);
+        return {
+          content: [{ type: "text" as const, text: formatScoutResults(scoutSpec, results) }],
+          details: { results: results.map(({ label, status }) => ({ label, status })) },
+          usage,
+        };
+      },
+    });
+  }
 
   pi.registerCommand("plan", {
     description: "Enter or manage Codex-like Plan mode",
@@ -613,6 +679,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    killScouts();
     cancelDeferredFreshImplementation();
     const shutdownSession = ctx.sessionManager;
     const runtimeApplication =
@@ -668,7 +735,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   pi.on("tool_call", async (event, ctx) => {
     const requiredHelper =
-      event.toolName === PLAN_MODE_QUESTION_TOOL_NAME || event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME;
+      event.toolName === PLAN_MODE_QUESTION_TOOL_NAME ||
+      event.toolName === PLAN_MODE_COMPLETE_TOOL_NAME ||
+      (scoutSpec !== undefined && event.toolName === PLAN_SUBAGENTS_TOOL_NAME);
     if (!state.enabled) {
       if (!requiredHelper) return;
       return {
@@ -1138,7 +1207,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       );
     }
 
-    const prompt = formatPlannerPrompt(task, transcript, specs.length + (current ? 1 : 0));
+    const plannerCount = specs.length + (current ? 1 : 0);
     const offset = current ? 1 : 0;
     const timeoutMs = configuredPlannerTimeoutSeconds(settings) * 1000;
     const candidates = await ui.runPlannersWithProgress(ctx, {
@@ -1146,19 +1215,21 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       ...runLifecycle,
       run: (signal, onProgress) =>
         Promise.all(
-          specs.map((spec, index) =>
-            runPlanner({
+          specs.map((spec, index) => {
+            const scout = configuredScoutModel(settings, spec);
+            return runPlanner({
               id: candidateId(index + offset),
               spec,
               cwd: ctx.cwd,
-              prompt,
+              prompt: formatPlannerPrompt(task, transcript, plannerCount, scout ? formatModelSpec(scout) : undefined),
+              ...(scout ? { scoutSpec: scout } : {}),
               timeoutMs,
               extensionPath: EXTENSION_ENTRY_PATH,
               loadUserExtensions: settings.plannerLoadExtensions === true,
               signal,
               onProgress: (progress) => onProgress(index, progress),
-            }),
-          ),
+            });
+          }),
         ),
     });
     if (!runLifecycle.isCurrent()) return;

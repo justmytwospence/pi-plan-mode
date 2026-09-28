@@ -1,8 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
-import { basename } from "node:path";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { parseProposedPlan } from "./message-transform.js";
 import { PLANNER_ENV, type PlanCandidate } from "./multi-plan.js";
+import { piSpawnCommand } from "./pi-command.js";
+import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
+
+export { piSpawnCommand } from "./pi-command.js";
 
 const PLANNER_TOOLS = ["read", "bash", "grep", "find", "ls", "plan_mode_question", "plan_mode_complete"];
 const KILL_GRACE_MS = 5_000;
@@ -29,6 +32,8 @@ export interface PlannerRunOptions {
   /** Absolute path of this extension's entry point, loaded into the planner with `-e`. */
   extensionPath: string;
   loadUserExtensions: boolean;
+  /** Model for the planner's read-only subagents; enables the plan_subagents tool. */
+  scoutSpec?: ModelSpec;
   signal: AbortSignal;
   onProgress(progress: PlannerProgress): void;
   /** Test seam: replaces `child_process.spawn`. */
@@ -37,19 +42,8 @@ export interface PlannerRunOptions {
   piCommand?: { command: string; args: string[] };
 }
 
-/** Resolve how to launch the same Pi CLI that is running this extension. */
-export function piSpawnCommand(): { command: string; args: string[] } {
-  const override = process.env.PI_PLAN_MODE_PI_BINARY?.trim();
-  if (override) return { command: override, args: [] };
-  const entry = process.argv[1];
-  const exec = process.execPath;
-  if (basename(exec).replace(/\.exe$/iu, "") === "pi") return { command: exec, args: [] };
-  if (entry && /(?:^|[/\\])(?:pi|cli\.[cm]?js)$/u.test(entry)) return { command: exec, args: [entry] };
-  return { command: "pi", args: [] };
-}
-
 export function plannerArgs(
-  options: Pick<PlannerRunOptions, "spec" | "prompt" | "extensionPath" | "loadUserExtensions">,
+  options: Pick<PlannerRunOptions, "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec">,
 ) {
   return [
     "--mode",
@@ -58,7 +52,7 @@ export function plannerArgs(
     "--model",
     formatModelSpec(options.spec),
     "--tools",
-    PLANNER_TOOLS.join(","),
+    [...PLANNER_TOOLS, ...(options.scoutSpec ? [PLAN_SUBAGENTS_TOOL_NAME] : [])].join(","),
     "--no-skills",
     "--no-prompt-templates",
     "--no-themes",
@@ -188,6 +182,15 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         }
         report();
       } else if (event.type === "tool_execution_end") {
+        // Nested model work (plan_subagents) reports its usage on the tool result.
+        const result = isRecord(event.result) ? event.result : undefined;
+        if (result && isRecord(result.usage)) {
+          const usage = result.usage;
+          progress.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+          const cost = isRecord(usage.cost) ? usage.cost.total : undefined;
+          progress.costUsd += typeof cost === "number" ? cost : 0;
+          report();
+        }
         if (event.toolName === "plan_mode_complete" && event.isError === true) {
           plan = undefined;
           progress.lastActivity = "plan rejected; revising";
@@ -216,7 +219,12 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     try {
       child = spawnProcess(pi.command, [...pi.args, ...plannerArgs(options)], {
         cwd: options.cwd,
-        env: { ...process.env, [PLANNER_ENV]: "1", PI_SKIP_VERSION_CHECK: "1" },
+        env: {
+          ...process.env,
+          [PLANNER_ENV]: "1",
+          PI_SKIP_VERSION_CHECK: "1",
+          ...(options.scoutSpec ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) } : {}),
+        },
         stdio: ["ignore", "pipe", "pipe"],
       });
     } catch (error: unknown) {
@@ -260,6 +268,7 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
 
 function describeToolCall(toolName: string, args: unknown) {
   if (!isRecord(args)) return toolName;
+  if (Array.isArray(args.tasks)) return `${toolName} ×${args.tasks.length}`;
   const detail =
     typeof args.path === "string"
       ? args.path

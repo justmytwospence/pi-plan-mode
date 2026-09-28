@@ -58,7 +58,12 @@ current plan as candidate A; planners do not see it, so their plans stay indepen
 Candidates are stored in the session branch; `/plan compare` reopens the latest set.
 
 Planners get the conversation so far (user and assistant text and plan-question answers, not tool output or
-earlier plans). Extension-provided model providers need `plannerLoadExtensions: true`, which loads all of your
+earlier plans).
+
+With `scoutModelMap`, a planner can fan work out to cheaper read-only subagents through a `plan_subagents` tool
+(up to six tasks per call, run in parallel). Each scout is a `pi --mode json --no-extensions` process with only
+`read`, `grep`, `find`, and `ls`, so it cannot modify anything or spawn further agents; its report and token usage
+return to the planner and count toward the planner's cost. The tool exists only inside planner subprocesses. Extension-provided model providers need `plannerLoadExtensions: true`, which loads all of your
 extensions into each planner.
 
 ## 🛠️ Implement with a chosen model, effort, and context
@@ -409,7 +414,11 @@ New settings in this fork:
     "openai-codex/gpt-6-astra": "openai-codex/gpt-6-sol"
   },
   "defaultImplementationContext": "keep",
-  "planners": ["anthropic/claude-opus-5-5:xhigh", "openai-codex/gpt-6-sol:xhigh"],
+  "planners": ["anthropic/claude-fable-5-1:xhigh", "openai-codex/gpt-6-astra:xhigh"],
+  "scoutModelMap": {
+    "anthropic/claude-fable-5-1": "anthropic/claude-opus-5-5:high",
+    "openai-codex/gpt-6-astra": "openai-codex/gpt-6-sol:high"
+  },
   "plannerTimeoutSeconds": 900,
   "plannerLoadExtensions": false,
   "planCompleteCommand": ["bash", "~/.claude/hooks/save-plan-to-obsidian.sh"]

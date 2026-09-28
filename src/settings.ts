@@ -108,6 +108,8 @@ export interface PlanModeSettings {
   defaultImplementationContext?: ImplementationContextChoice;
   /** Models preselected for `/plan multi`. */
   planners?: ModelSpec[];
+  /** Planner model (`provider/modelId`) to the model its read-only subagents (plan_subagents) run on. */
+  scoutModelMap?: Record<string, ModelSpec>;
   plannerTimeoutSeconds?: number;
   /** Load the user's extensions in planner subprocesses (needed for extension-provided models). */
   plannerLoadExtensions?: boolean;
@@ -215,6 +217,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const planners = normalizePlanners(Reflect.get(value, "planners"));
     if (!planners) return undefined;
     settings.planners = planners;
+  }
+  if (Object.hasOwn(value, "scoutModelMap")) {
+    const scoutModelMap = normalizeImplementationModelMap(Reflect.get(value, "scoutModelMap"));
+    if (!scoutModelMap) return undefined;
+    settings.scoutModelMap = scoutModelMap;
   }
   if (Object.hasOwn(value, "plannerTimeoutSeconds")) {
     const timeout = Reflect.get(value, "plannerTimeoutSeconds");
@@ -652,6 +659,10 @@ export function configuredImplementationContext(settings: PlanModeSettings): Imp
 
 export function configuredPlanners(settings: PlanModeSettings): ModelSpec[] {
   return settings.planners ?? [];
+}
+
+export function configuredScoutModel(settings: PlanModeSettings, planner: ImplementationModelOverride) {
+  return settings.scoutModelMap?.[`${planner.provider}/${planner.modelId}`];
 }
 
 export function configuredPlannerTimeoutSeconds(settings: PlanModeSettings) {

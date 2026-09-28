@@ -131,12 +131,17 @@ export function buildPlannerTranscript(entries: readonly unknown[], maxChars = M
   return `${truncate(first, maxChars / 4)}\n\n[… earlier conversation omitted …]\n\n${transcript.slice(-tailBudget)}`;
 }
 
-export function formatPlannerPrompt(task: string, transcript: string, plannerCount: number) {
+export function formatPlannerPrompt(task: string, transcript: string, plannerCount: number, scoutLabel?: string) {
   const others =
     plannerCount > 1 ? `${plannerCount - 1} other model${plannerCount > 2 ? "s are" : " is"}` : "Other models may be";
   return [
     `You are one of several independent planners. ${others} planning the same task in parallel without seeing your work; the user will compare the plans and pick one or combine them.`,
     "You are running non-interactively and nobody can answer questions. Do not call plan_mode_question. Resolve ambiguity by exploring the repository; when a real decision remains, choose the most reasonable option and record it under an explicit Assumptions section.",
+    ...(scoutLabel
+      ? [
+          `For broad or independent investigations, delegate to read-only subagents with plan_subagents (they run on ${scoutLabel}; give each a self-contained task and run independent ones in one call). Verify anything decisive yourself, and write the plan yourself.`,
+        ]
+      : []),
     "Finish by calling plan_mode_complete alone with the complete plan.",
     "",
     "## Task",

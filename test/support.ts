@@ -1,4 +1,4 @@
-import { createMockPi as createBaseMockPi } from "../../../test/support.js";
+import { createMockPi as createBaseMockPi } from "./shared/support.js";
 
 export {
   builtinTool,
@@ -6,7 +6,7 @@ export {
   createMockContext,
   driveCustomSelector,
   extensionTool,
-} from "../../../test/support.js";
+} from "./shared/support.js";
 
 const PLAN_HELPERS = ["plan_mode_question", "plan_mode_complete"];
 

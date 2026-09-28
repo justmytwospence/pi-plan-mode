@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { DefaultResourceLoader, ExtensionRunner, SettingsManager } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
-import { builtinTool, createMockContext, extensionTool } from "../../../test/support.js";
+import { builtinTool, createMockContext, extensionTool } from "./shared/support.js";
 
 const EVENT_RECORDER = Symbol.for("pi-plan-mode.issue-1263-events");
 
@@ -46,7 +46,7 @@ export default function laterExtension(pi) {
       cwd: root,
       agentDir,
       settingsManager: SettingsManager.inMemory({}),
-      additionalExtensionPaths: [resolve("packages/pi-plan-mode/src/index.ts"), followerPath],
+      additionalExtensionPaths: [resolve("src/index.ts"), followerPath],
     });
     await loader.reload();
     const loaded = loader.getExtensions();

@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-plan-mode",
   "version": "0.59.0",
-  "description": "Pi read-only /plan mode with multi-model planning, guided synthesis, and plan-model-aware implementation handoff. Fork of @narumitw/pi-plan-mode.",
+  "description": "Pi read-only /plan mode with multi-model planning, guided synthesis, and plan-model-aware implementation (model, effort, context). Fork of @narumitw/pi-plan-mode.",
   "type": "module",
   "license": "MIT",
   "private": true,

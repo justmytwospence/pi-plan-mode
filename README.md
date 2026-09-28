@@ -1,45 +1,81 @@
 # 🧭 pi-plan-mode — Plan Before Pi Edits Code
 
-[![npm](https://img.shields.io/npm/v/@narumitw/pi-plan-mode)](https://www.npmjs.com/package/@narumitw/pi-plan-mode) [![Pi extension](https://img.shields.io/badge/Pi-extension-blue)](https://pi.dev) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
+A fork of [`@narumitw/pi-plan-mode`](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode)
+(MIT, history preserved) that keeps its read-only `/plan` workflow and adds:
 
-Use a Codex-like `/plan` mode to explore a codebase, resolve important questions, and approve an implementation-ready plan before Pi edits files.
+- **Multi-model planning.** `/plan multi <task>` runs one read-only planner per chosen model in parallel,
+  then lets you read each plan, use one as-is, or have the session model synthesize several with your guidance.
+- **Plan-model-aware implementation.** "Implement…" opens one screen with the model, effort (thinking level),
+  and context (keep the planning conversation, or clear it and start a fresh session with only the plan).
+  Defaults come from a map keyed by the model that wrote the plan, e.g. Opus plans implement on Sonnet at `high`.
+- **A plan-complete hook** that runs a command with Claude Code `PostToolUse`-shaped JSON whenever a plan is
+  accepted, so a Claude `ExitPlanMode` hook (such as saving plans to Obsidian) works unchanged.
+- **Stow-friendly settings.** The settings file may be a symlink; saves write through it instead of replacing it.
 
 ## ✨ Features
 
 - Starts and manages Plan mode through `/plan`, `/plan start`, or `/plan <prompt>`.
+- Plans with several models at once through `/plan multi` and compares or synthesizes their plans.
 - Blocks mutations, inactive helpers, and unsafe shell forms while keeping helper schemas stable.
 - Uses structured questions for important ambiguity and explicit completion for a decision-ready plan.
 - Reviews the complete plan before implementation, export, save, further planning, or discard.
-- Implements in the planning session or a fresh linked session with the approved plan.
-- Configures persistent or one-shot destination model and thinking choices for fresh implementation.
-- Restores Plan state and one saved plan across resume and compaction.
+- Implements in the planning session or a fresh linked session, choosing the model and effort each time.
+- Restores Plan state, one saved plan, and the latest candidate plans across resume and compaction.
 - Configures the Plan tool allowlist, reviewed shell commands, user-trusted subcommands, export path, plan reinjection, shortcut, and thinking level.
 - Publishes statusline state and cooperates anonymously with Workflow Mutex Protocol v1 participants.
 
 ## 📦 Install
 
-This release requires Pi 0.80.6 or newer.
-Native PowerShell tool support requires Pi 0.84.3 or newer on Windows; earlier Pi versions omit that optional tool and retain the existing Plan policy.
+This package is loaded from a local checkout; there is no build step because Pi loads `src/index.ts` through jiti.
 
 ```bash
-pi install npm:@narumitw/pi-plan-mode
+git clone https://github.com/justmytwospence/pi-plan-mode
+cd pi-plan-mode && npm ci --omit=dev
+pi install ./pi-plan-mode        # or add the absolute path to "packages" in ~/.pi/agent/settings.json
 ```
 
-Try without installing permanently:
-
-```bash
-pi -e npm:@narumitw/pi-plan-mode
-```
-
-Build and try this package locally from the repository root:
-
-```bash
-npm --workspace @narumitw/pi-plan-mode run build
-pi -e ./packages/pi-plan-mode
-```
-
-The package declares `dist/index.ts`, so build an unbuilt local checkout before Pi loads the package directory.
+Remove `npm:@narumitw/pi-plan-mode` first: both register `/plan` and the same Plan tools.
 Install only from sources you trust because Pi extensions run with Pi's permissions.
+
+## 🤝 Plan with several models
+
+```text
+/plan multi Add rate limiting to the public API
+```
+
+1. Pick the planner models. Configured `planners` are preselected; any available model can be toggled.
+2. Each planner runs as `pi --mode json --no-session --no-extensions --extension <this package>` in the project
+   directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
+   A widget shows each planner's progress; Escape cancels them all.
+3. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
+   rendered as Markdown and choose **Use this plan**, or choose **Synthesize…**, pick two or more candidates, and
+   optionally type guidance ("B's architecture with A's migration steps"). Synthesis runs in this session, so the
+   model can verify disagreements against the code and ask you questions before completing the merged plan.
+4. The chosen or synthesized plan goes through the normal ready flow.
+
+From a ready plan, **Compare with other models…** (in the ready menu or `/plan`) runs the same flow with the
+current plan as candidate A; planners do not see it, so their plans stay independent.
+Candidates are stored in the session branch; `/plan compare` reopens the latest set.
+
+Planners get the conversation so far (user and assistant text and plan-question answers, not tool output or
+earlier plans). Extension-provided model providers need `plannerLoadExtensions: true`, which loads all of your
+extensions into each planner.
+
+## 🛠️ Implement with a chosen model, effort, and context
+
+**Implement…** opens one screen:
+
+| Row | Default |
+| --- | --- |
+| Model | `implementationModelMap[<plan model>]`, else `defaultImplementationModel`, else the model that wrote the plan |
+| Effort | the map entry's `:effort` suffix, else `defaultImplementationThinkingLevel`, else the planning effort |
+| Context | `defaultImplementationContext` (`keep` or `clear`, default `keep`) |
+
+"Keep" switches this session to the chosen model and effort, then sends the implementation prompt.
+"Clear" creates a linked session that receives only the approved plan, with the chosen model and effort.
+`/plan implement` uses the defaults without opening the screen.
+The model that wrote a plan is remembered, including for saved plans and for a candidate picked from another
+model, so the map applies to the plan's author rather than whatever model the session happens to be on.
 
 ## 🚀 Quick start
 
@@ -57,8 +93,12 @@ flowchart LR
     explore --> complete["Complete the plan with plan_mode_complete"]
     complete --> review["Review the ready plan"]
     review -->|Revise| explore
-    review -->|Implement here| current["Current session: planning context retained"]
-    review -->|Start fresh| fresh["Fresh session: approved plan transferred"]
+    start -->|/plan multi| multi["Parallel planners, one per model"]
+    multi --> pick["Pick one or synthesize with guidance"]
+    pick --> review
+    review -->|Compare| multi
+    review -->|Implement, keep context| current["Current session: chosen model and effort"]
+    review -->|Implement, clear context| fresh["Fresh session: approved plan transferred"]
     review -->|Save| saved["Saved for later"]
     review -->|Export| exported["Markdown file"]
 ```
@@ -78,9 +118,10 @@ sequenceDiagram
     User-->>Plan: Answer or refine the request
     Plan->>Pi: Submit the complete plan
     Pi-->>User: Show the ready-plan review
-    alt Implement here
-        Pi->>Work: Restore Normal mode in the current session
-    else Start fresh and implement
+    User->>Pi: Implement: choose model, effort, and context
+    alt Keep planning conversation
+        Pi->>Work: Switch model and effort, restore Normal mode in the current session
+    else Clear context
         Pi->>Work: Create a fresh session with the approved plan
     end
 ```
@@ -89,13 +130,15 @@ sequenceDiagram
 
 | Command | Purpose |
 | --- | --- |
-| `/plan` | Start or manage planning, review a plan, or choose same-session or fresh-session implementation. |
+| `/plan` | Start or manage planning, review a plan, or implement it with a chosen model, effort, and context. |
 | `/plan start` | Enter Plan mode without sending a model message. |
 | `/plan <prompt>` | Start planning with a prompt, or send a follow-up while already active. |
 | `/plan tools` | Choose a session-specific tool policy, then start; cancellation changes nothing. |
 | `/plan show` | Display the stored plan without starting a model turn. |
 | `/plan finalize` | Ask the active planner to finish or ask one remaining material question. |
-| `/plan implement` | Implement a completed or saved plan in this session, without a selector. |
+| `/plan multi [task]` | Plan with several models in parallel, then use one plan or synthesize several. |
+| `/plan compare` | Reopen the latest candidate plans, or compare the ready plan with other models. |
+| `/plan implement` | Implement a completed or saved plan with the default model, effort, and context, without a selector. |
 | `/plan save` | Save a ready plan in this Pi session and leave Plan mode. |
 | `/plan settings` | Open the same Plan Settings screen available from the menus. |
 | `/plan export [path]` | Write a ready, saved, or active implementation plan to Markdown. |
@@ -356,6 +399,27 @@ The optional file is read at session start and watched for changes; only an expl
   "defaultPlanExportPath": "PLAN.md"
 }
 ```
+
+New settings in this fork:
+
+```json
+{
+  "implementationModelMap": {
+    "anthropic/claude-opus-5-5": "anthropic/claude-sonnet-5:high",
+    "openai-codex/gpt-6-astra": "openai-codex/gpt-6-sol"
+  },
+  "defaultImplementationContext": "keep",
+  "planners": ["anthropic/claude-opus-5-5:xhigh", "openai-codex/gpt-6-sol:xhigh"],
+  "plannerTimeoutSeconds": 900,
+  "plannerLoadExtensions": false,
+  "planCompleteCommand": ["bash", "~/.claude/hooks/save-plan-to-obsidian.sh"]
+}
+```
+
+Model specs are `provider/modelId`, optionally with `:off|minimal|low|medium|high|xhigh|max`.
+`/plan settings` edits the map (add, change effort, remove), the default context, and planner models.
+`planCompleteCommand` receives `{hook_event_name, tool_name, cwd, tool_input: {plan}, tool_response: {filePath}, model}`
+on stdin, with the plan written to `filePath`; it never runs inside planner subprocesses.
 
 By default, Plan mode inherits thinking, allows active safe built-ins, uses the planning model and thinking level for fresh implementation, exports to `PLAN.md`, and relies on ordinary conversation history after implementation starts.
 The shortcut is disabled unless configured; enabling, changing, or removing it takes effect after `/reload` or restarting Pi.

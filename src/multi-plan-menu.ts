@@ -199,6 +199,7 @@ export function progressLines(specs: readonly ModelSpec[], progress: ReadonlyArr
       const parts = [
         elapsed,
         `${current.toolCalls} tool calls`,
+        ...(current.subagentTasks ? [`${current.subagentTasks} subagents`] : []),
         ...(current.totalTokens ? [`${formatTokens(current.totalTokens)} tokens`] : []),
         ...(current.state === "running" && current.lastActivity ? [safeText(current.lastActivity)] : []),
         ...(current.state !== "running" && current.state !== "starting" ? [current.state] : []),

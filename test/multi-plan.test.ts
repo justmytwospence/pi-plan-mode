@@ -263,6 +263,7 @@ test("progress lines summarize each planner", () => {
         state: "running",
         startedAt: Date.now() - 65_000,
         toolCalls: 4,
+        subagentTasks: 3,
         totalTokens: 12_345,
         costUsd: 0,
         lastActivity: "read x.ts",
@@ -273,13 +274,14 @@ test("progress lines summarize each planner", () => {
         startedAt: 0,
         endedAt: 30_000,
         toolCalls: 9,
+        subagentTasks: 0,
         totalTokens: 0,
         costUsd: 0,
       },
       undefined,
     ],
   );
-  assert.match(lines[1] ?? "", /^… a\/one:high · 1m 0[45]s · 4 tool calls · 12k tokens · read x\.ts$/u);
+  assert.match(lines[1] ?? "", /^… a\/one:high · 1m 0[45]s · 4 tool calls · 3 subagents · 12k tokens · read x\.ts$/u);
   assert.match(lines[2] ?? "", /^✓ b\/two · 30s · 9 tool calls · done$/u);
   assert.equal(lines[3], "  c/three · waiting");
 });

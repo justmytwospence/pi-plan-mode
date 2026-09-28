@@ -204,6 +204,7 @@ test("planners get plan_subagents, the scout model, and scout usage only when a 
   assert.equal(calls[0]?.env[SCOUT_MODEL_ENV], "anthropic/claude-opus-5-5:high");
   assert.ok(Math.abs((candidate.costUsd ?? 0) - 0.75) < 1e-9);
   assert.ok(progress.includes("plan_subagents ×2"));
+  assert.equal(candidate.subagentTasks, 2);
   assert.match(
     formatPlannerPrompt("t", "", 2, "anthropic/claude-opus-5-5"),
     /plan_subagents \(they run on anthropic\/claude-opus-5-5/u,

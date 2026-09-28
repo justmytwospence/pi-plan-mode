@@ -25,6 +25,8 @@ export interface PlanCandidate {
   error?: string;
   durationMs?: number;
   toolCalls?: number;
+  /** Read-only subagent tasks the planner delegated through plan_subagents. */
+  subagentTasks?: number;
   totalTokens?: number;
   costUsd?: number;
 }
@@ -49,6 +51,8 @@ export function candidateSummary(candidate: PlanCandidate) {
   if (candidate.status !== "done") parts.push(candidate.status);
   if (candidate.durationMs !== undefined) parts.push(formatDuration(candidate.durationMs));
   if (candidate.toolCalls !== undefined) parts.push(`${candidate.toolCalls} tool calls`);
+  if (candidate.subagentTasks)
+    parts.push(`${candidate.subagentTasks} subagent${candidate.subagentTasks === 1 ? "" : "s"}`);
   if (candidate.totalTokens) parts.push(`${formatTokens(candidate.totalTokens)} tokens`);
   if (candidate.costUsd) parts.push(`$${candidate.costUsd.toFixed(2)}`);
   if (candidate.planFromText) parts.push("plan taken from prose");
@@ -203,6 +207,7 @@ export function normalizeCandidateSet(value: unknown): CandidateSet | undefined 
         ...(typeof candidate.error === "string" ? { error: candidate.error } : {}),
         ...numberField("durationMs", candidate.durationMs),
         ...numberField("toolCalls", candidate.toolCalls),
+        ...numberField("subagentTasks", candidate.subagentTasks),
         ...numberField("totalTokens", candidate.totalTokens),
         ...numberField("costUsd", candidate.costUsd),
       },

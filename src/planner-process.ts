@@ -18,6 +18,7 @@ export interface PlannerProgress {
   startedAt: number;
   endedAt?: number;
   toolCalls: number;
+  subagentTasks: number;
   lastActivity?: string;
   totalTokens: number;
   costUsd: number;
@@ -73,6 +74,7 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     state: "starting",
     startedAt,
     toolCalls: 0,
+    subagentTasks: 0,
     totalTokens: 0,
     costUsd: 0,
   };
@@ -145,6 +147,7 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         ...(error ? { error } : {}),
         durationMs: Date.now() - startedAt,
         toolCalls: progress.toolCalls,
+        ...(progress.subagentTasks ? { subagentTasks: progress.subagentTasks } : {}),
         totalTokens: progress.totalTokens,
         costUsd: progress.costUsd,
       });
@@ -176,6 +179,9 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
         progress.toolCalls += 1;
         progress.lastActivity = describeToolCall(toolName, event.args);
+        if (toolName === PLAN_SUBAGENTS_TOOL_NAME && isRecord(event.args) && Array.isArray(event.args.tasks)) {
+          progress.subagentTasks += event.args.tasks.length;
+        }
         if (toolName === "plan_mode_complete" && isRecord(event.args) && typeof event.args.plan === "string") {
           plan = event.args.plan.trim() || plan;
           progress.lastActivity = "submitted plan";

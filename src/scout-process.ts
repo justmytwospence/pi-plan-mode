@@ -1,6 +1,13 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
-import { EXTRA_TOOLS_ENV, PLANNER_ENV, SCOUT_EXTENSIONS_ENV, SCOUT_TOOLS_ENV } from "./multi-plan.js";
+import {
+  EXTRA_TOOLS_ENV,
+  MCP_ALLOW_ENV,
+  PLANNER_ENV,
+  SCOUT_EXTENSIONS_ENV,
+  SCOUT_MCP_ALLOW_ENV,
+  SCOUT_TOOLS_ENV,
+} from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 
 export const PLAN_SUBAGENTS_TOOL_NAME = "plan_subagents";
@@ -118,7 +125,7 @@ export function scoutPrompt(task: string, extraTools: readonly string[] = []) {
 export function scoutArgs(
   spec: ModelSpec,
   task: string,
-  extras: { extensions?: readonly string[]; tools?: readonly string[] } = {},
+  extras: { extensions?: readonly string[]; tools?: readonly string[]; guardExtensionPath?: string } = {},
 ) {
   return [
     "--mode",
@@ -129,6 +136,8 @@ export function scoutArgs(
     "--tools",
     [...SCOUT_TOOLS, ...(extras.tools ?? [])].join(","),
     "--no-extensions",
+    // This extension rides along only to enforce the MCP allowlist inside the scout.
+    ...(extras.guardExtensionPath ? ["--extension", extras.guardExtensionPath] : []),
     ...(extras.extensions ?? []).flatMap((extension) => ["--extension", extension]),
     "--no-skills",
     "--no-prompt-templates",
@@ -145,6 +154,9 @@ export interface RunScoutOptions {
   /** Extra extensions and read-only tools (e.g. web research) for the scout. */
   extensions?: readonly string[];
   tools?: readonly string[];
+  /** MCP tools the scout may call; loads `guardExtensionPath` to enforce it. */
+  mcpAllow?: readonly string[];
+  guardExtensionPath?: string;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Receives every spawned child so the caller can kill stragglers on shutdown. */
@@ -211,6 +223,9 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
     delete env[EXTRA_TOOLS_ENV];
     delete env[SCOUT_EXTENSIONS_ENV];
     delete env[SCOUT_TOOLS_ENV];
+    delete env[SCOUT_MCP_ALLOW_ENV];
+    delete env[MCP_ALLOW_ENV];
+    if (options.mcpAllow) env[MCP_ALLOW_ENV] = JSON.stringify(options.mcpAllow);
     try {
       child = (options.spawnProcess ?? spawn)(
         pi.command,
@@ -219,6 +234,9 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
           ...scoutArgs(options.spec, options.task.task, {
             ...(options.extensions ? { extensions: options.extensions } : {}),
             ...(options.tools ? { tools: options.tools } : {}),
+            ...(options.mcpAllow && options.guardExtensionPath
+              ? { guardExtensionPath: options.guardExtensionPath }
+              : {}),
           }),
         ],
         {

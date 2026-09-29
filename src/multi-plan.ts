@@ -7,6 +7,10 @@ export const EXTRA_TOOLS_ENV = "PI_PLAN_MODE_EXTRA_TOOLS";
 export const SCOUT_EXTENSIONS_ENV = "PI_PLAN_MODE_SCOUT_EXTENSIONS";
 /** Comma-separated extra tools a planner passes on to its scouts. */
 export const SCOUT_TOOLS_ENV = "PI_PLAN_MODE_SCOUT_TOOLS";
+/** JSON array of MCP tools (`server/tool` or `server/*`) this process may call through `mcp`. */
+export const MCP_ALLOW_ENV = "PI_PLAN_MODE_MCP_ALLOW";
+/** JSON array of MCP tools a planner passes on to its scouts. */
+export const SCOUT_MCP_ALLOW_ENV = "PI_PLAN_MODE_SCOUT_MCP_ALLOW";
 
 export function extraToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
   return listFromEnv(env[EXTRA_TOOLS_ENV]);
@@ -17,13 +21,23 @@ export function scoutToolsFromEnv(env: NodeJS.ProcessEnv = process.env): string[
 }
 
 export function scoutExtensionsFromEnv(env: NodeJS.ProcessEnv = process.env): string[] {
+  return jsonListFromEnv(env[SCOUT_EXTENSIONS_ENV]) ?? [];
+}
+
+/** Undefined means MCP calls are not restricted (no allowlist was passed). */
+export function mcpAllowFromEnv(name = MCP_ALLOW_ENV, env: NodeJS.ProcessEnv = process.env): string[] | undefined {
+  return jsonListFromEnv(env[name]);
+}
+
+function jsonListFromEnv(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
   try {
-    const value = JSON.parse(env[SCOUT_EXTENSIONS_ENV] ?? "[]") as unknown;
-    return Array.isArray(value)
-      ? value.filter((item): item is string => typeof item === "string" && item.length > 0)
-      : [];
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed)
+      ? parsed.filter((item): item is string => typeof item === "string" && item.length > 0)
+      : undefined;
   } catch {
-    return [];
+    return undefined;
   }
 }
 
@@ -41,22 +55,39 @@ export interface PlannerToolset {
   description?: string;
   extensions: string[];
   tools: string[];
-  /** Selected by default when a multi-model run starts. */
+  /** Per-tool descriptions for the picker and Jev. */
+  toolDescriptions?: Record<string, string>;
+  /** Expand into the configured MCP servers and their tools instead of listing `tools`. */
+  mcp?: boolean;
+  /** Selected by default when Jev is unavailable. */
   enabled: boolean;
   /** Also give these extensions and tools to the planner's scouts. */
   scouts: boolean;
 }
 
-/** What planners may use in one run, chosen when the run starts. */
+/** What the user chose on the tools screen. */
+export interface ToolSelection {
+  shell: boolean;
+  subagents: boolean;
+  /** Chosen tools of ordinary toolsets, by toolset id. */
+  toolsetTools: Record<string, string[]>;
+  /** Chosen MCP tools as `server/tool`, or `server/*` for a whole server. */
+  mcp: string[];
+}
+
+/** What planners may use in one run. */
 export interface PlannerAccess {
   shell: boolean;
   subagents: boolean;
   /** Extensions loaded into planners, and the tools they enable. */
   extensions: string[];
   tools: string[];
-  /** Extensions and tools passed on to scouts. */
+  /** MCP tools planners may call through `mcp`; undefined when MCP is not offered. */
+  mcpAllow?: string[];
+  /** Extensions, tools, and MCP tools passed on to scouts. */
   scoutExtensions: string[];
   scoutTools: string[];
+  scoutMcpAllow?: string[];
 }
 
 export const DEFAULT_PLANNER_ACCESS: PlannerAccess = {
@@ -69,21 +100,43 @@ export const DEFAULT_PLANNER_ACCESS: PlannerAccess = {
 };
 
 export function resolvePlannerAccess(
-  selection: { shell: boolean; subagents: boolean; toolsets: readonly string[] },
+  selection: ToolSelection,
   toolsets: Readonly<Record<string, PlannerToolset>>,
   resolvePath: (path: string) => string = (path) => path,
 ): PlannerAccess {
-  const chosen = selection.toolsets.flatMap((id) => (toolsets[id] ? [toolsets[id]] : []));
+  const extensions: string[] = [];
+  const tools: string[] = [];
+  const scoutExtensions: string[] = [];
+  const scoutTools: string[] = [];
+  let mcpAllow: string[] | undefined;
+  let scoutMcpAllow: string[] | undefined;
+  for (const [id, toolset] of Object.entries(toolsets)) {
+    const chosen = toolset.mcp
+      ? selection.mcp.length > 0
+        ? toolset.tools
+        : []
+      : (selection.toolsetTools[id] ?? []).filter((tool) => toolset.tools.includes(tool));
+    if (chosen.length === 0) continue;
+    const paths = toolset.extensions.map(resolvePath);
+    extensions.push(...paths);
+    tools.push(...chosen);
+    if (toolset.mcp) mcpAllow = [...selection.mcp];
+    if (toolset.scouts) {
+      scoutExtensions.push(...paths);
+      scoutTools.push(...chosen);
+      if (toolset.mcp) scoutMcpAllow = [...selection.mcp];
+    }
+  }
   const unique = (values: string[]) => [...new Set(values)];
   return {
     shell: selection.shell,
     subagents: selection.subagents,
-    extensions: unique(chosen.flatMap((toolset) => toolset.extensions.map(resolvePath))),
-    tools: unique(chosen.flatMap((toolset) => toolset.tools)),
-    scoutExtensions: unique(
-      chosen.filter((toolset) => toolset.scouts).flatMap((toolset) => toolset.extensions.map(resolvePath)),
-    ),
-    scoutTools: unique(chosen.filter((toolset) => toolset.scouts).flatMap((toolset) => toolset.tools)),
+    extensions: unique(extensions),
+    tools: unique(tools),
+    ...(mcpAllow ? { mcpAllow } : {}),
+    scoutExtensions: unique(scoutExtensions),
+    scoutTools: unique(scoutTools),
+    ...(scoutMcpAllow ? { scoutMcpAllow } : {}),
   };
 }
 
@@ -133,16 +186,62 @@ export function isPlannerProcess(env: NodeJS.ProcessEnv = process.env) {
 }
 
 export function candidateSummary(candidate: PlanCandidate) {
-  const parts: string[] = [];
-  if (candidate.status !== "done") parts.push(candidate.status);
-  if (candidate.durationMs !== undefined) parts.push(formatDuration(candidate.durationMs));
-  if (candidate.toolCalls !== undefined) parts.push(`${candidate.toolCalls} tool calls`);
-  if (candidate.subagentTasks)
-    parts.push(`${candidate.subagentTasks} subagent${candidate.subagentTasks === 1 ? "" : "s"}`);
-  if (candidate.totalTokens) parts.push(`${formatTokens(candidate.totalTokens)} tokens`);
-  if (candidate.costUsd) parts.push(`$${candidate.costUsd.toFixed(2)}`);
-  if (candidate.planFromText) parts.push("plan taken from prose");
-  return parts.join(" · ");
+  return statsCells({
+    status: candidate.status === "done" ? "" : candidate.status,
+    ...(candidate.durationMs !== undefined ? { durationMs: candidate.durationMs } : {}),
+    ...(candidate.toolCalls !== undefined ? { toolCalls: candidate.toolCalls } : {}),
+    subagents: candidate.subagentTasks ?? 0,
+    tokens: candidate.totalTokens ?? 0,
+    cost: candidate.costUsd ?? 0,
+  })
+    .filter(Boolean)
+    .concat(candidate.planFromText ? ["plan taken from prose"] : [])
+    .join(" · ");
+}
+
+/** Stats for one planner as separate cells, so callers can align them across planners. */
+export function statsCells(stats: {
+  status?: string;
+  durationMs?: number;
+  toolCalls?: number;
+  subagents?: number;
+  tokens?: number;
+  cost?: number;
+}): string[] {
+  return [
+    stats.status ?? "",
+    stats.durationMs !== undefined ? formatDuration(stats.durationMs) : "",
+    stats.toolCalls !== undefined ? `${stats.toolCalls} ${stats.toolCalls === 1 ? "tool" : "tools"}` : "",
+    stats.subagents ? `${stats.subagents} ${stats.subagents === 1 ? "subagent" : "subagents"}` : "",
+    stats.tokens ? `${formatTokens(stats.tokens)} tok` : "",
+    stats.cost ? formatCost(stats.cost) : "",
+  ];
+}
+
+/**
+ * Pad cells column by column so values line up across rows; numeric-looking columns are right
+ * aligned. Empty columns are dropped entirely.
+ */
+export function alignColumns(rows: readonly (readonly string[])[], separator = "  ", pad = " "): string[] {
+  const columnCount = Math.max(0, ...rows.map((row) => row.length));
+  const widths = Array.from({ length: columnCount }, (_unused, column) =>
+    Math.max(0, ...rows.map((row) => [...(row[column] ?? "")].length)),
+  );
+  const rightAligned = widths.map((_width, column) =>
+    rows.every((row) => !row[column] || /^[$~]?[\d.,]+[a-zA-Z%]*(?:\s[\d.,]*[a-zA-Z]+)?$/u.test(row[column] ?? "")),
+  );
+  return rows.map((row) =>
+    widths
+      .map((width, column) => {
+        if (width === 0) return undefined;
+        const cell = row[column] ?? "";
+        const padding = pad.repeat(width - [...cell].length);
+        return rightAligned[column] ? padding + cell : cell + padding;
+      })
+      .filter((cell): cell is string => cell !== undefined)
+      .join(separator)
+      .replace(/[\s\u2800]+$/u, ""),
+  );
 }
 
 export function formatDuration(ms: number) {
@@ -151,8 +250,15 @@ export function formatDuration(ms: number) {
   return minutes > 0 ? `${minutes}m ${String(seconds % 60).padStart(2, "0")}s` : `${seconds}s`;
 }
 
+/** 999, 12.3k, 123k, 10.4M. */
 export function formatTokens(tokens: number) {
-  return tokens >= 1000 ? `${(tokens / 1000).toFixed(tokens >= 10_000 ? 0 : 1)}k` : String(tokens);
+  if (tokens < 1_000) return String(Math.round(tokens));
+  if (tokens < 1_000_000) return `${(tokens / 1_000).toFixed(tokens < 10_000 ? 1 : 0)}k`;
+  return `${(tokens / 1_000_000).toFixed(tokens < 10_000_000 ? 2 : 1)}M`;
+}
+
+export function formatCost(usd: number) {
+  return usd < 10 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(1)}`;
 }
 
 export function plannerLabel(spec: ModelSpec) {
@@ -227,6 +333,7 @@ export function formatPlannerPrompt(
   plannerCount: number,
   scoutLabel?: string,
   researchTools: readonly string[] = [],
+  mcpAllow?: readonly string[],
 ) {
   const others =
     plannerCount > 1 ? `${plannerCount - 1} other model${plannerCount > 2 ? "s are" : " is"}` : "Other models may be";
@@ -239,7 +346,9 @@ export function formatPlannerPrompt(
         ]
       : []),
     ...(researchTools.includes("mcp")
-      ? ["MCP tools reach external services and some of them can change things; use them only to read."]
+      ? [
+          `Through the mcp tool you may call only these MCP tools (server/tool; * means every tool on that server): ${(mcpAllow ?? []).join(", ") || "none"}. Use mcp search or describe to see their arguments. MCP tools reach external services and some can change things; use them only to read.`,
+        ]
       : []),
     ...(scoutLabel
       ? [

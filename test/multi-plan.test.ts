@@ -19,7 +19,7 @@ import { progressLines } from "../src/multi-plan-menu.js";
 import { runPlanCompleteHook } from "../src/plan-hook.js";
 import planMode from "../src/plan-mode.js";
 import { plannerArgs, runPlanner } from "../src/planner-process.js";
-import { createMockContext, createMockPi } from "./support.js";
+import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
   type: "message",
@@ -104,22 +104,20 @@ test("the latest candidate set restores from the branch and drops malformed cand
   });
 });
 
-test("planner arguments run Pi in JSON mode with only this extension and read-only tools", () => {
+test("planner arguments run Pi in RPC mode with only this extension and read-only tools", () => {
   const args = plannerArgs({
     spec: { provider: "anthropic", modelId: "claude-opus-5-5", thinkingLevel: "xhigh" },
-    prompt: "-starts with a dash",
     extensionPath: "/ext/index.ts",
     loadUserExtensions: false,
   });
-  assert.deepEqual(args.slice(0, 4), ["--mode", "json", "--no-session", "--model"]);
+  assert.deepEqual(args.slice(0, 4), ["--mode", "rpc", "--no-session", "--model"]);
   assert.equal(args[4], "anthropic/claude-opus-5-5:xhigh");
   assert.equal(args[args.indexOf("--tools") + 1], "read,bash,grep,find,ls,plan_mode_question,plan_mode_complete");
   assert.ok(args.includes("--no-extensions"));
   assert.equal(args[args.indexOf("--extension") + 1], "/ext/index.ts");
-  assert.deepEqual(args.slice(-2), ["--", "-starts with a dash"]);
+  assert.equal(args.includes("--"), false, "the prompt goes over RPC stdin, not argv");
   const ambient = plannerArgs({
     spec: { provider: "p", modelId: "m" },
-    prompt: "x",
     extensionPath: "/ext/index.ts",
     loadUserExtensions: true,
   });
@@ -138,6 +136,7 @@ function fakeSpawn(script: (child: FakeChild) => void) {
 }
 
 class FakeChild extends EventEmitter {
+  stdin = new PassThrough();
   stdout = new PassThrough();
   stderr = new PassThrough();
   killed: string[] = [];
@@ -250,40 +249,49 @@ test("planner failures, timeouts, and cancellation resolve with an explanatory c
   assert.equal((await cancelledRun).status, "cancelled");
 });
 
-test("progress lines summarize each planner", () => {
+test("progress lines align each planner's stats in columns with human-readable counts", () => {
   const lines = progressLines(
     [
-      { provider: "a", modelId: "one", thinkingLevel: "high" },
-      { provider: "b", modelId: "two" },
+      { provider: "anthropic", modelId: "claude-fable-5-1", thinkingLevel: "xhigh" },
+      { provider: "openai-codex", modelId: "gpt-6-astra", thinkingLevel: "xhigh" },
       { provider: "c", modelId: "three" },
     ],
     [
       {
-        spec: { provider: "a", modelId: "one" },
+        spec: { provider: "anthropic", modelId: "claude-fable-5-1" },
         state: "running",
-        startedAt: Date.now() - 65_000,
-        toolCalls: 4,
-        subagentTasks: 3,
-        totalTokens: 12_345,
-        costUsd: 0,
-        lastActivity: "read x.ts",
+        startedAt: Date.now() - 780_000,
+        toolCalls: 72,
+        subagentTasks: 5,
+        totalTokens: 10_359_000,
+        costUsd: 12.4,
+        lastActivity: "read tests/test_golden.py",
       },
       {
-        spec: { provider: "b", modelId: "two" },
+        spec: { provider: "openai-codex", modelId: "gpt-6-astra" },
         state: "done",
         startedAt: 0,
-        endedAt: 30_000,
-        toolCalls: 9,
+        endedAt: 802_000,
+        toolCalls: 8,
         subagentTasks: 0,
-        totalTokens: 0,
-        costUsd: 0,
+        totalTokens: 4_513_000,
+        costUsd: 5.06,
       },
       undefined,
     ],
   );
-  assert.match(lines[1] ?? "", /^… a\/one:high · 1m 0[45]s · 4 tool calls · 3 subagents · 12k tokens · read x\.ts$/u);
-  assert.match(lines[2] ?? "", /^✓ b\/two · 30s · 9 tool calls · done$/u);
-  assert.equal(lines[3], "  c/three · waiting");
+  assert.equal(lines[0], "Parallel planners");
+  assert.match(
+    lines[1] ?? "",
+    /^… anthropic\/claude-fable-5-1:xhigh +13m 00s +72 tools +5 subagents +10.4M tok +\$12.4 +read tests/u,
+  );
+  assert.match(lines[2] ?? "", /^✓ openai-codex\/gpt-6-astra:xhigh +13m 22s +8 tools +4.51M tok +\$5.06 +done$/u);
+  assert.match(lines[3] ?? "", /^· c\/three +waiting$/u);
+  const end = (line: string | undefined, text: string) => (line ?? "").indexOf(text) + text.length;
+  assert.equal(end(lines[1], "13m 00s"), end(lines[2], "13m 22s"), "durations right-align");
+  assert.equal(end(lines[1], "72 tools"), end(lines[2], "8 tools"), "tool counts right-align");
+  assert.equal(end(lines[1], "10.4M tok"), end(lines[2], "4.51M tok"), "tokens right-align");
+  assert.equal(end(lines[1], "$12.4"), end(lines[2], "$5.06"), "costs right-align");
 });
 
 test("the plan-complete hook receives Claude-style JSON and the plan file", async () => {
@@ -322,7 +330,7 @@ function multiPlanHarness(
   extraDependencies: Record<string, unknown> = {},
 ) {
   const mock = createMockPi({ activeTools: ["read", "edit"] });
-  const calls: Record<string, unknown[]> = { choosePlanners: [], run: [], compare: [], ready: [] };
+  const calls: Record<string, unknown[]> = { choosePlanners: [], chooseTools: [], run: [], compare: [], ready: [] };
   const plannerCandidates: PlanCandidate[] = [
     {
       id: "A",
@@ -361,14 +369,15 @@ function multiPlanHarness(
           options: { preselected: unknown[]; capabilities: Array<{ id: string; selected: boolean }> },
         ) => {
           calls.choosePlanners?.push(options);
-          return {
-            specs: options.preselected,
-            capabilities: options.capabilities.filter((row) => row.selected).map((row) => row.id),
-          };
+          return { specs: options.preselected, capabilities: [] };
+        },
+        chooseTools: async (_ctx: unknown, options: { roots: unknown[]; lines: string[] }) => {
+          calls.chooseTools?.push(options);
+          return (extraDependencies.toolsResult as unknown) ?? { kind: "start", timeLimitMinutes: 45 };
         },
         runPlannersWithProgress: async (_ctx: unknown, options: { specs: unknown[] }) => {
           calls.run?.push(options.specs);
-          return plannerCandidates;
+          return { candidates: plannerCandidates, traces: new Map() };
         },
         showCandidateComparison: async (_ctx: unknown, set: { candidates: PlanCandidate[] }) => {
           calls.compare?.push(set);
@@ -570,75 +579,204 @@ test("the planner picker shows tool toggles above the models and returns both ch
   });
 });
 
-test("/plan multi offers shell, subagents, and configured toolsets with their defaults", async () => {
+test("/plan multi picks models, then tools from a tree of toolsets and MCP servers", async () => {
   const { mock, context, calls } = multiPlanHarness(
     { kind: "close" },
     {
       scoutModelMap: { "anthropic/claude-opus-5-5": { provider: "anthropic", modelId: "claude-sonnet-5" } },
       plannerToolsets: {
-        web: { label: "Web research", extensions: [], tools: ["web_search"], enabled: true, scouts: true },
-        mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+        web: {
+          label: "Web research",
+          extensions: [],
+          tools: ["web_search", "fetch_content"],
+          enabled: true,
+          scouts: true,
+        },
+        mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], mcp: true, enabled: false, scouts: false },
       },
+    },
+    {
+      readMcpCatalog: () => [
+        { name: "context7", known: true, tools: [{ name: "query-docs", description: "Query docs" }] },
+        { name: "figma", known: false, tools: [] },
+      ],
     },
   );
   await mock.events.get("session_start")?.[0]?.({}, context.ctx);
   await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
-  const chosen = calls.choosePlanners?.[0] as { capabilities: Array<{ id: string; selected: boolean }> } | undefined;
-  const offered = chosen?.capabilities ?? [];
-  assert.deepEqual(
-    offered.map((row) => [row.id, row.selected]),
+  const models = calls.choosePlanners?.[0] as { title: string } | undefined;
+  assert.match(models?.title ?? "", /1\/2 models/u);
+  const tools = calls.chooseTools?.[0] as
+    | {
+        roots: Array<{
+          id: string;
+          selected?: boolean;
+          children?: Array<{ id: string; selected?: boolean; children?: unknown[] }>;
+        }>;
+      }
+    | undefined;
+  const summary = (tools?.roots ?? []).map((root) => [
+    root.id,
+    root.selected ?? null,
+    (root.children ?? []).map((child) => [child.id, child.selected ?? null, (child.children ?? []).length]),
+  ]);
+  assert.deepEqual(summary, [
+    ["shell", true, []],
+    ["subagents", true, []],
     [
-      ["shell", true],
-      ["subagents", true],
-      ["toolset:web", true],
-      ["toolset:mcp", false],
+      "toolset:web",
+      null,
+      [
+        ["toolset:web/web_search", true, 0],
+        ["toolset:web/fetch_content", true, 0],
+      ],
     ],
-  );
+    [
+      "toolset:mcp",
+      null,
+      [
+        ["mcp:context7", null, 1],
+        ["mcp:figma", false, 0],
+      ],
+    ],
+  ]);
+  assert.equal(calls.run?.length, 1);
 });
 
-test("Jev's picks become the picker defaults, and a fallback keeps the settings defaults", async () => {
+test("Jev's per-tool picks become the tree defaults, and a fallback keeps the settings defaults", async () => {
   const toolsets = {
     web: { label: "Web research", extensions: [], tools: ["web_search"], enabled: true, scouts: true },
-    mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+    mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], mcp: true, enabled: false, scouts: false },
   };
+  const catalog = () => [
+    {
+      name: "obsidian",
+      known: true,
+      tools: [
+        { name: "search_notes", description: "Search notes" },
+        { name: "delete_note", description: "Delete a note" },
+      ],
+    },
+  ];
   for (const scenario of ["jev", "fallback", "off"] as const) {
-    const pickCalls: unknown[] = [];
+    const pickCalls: Array<{ capabilities: Array<{ id: string }> }> = [];
     const { mock, context, calls } = multiPlanHarness(
       { kind: "close" },
       { plannerToolsets: toolsets, ...(scenario === "off" ? { jevToolSelection: false } : {}) },
       {
-        pickTools: async (input: unknown) => {
+        readMcpCatalog: catalog,
+        pickTools: async (input: { capabilities: Array<{ id: string }> }) => {
           pickCalls.push(input);
           return scenario === "jev"
             ? {
                 kind: "jev" as const,
                 model: "jev-1.13.0",
-                probabilities: { shell: 0.9, "toolset:web": 0.2, "toolset:mcp": 0.8 },
-                selected: { shell: true, "toolset:web": false, "toolset:mcp": true },
+                probabilities: {
+                  shell: 0.9,
+                  "toolset:web/web_search": 0.2,
+                  "mcp:obsidian/search_notes": 0.8,
+                  "mcp:obsidian/delete_note": 0.1,
+                },
+                selected: {
+                  shell: true,
+                  "toolset:web/web_search": false,
+                  "mcp:obsidian/search_notes": true,
+                  "mcp:obsidian/delete_note": false,
+                },
               }
             : { kind: "fallback" as const, reason: "TYPESAFE_API_KEY is not set" };
         },
       },
     );
     await mock.events.get("session_start")?.[0]?.({}, context.ctx);
-    await mock.commands.get("plan")?.handler("multi Build onboarding from Figma", context.ctx);
-    const chosen = calls.choosePlanners?.[0] as
-      | { lines: string[]; capabilities: Array<{ id: string; selected: boolean; description: string }> }
-      | undefined;
-    const selected = Object.fromEntries((chosen?.capabilities ?? []).map((row) => [row.id, row.selected]));
+    await mock.commands.get("plan")?.handler("multi Build onboarding from my Obsidian notes", context.ctx);
+    const tools = calls.chooseTools?.[0] as { lines: string[]; roots: unknown[] } | undefined;
+    const flat = (nodes: unknown[]): [string, boolean | undefined, number | undefined][] =>
+      (nodes as Array<{ id: string; selected?: boolean; jev?: number; children?: unknown[] }>).flatMap((node) =>
+        node.children ? flat(node.children) : [[node.id, node.selected, node.jev]],
+      );
+    const leaves = Object.fromEntries(flat(tools?.roots ?? []).map(([id, selected]) => [id, selected]));
     if (scenario === "jev") {
-      assert.deepEqual(selected, { shell: true, "toolset:web": false, "toolset:mcp": true });
-      assert.ok(chosen?.lines.some((line) => /Jev \(jev-1\.13\.0\) preselected/u.test(line)));
-      assert.match(chosen?.capabilities.find((row) => row.id === "toolset:mcp")?.description ?? "", /^Jev 80% · mcp/u);
-      assert.equal((pickCalls[0] as { task: string }).task, "Build onboarding from Figma");
+      assert.deepEqual(
+        pickCalls[0]?.capabilities.map((capability) => capability.id),
+        ["shell", "toolset:web/web_search", "mcp:obsidian/search_notes", "mcp:obsidian/delete_note"],
+      );
+      assert.deepEqual(leaves, {
+        shell: true,
+        "toolset:web/web_search": false,
+        "mcp:obsidian/search_notes": true,
+        "mcp:obsidian/delete_note": false,
+      });
+      assert.ok(tools?.lines.some((line) => /Jev \(jev-1\.13\.0\) preselected/u.test(line)));
     } else {
-      assert.deepEqual(selected, { shell: true, "toolset:web": true, "toolset:mcp": false });
+      assert.deepEqual(leaves, {
+        shell: true,
+        "toolset:web/web_search": true,
+        "mcp:obsidian/search_notes": false,
+        "mcp:obsidian/delete_note": false,
+      });
       assert.ok(
-        chosen?.lines.some((line) =>
+        tools?.lines.some((line) =>
           scenario === "off" ? /off in settings/u.test(line) : /TYPESAFE_API_KEY is not set/u.test(line),
         ),
       );
       assert.equal(pickCalls.length, scenario === "off" ? 0 : 1);
     }
   }
+});
+
+test("the comparison list aligns each candidate's stats in columns", async () => {
+  const { showCandidateComparison } = await import("../src/multi-plan-menu.js");
+  let rendered: string[] = [];
+  const context = createMockContext({
+    mode: "tui",
+    hasUI: true,
+    custom: async (factory: unknown) => {
+      const harness = createCustomSelectorHarness(factory, 160);
+      rendered = harness.render();
+      harness.handleInput("\u0003");
+      return harness.resultPromise;
+    },
+  });
+  await showCandidateComparison(
+    context.ctx,
+    {
+      version: 1,
+      task: "t",
+      createdAt: 1,
+      candidates: [
+        {
+          id: "A",
+          label: "anthropic/claude-fable-5-1:xhigh",
+          origin: "planner",
+          status: "done",
+          plan: "# A",
+          durationMs: 780_000,
+          toolCalls: 72,
+          subagentTasks: 5,
+          totalTokens: 10_359_000,
+          costUsd: 12.4,
+        },
+        {
+          id: "B",
+          label: "openai-codex/gpt-6-astra:xhigh",
+          origin: "planner",
+          status: "done",
+          plan: "# B",
+          durationMs: 802_000,
+          toolCalls: 8,
+          totalTokens: 4_513_000,
+          costUsd: 5.06,
+        },
+      ],
+    },
+    { signal: new AbortController().signal, isCurrent: () => true },
+  );
+  const rowA = rendered.find((line) => line.includes("A · anthropic")) ?? "";
+  const rowB = rendered.find((line) => line.includes("B · openai")) ?? "";
+  const end = (line: string, text: string) => line.indexOf(text) + text.length;
+  assert.ok(rowA && rowB, rendered.join("\n"));
+  assert.equal(end(rowA, "72 tools"), end(rowB, "8 tools"), rendered.join("\n"));
+  assert.equal(end(rowA, "$12.4"), end(rowB, "$5.06"));
+  assert.match(rowA, /10\.4M tok/u);
 });

@@ -43,18 +43,27 @@ Install only from sources you trust because Pi extensions run with Pi's permissi
 /plan multi Add rate limiting to the public API
 ```
 
-1. Pick the planner models. Configured `planners` are preselected; any available model can be toggled.
-2. Each planner runs as `pi --mode json --no-session --no-extensions --extension <this package>` in the project
+1. **Models** (screen 1/2): configured `planners` are preselected; any available model can be toggled.
+2. **Tools** (screen 2/2): a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools
+   (from pi-mcp-adapter's config and metadata cache). Space toggles a tool, or a whole toolset or server; `→`/`←`
+   open and close groups; `[-]` marks a partly selected group. Jev preselects each tool and shows its percentage.
+   The **Time limit** row sets how long planners may run (default 45 min); at 80% each planner is steered to
+   submit its best plan, and one that stops without a plan is nudged once to submit it.
+   Each planner runs as `pi --mode rpc --no-session --no-extensions --extension <this package> …` in the project
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
-   A widget shows each planner's progress; Escape cancels them all.
-3. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
+   Planners and their subagents can only call the selected MCP tools; anything else is blocked with a list of
+   what is allowed.
+3. **Live traces**: while planners run, their traces stream side by side (or one at a time: `s`, `tab`), with
+   thinking, text, every tool call and its result, and aligned stats per planner. `↑↓`/`PgUp`/`PgDn` scroll, `End`
+   follows, `Esc` twice cancels. After the run, **Watch planner traces** in the comparison menu replays them.
+4. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
    rendered as Markdown and choose **Use this plan**, or choose **Synthesize…** and pick two or more candidates.
    The prompt editor is then prefilled with `/plan synthesize A,B `: write optional guidance after the letters ("B's
    architecture with A's migration steps") with the editor's usual wrapping, multi-line input, and any editor
    extension such as vim mode, then press Enter. An unsent draft is never overwritten. Synthesis runs in this
    session, so the model can verify disagreements against the code and ask you questions before completing the
    merged plan. `/plan multi` without a task likewise prefills `/plan multi ` for you to finish.
-4. The chosen or synthesized plan goes through the normal ready flow.
+5. The chosen or synthesized plan goes through the normal ready flow.
 
 From a ready plan, **Compare with other models…** (in the ready menu or `/plan`) runs the same flow with the
 current plan as candidate A; planners do not see it, so their plans stay independent.
@@ -69,17 +78,15 @@ With `scoutModelMap`, a planner can fan work out to cheaper read-only subagents 
 return to the planner and count toward the planner's cost. The tool exists only inside planner subprocesses.
 
 Planners and scouts start with no extensions besides this one. `plannerToolsets` defines named bundles of extensions
-and tools (for example web research through `pi-web-access`, or MCP servers through `pi-mcp-adapter`). The planner
-picker shows a `Tool ·` row for each toolset, plus **Shell** (read-only commands under Plan mode's policy) and
-**Subagents** (when `scoutModelMap` has entries), preselected from their defaults, so each run can widen or narrow what
-planners may use. Plan mode admits a chosen toolset's tools inside planners; toolsets with `"scouts": true` (the
-default) are also given to scouts, which do not run under Plan mode's policy. MCP tools can reach services that change
-things, so planners and scouts are told to only read with them.
+and tools: an ordinary toolset (for example web research through `pi-web-access`) lists its `tools`, with optional
+`toolDescriptions`; a toolset with `"mcp": true` (loading `pi-mcp-adapter`) expands into every configured MCP server
+and its cached tools. Scouts inherit toolsets with `"scouts": true` (the default), including the MCP allowlist, which
+this extension enforces inside them too. For the main `/plan` session, list tools in `defaultPlanTools` or choose
+them per run with `/plan tools`.
 
-When `TYPESAFE_API_KEY` is set, the picker's tool rows are preselected by
-[Jev](https://docs.typesafe.ai), TypeSafe's fast System One model: one request with a yes/no question per tool asks
-whether planners writing a plan for this task would materially benefit from it (about 100-200 ms and under a
-thousand tokens). Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
+When `TYPESAFE_API_KEY` is set, every tool in the tree is preselected by [Jev](https://docs.typesafe.ai), TypeSafe's
+fast System One model: one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
+tokens) asks whether planners writing a plan for this task would materially benefit from it. Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
 can still change any of them. Without a key, with `jevToolSelection: false`, or when the request fails or times out
 (4 s), the picker says why and falls back to each tool's `enabled` default. A toolset's `description` is what Jev
 reads, so describe what it gives planners. For the main `/plan` session, list the same tools
@@ -439,7 +446,7 @@ New settings in this fork:
     "anthropic/claude-fable-5-1": "anthropic/claude-opus-5-5:high",
     "openai-codex/gpt-6-astra": "openai-codex/gpt-6-sol:high"
   },
-  "plannerTimeoutSeconds": 900,
+  "plannerTimeoutSeconds": 2700,
   "plannerLoadExtensions": false,
   "plannerToolsets": {
     "web": {
@@ -451,6 +458,7 @@ New settings in this fork:
     "mcp": {
       "label": "MCP servers",
       "description": "Connected services: Context7 docs, Obsidian notes, Figma designs, a Chrome browser.",
+      "mcp": true,
       "extensions": ["~/.pi/agent/npm/node_modules/pi-mcp-adapter"],
       "tools": ["mcp"]
     }

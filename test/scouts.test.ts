@@ -264,10 +264,15 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
       enabled: true,
       scouts: true,
     },
-    mcp: { label: "MCP", extensions: ["~/mcp-adapter"], tools: ["mcp"], enabled: true, scouts: false },
+    mcp: { label: "MCP", extensions: ["~/mcp-adapter"], tools: ["mcp"], mcp: true, enabled: true, scouts: false },
   };
   const access = resolvePlannerAccess(
-    { shell: false, subagents: true, toolsets: ["web", "mcp", "missing"] },
+    {
+      shell: false,
+      subagents: true,
+      toolsetTools: { web: ["web_search", "fetch_content", "not-in-toolset"], missing: ["x"] },
+      mcp: ["context7/*", "obsidian/search_notes"],
+    },
     toolsets,
     (path) => path.replace("~", "/home"),
   );
@@ -276,9 +281,13 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
     subagents: true,
     extensions: ["/home/web-access", "/home/mcp-adapter"],
     tools: ["web_search", "fetch_content", "mcp"],
+    mcpAllow: ["context7/*", "obsidian/search_notes"],
     scoutExtensions: ["/home/web-access"],
     scoutTools: ["web_search", "fetch_content"],
   });
+  const noMcp = resolvePlannerAccess({ shell: true, subagents: false, toolsetTools: {}, mcp: [] }, toolsets);
+  assert.deepEqual(noMcp.extensions, []);
+  assert.equal(noMcp.mcpAllow, undefined);
 
   const base = {
     spec: { provider: "anthropic", modelId: "claude-fable-5-1" },

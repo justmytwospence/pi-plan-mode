@@ -87,7 +87,7 @@ const BASE_KEYS = new Set([
   ...Array.from({ length: 12 }, (_unused, index) => `f${index + 1}`),
 ]);
 const MAX_PLAN_EXPORT_PATH_LENGTH = 4096;
-export const DEFAULT_PLANNER_TIMEOUT_SECONDS = 900;
+export const DEFAULT_PLANNER_TIMEOUT_SECONDS = 45 * 60;
 const MAX_PLANNER_TIMEOUT_SECONDS = 4 * 60 * 60;
 const MAX_PLANNERS = 8;
 
@@ -293,6 +293,15 @@ function normalizePlannerToolsets(value: unknown): Record<string, PlannerToolset
     }
     const extensions = raw.extensions === undefined ? [] : normalizeCommand(raw.extensions);
     const tools = normalizeToolNames(raw.tools);
+    if (raw.mcp !== undefined && typeof raw.mcp !== "boolean") return undefined;
+    const toolDescriptions =
+      raw.toolDescriptions === undefined
+        ? undefined
+        : isSettingsDocument(raw.toolDescriptions) &&
+            Object.values(raw.toolDescriptions).every((value) => typeof value === "string")
+          ? (raw.toolDescriptions as Record<string, string>)
+          : null;
+    if (toolDescriptions === null) return undefined;
     if (!extensions || !tools || tools.length === 0) return undefined;
     if (raw.label !== undefined && (typeof raw.label !== "string" || !raw.label.trim())) return undefined;
     if (raw.description !== undefined && (typeof raw.description !== "string" || !raw.description.trim())) {
@@ -303,6 +312,8 @@ function normalizePlannerToolsets(value: unknown): Record<string, PlannerToolset
     toolsets[id] = {
       label: typeof raw.label === "string" ? raw.label.trim() : id,
       ...(typeof raw.description === "string" ? { description: raw.description.trim() } : {}),
+      ...(toolDescriptions ? { toolDescriptions } : {}),
+      ...(raw.mcp === true ? { mcp: true } : {}),
       extensions,
       tools,
       enabled: raw.enabled !== false,

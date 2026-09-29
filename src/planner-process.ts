@@ -4,13 +4,16 @@ import { parseProposedPlan } from "./message-transform.js";
 import {
   DEFAULT_PLANNER_ACCESS,
   EXTRA_TOOLS_ENV,
+  MCP_ALLOW_ENV,
   PLANNER_ENV,
   type PlanCandidate,
   type PlannerAccess,
   SCOUT_EXTENSIONS_ENV,
+  SCOUT_MCP_ALLOW_ENV,
   SCOUT_TOOLS_ENV,
 } from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
+import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
 import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
 
 export { piSpawnCommand } from "./pi-command.js";
@@ -19,6 +22,12 @@ const PLANNER_TOOLS = ["read", "grep", "find", "ls", "plan_mode_question", "plan
 const KILL_GRACE_MS = 5_000;
 const STDERR_TAIL_CHARS = 2_000;
 const MIN_PROSE_PLAN_CHARS = 200;
+/** Fraction of the time limit after which the planner is asked to wrap up. */
+export const SOFT_DEADLINE_FRACTION = 0.8;
+export const WRAP_UP_MESSAGE =
+  "Time is almost up. Stop investigating now and call plan_mode_complete alone with your best complete plan. Record anything you could not verify as explicit assumptions or open questions in the plan.";
+export const NUDGE_MESSAGE =
+  "You stopped without submitting a plan. Call plan_mode_complete now, alone, with your complete plan based on what you found. Record anything unresolved as explicit assumptions.";
 
 export interface PlannerProgress {
   spec: ModelSpec;
@@ -30,6 +39,8 @@ export interface PlannerProgress {
   lastActivity?: string;
   totalTokens: number;
   costUsd: number;
+  /** Set once the planner has been asked to wrap up at the soft deadline. */
+  wrappingUp?: boolean;
 }
 
 export interface PlannerRunOptions {
@@ -47,6 +58,8 @@ export interface PlannerRunOptions {
   access?: PlannerAccess;
   signal: AbortSignal;
   onProgress(progress: PlannerProgress): void;
+  /** Receives the live trace (the same object on every call) whenever it changes. */
+  onTrace?(trace: PlannerTrace): void;
   /** Test seam: replaces `child_process.spawn`. */
   spawnProcess?: typeof spawn;
   /** Test seam: replaces how the Pi CLI is invoked. */
@@ -54,7 +67,7 @@ export interface PlannerRunOptions {
 }
 
 export function plannerArgs(
-  options: Pick<PlannerRunOptions, "spec" | "prompt" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access">,
+  options: Pick<PlannerRunOptions, "spec" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access">,
 ) {
   const access = options.access ?? DEFAULT_PLANNER_ACCESS;
   const tools = [
@@ -66,7 +79,7 @@ export function plannerArgs(
   ];
   return [
     "--mode",
-    "json",
+    "rpc",
     "--no-session",
     "--model",
     formatModelSpec(options.spec),
@@ -83,17 +96,32 @@ export function plannerArgs(
           options.extensionPath,
           ...access.extensions.flatMap((extension) => ["--extension", extension]),
         ]),
-    "--",
-    options.prompt,
   ];
 }
 
+export function plannerEnv(options: Pick<PlannerRunOptions, "scoutSpec" | "access">): NodeJS.ProcessEnv {
+  const access = options.access ?? DEFAULT_PLANNER_ACCESS;
+  return {
+    ...process.env,
+    [PLANNER_ENV]: "1",
+    PI_SKIP_VERSION_CHECK: "1",
+    ...(options.scoutSpec && access.subagents ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) } : {}),
+    [EXTRA_TOOLS_ENV]: access.tools.join(","),
+    [SCOUT_EXTENSIONS_ENV]: JSON.stringify(access.scoutExtensions),
+    [SCOUT_TOOLS_ENV]: access.scoutTools.join(","),
+    ...(access.mcpAllow ? { [MCP_ALLOW_ENV]: JSON.stringify(access.mcpAllow) } : {}),
+    ...(access.scoutMcpAllow ? { [SCOUT_MCP_ALLOW_ENV]: JSON.stringify(access.scoutMcpAllow) } : {}),
+  };
+}
+
 /**
- * Run one read-only planner as a `pi --mode json` subprocess in Plan mode and collect the plan it
- * submits with plan_mode_complete. Resolves with a candidate in every case; never rejects.
+ * Run one read-only planner as a `pi --mode rpc` subprocess in Plan mode and collect the plan it
+ * submits with plan_mode_complete. RPC keeps a channel open so the planner can be asked to wrap up
+ * at the soft deadline and nudged once if it stops without a plan. Never rejects.
  */
 export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
   const startedAt = Date.now();
+  const trace = new PlannerTrace();
   const progress: PlannerProgress = {
     spec: options.spec,
     state: "starting",
@@ -120,6 +148,8 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     let stdoutBuffer = "";
     let settled = false;
     let terminalState: "cancelled" | "timeout" | undefined;
+    let nudged = false;
+    let closing = false;
     let child: ChildProcess;
 
     const report = () => {
@@ -129,41 +159,74 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         // Progress rendering must never break a planner run.
       }
     };
+    const reportTrace = () => {
+      try {
+        options.onTrace?.(trace);
+      } catch {
+        // Trace rendering must never break a planner run.
+      }
+    };
+    const send = (record: Record<string, unknown>) => {
+      try {
+        if (child?.stdin && !child.stdin.destroyed) child.stdin.write(`${JSON.stringify(record)}\n`);
+      } catch {
+        // The planner may already be exiting.
+      }
+    };
+    const closeInput = () => {
+      if (closing) return;
+      closing = true;
+      try {
+        child?.stdin?.end();
+      } catch {
+        // Already closed.
+      }
+      // An orderly RPC shutdown follows stdin closing; make sure the process does exit.
+      setTimeout(() => {
+        if (!settled) child?.kill("SIGTERM");
+      }, KILL_GRACE_MS).unref?.();
+    };
 
     const finish = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
+      clearTimeout(softDeadline);
       options.signal.removeEventListener("abort", onAbort);
       let status: PlanCandidate["status"];
       let finalPlan = plan;
       let planFromText = false;
       let error: string | undefined;
-      if (terminalState) {
+      if (!finalPlan) {
+        const parsed = parseProposedPlan(lastAssistantText);
+        if (parsed.kind === "valid") finalPlan = parsed.plan;
+        else if (lastAssistantText.trim().length >= MIN_PROSE_PLAN_CHARS && !assistantError) {
+          finalPlan = lastAssistantText.trim();
+          planFromText = true;
+        }
+      }
+      if (finalPlan) {
+        status = "done";
+      } else if (terminalState) {
         status = terminalState;
         error =
           terminalState === "timeout" ? `Timed out after ${Math.round(options.timeoutMs / 1000)}s.` : "Cancelled.";
       } else {
-        if (!finalPlan) {
-          const parsed = parseProposedPlan(lastAssistantText);
-          if (parsed.kind === "valid") finalPlan = parsed.plan;
-          else if (lastAssistantText.trim().length >= MIN_PROSE_PLAN_CHARS && !assistantError) {
-            finalPlan = lastAssistantText.trim();
-            planFromText = true;
-          }
-        }
-        status = finalPlan ? "done" : "failed";
-        if (!finalPlan) {
-          error =
-            assistantError ??
-            (stderrTail.trim()
-              ? stderrTail.trim().split("\n").slice(-3).join(" ")
-              : `Planner exited with code ${exitCode ?? "unknown"} without submitting a plan.`);
-        }
+        status = "failed";
+        error =
+          assistantError ??
+          (stderrTail.trim()
+            ? stderrTail.trim().split("\n").slice(-3).join(" ")
+            : `Planner exited with code ${exitCode ?? "unknown"} without submitting a plan.`);
       }
       progress.state = status;
       progress.endedAt = Date.now();
+      trace.note(
+        status === "done" ? "Plan submitted." : `Stopped: ${error ?? status}`,
+        status === "done" ? "info" : "warning",
+      );
       report();
+      reportTrace();
       resolve({
         ...base,
         status,
@@ -186,62 +249,96 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
       } catch {
         // Already gone.
       }
-      const force = setTimeout(() => {
+      setTimeout(() => {
         try {
           child?.kill("SIGKILL");
         } catch {
           // Already gone.
         }
-      }, KILL_GRACE_MS);
-      force.unref?.();
+      }, KILL_GRACE_MS).unref?.();
     };
     const onAbort = () => kill("cancelled");
     const timeout = setTimeout(() => kill("timeout"), options.timeoutMs);
     timeout.unref?.();
+    const softDeadline = setTimeout(
+      () => {
+        if (settled || plan || closing) return;
+        progress.wrappingUp = true;
+        progress.lastActivity = "asked to wrap up";
+        trace.note("Soft deadline reached: asked the planner to submit its best plan now.", "warning");
+        send({ type: "steer", message: WRAP_UP_MESSAGE });
+        report();
+        reportTrace();
+      },
+      Math.max(1, Math.floor(options.timeoutMs * SOFT_DEADLINE_FRACTION)),
+    );
+    softDeadline.unref?.();
 
-    const handleEvent = (event: Record<string, unknown>) => {
-      if (event.type === "tool_execution_start") {
-        const toolName = typeof event.toolName === "string" ? event.toolName : "tool";
-        progress.toolCalls += 1;
-        progress.lastActivity = describeToolCall(toolName, event.args);
-        if (toolName === PLAN_SUBAGENTS_TOOL_NAME && isRecord(event.args) && Array.isArray(event.args.tasks)) {
-          progress.subagentTasks += event.args.tasks.length;
+    const handleRecord = (record: Record<string, unknown>) => {
+      if (record.type === "extension_ui_request") {
+        // Planners run unattended: decline every dialog so nothing blocks waiting for a person.
+        const method = record.method;
+        if (method === "select" || method === "confirm" || method === "input" || method === "editor") {
+          send({ type: "extension_ui_response", id: record.id, cancelled: true });
         }
-        if (toolName === "plan_mode_complete" && isRecord(event.args) && typeof event.args.plan === "string") {
-          plan = event.args.plan.trim() || plan;
+        return;
+      }
+      if (record.type === "response") {
+        if (record.success === false && record.command === "prompt") {
+          assistantError = typeof record.error === "string" ? record.error : "The planner rejected the prompt.";
+          closeInput();
+        }
+        return;
+      }
+      trace.apply(record);
+      let changed = true;
+      if (record.type === "tool_execution_start") {
+        const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
+        progress.toolCalls += 1;
+        progress.lastActivity = describeToolArgs(toolName, record.args);
+        if (toolName === PLAN_SUBAGENTS_TOOL_NAME && isRecord(record.args) && Array.isArray(record.args.tasks)) {
+          progress.subagentTasks += record.args.tasks.length;
+        }
+        if (toolName === "plan_mode_complete" && isRecord(record.args) && typeof record.args.plan === "string") {
+          plan = record.args.plan.trim() || plan;
           progress.lastActivity = "submitted plan";
         }
-        report();
-      } else if (event.type === "tool_execution_end") {
+      } else if (record.type === "tool_execution_end") {
         // Nested model work (plan_subagents) reports its usage on the tool result.
-        const result = isRecord(event.result) ? event.result : undefined;
-        if (result && isRecord(result.usage)) {
-          const usage = result.usage;
-          progress.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
-          const cost = isRecord(usage.cost) ? usage.cost.total : undefined;
-          progress.costUsd += typeof cost === "number" ? cost : 0;
-          report();
-        }
-        if (event.toolName === "plan_mode_complete" && event.isError === true) {
+        const result = isRecord(record.result) ? record.result : undefined;
+        if (result && isRecord(result.usage)) addUsage(progress, result.usage);
+        if (record.toolName === "plan_mode_complete" && record.isError === true) {
           plan = undefined;
           progress.lastActivity = "plan rejected; revising";
-          report();
         }
-      } else if (event.type === "message_end" && isRecord(event.message) && event.message.role === "assistant") {
-        const message = event.message;
-        const usage = isRecord(message.usage) ? message.usage : undefined;
-        if (usage) {
-          progress.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
-          const cost = isRecord(usage.cost) ? usage.cost.total : undefined;
-          progress.costUsd += typeof cost === "number" ? cost : 0;
-        }
+      } else if (record.type === "message_end" && isRecord(record.message) && record.message.role === "assistant") {
+        const message = record.message;
+        if (isRecord(message.usage)) addUsage(progress, message.usage);
         const text = assistantText(message.content);
         if (text) lastAssistantText = text;
         if (message.stopReason === "error" || message.stopReason === "aborted") {
           assistantError =
             typeof message.errorMessage === "string" ? message.errorMessage : `Model ${message.stopReason}.`;
+        } else {
+          assistantError = undefined;
         }
+      } else if (record.type === "agent_settled") {
+        if (plan || terminalState) {
+          closeInput();
+        } else if (!nudged && !assistantError) {
+          nudged = true;
+          trace.note("Stopped without a plan: asked it to submit one.", "warning");
+          progress.lastActivity = "asked to submit its plan";
+          send({ type: "prompt", message: NUDGE_MESSAGE });
+        } else {
+          closeInput();
+        }
+      } else if (record.type !== "message_update") {
+        changed = record.type === "auto_retry_start" || record.type === "compaction_start";
+      }
+      if (changed) {
         report();
+        reportTrace();
       }
     };
 
@@ -250,18 +347,8 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     try {
       child = spawnProcess(pi.command, [...pi.args, ...plannerArgs(options)], {
         cwd: options.cwd,
-        env: {
-          ...process.env,
-          [PLANNER_ENV]: "1",
-          PI_SKIP_VERSION_CHECK: "1",
-          ...(options.scoutSpec && (options.access ?? DEFAULT_PLANNER_ACCESS).subagents
-            ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) }
-            : {}),
-          [EXTRA_TOOLS_ENV]: (options.access?.tools ?? []).join(","),
-          [SCOUT_EXTENSIONS_ENV]: JSON.stringify(options.access?.scoutExtensions ?? []),
-          [SCOUT_TOOLS_ENV]: (options.access?.scoutTools ?? []).join(","),
-        },
-        stdio: ["ignore", "pipe", "pipe"],
+        env: plannerEnv(options),
+        stdio: ["pipe", "pipe", "pipe"],
       });
     } catch (error: unknown) {
       assistantError = `Could not start Pi: ${error instanceof Error ? error.message : String(error)}`;
@@ -270,9 +357,11 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     }
     progress.state = "running";
     report();
+    reportTrace();
     if (options.signal.aborted) onAbort();
     else options.signal.addEventListener("abort", onAbort, { once: true });
 
+    child.stdin?.on("error", () => undefined);
     child.stdout?.setEncoding("utf8");
     child.stdout?.on("data", (chunk: string) => {
       stdoutBuffer += chunk;
@@ -282,12 +371,13 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         stdoutBuffer = stdoutBuffer.slice(newline + 1);
         newline = stdoutBuffer.indexOf("\n");
         if (!line.trim()) continue;
+        let record: unknown;
         try {
-          const event = JSON.parse(line) as unknown;
-          if (isRecord(event)) handleEvent(event);
+          record = JSON.parse(line);
         } catch {
-          // Ignore non-JSON lines; stdout is reserved for JSONL but be tolerant.
+          continue;
         }
+        if (isRecord(record)) handleRecord(record);
       }
     });
     child.stderr?.setEncoding("utf8");
@@ -299,23 +389,14 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
       finish(null);
     });
     child.on("close", (code) => finish(code));
+    send({ id: "prompt", type: "prompt", message: options.prompt });
   });
 }
 
-function describeToolCall(toolName: string, args: unknown) {
-  if (!isRecord(args)) return toolName;
-  if (Array.isArray(args.tasks)) return `${toolName} ×${args.tasks.length}`;
-  const detail =
-    typeof args.path === "string"
-      ? args.path
-      : typeof args.pattern === "string"
-        ? args.pattern
-        : typeof args.command === "string"
-          ? args.command
-          : undefined;
-  if (!detail) return toolName;
-  const oneLine = detail.replace(/\s+/gu, " ").trim();
-  return `${toolName} ${oneLine.length > 60 ? `${oneLine.slice(0, 59)}…` : oneLine}`;
+function addUsage(progress: PlannerProgress, usage: Record<string, unknown>) {
+  progress.totalTokens += typeof usage.totalTokens === "number" ? usage.totalTokens : 0;
+  const cost = isRecord(usage.cost) ? usage.cost.total : undefined;
+  progress.costUsd += typeof cost === "number" ? cost : 0;
 }
 
 function assistantText(content: unknown) {

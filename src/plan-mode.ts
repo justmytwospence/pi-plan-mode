@@ -3,13 +3,16 @@ import { watch } from "node:fs";
 import { basename, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
-import type {
-  ExtensionAPI,
-  ExtensionCommandContext,
-  ExtensionContext,
-  InputEvent,
-  InputSource,
+import {
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+  getAgentDir,
+  getMarkdownTheme,
+  type InputEvent,
+  type InputSource,
 } from "@earendil-works/pi-coding-agent";
+import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { completePlanArguments } from "./command.js";
 import {
   normalizePlanModeCompletion,
@@ -43,7 +46,8 @@ import {
   createImplementationRetentionCoordinator,
   implementationRetentionPreview,
 } from "./implementation-retention.js";
-import { type JevToolPick, pickToolsWithJev, type ToolCapability } from "./jev-tool-picker.js";
+import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
+import { checkMcpCall, readMcpCatalog } from "./mcp-tools.js";
 import {
   invalidPlanMessage,
   latestAssistantStopReason,
@@ -71,8 +75,10 @@ import {
   isPlannerProcess,
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
+  mcpAllowFromEnv,
   type PlanCandidate,
   resolvePlannerAccess,
+  SCOUT_MCP_ALLOW_ENV,
   SELECTED_PLAN_MESSAGE_TYPE,
   scoutExtensionsFromEnv,
   scoutToolsFromEnv,
@@ -137,9 +143,12 @@ import {
   readCommand,
 } from "./tool-policy.js";
 import { compareTools, snapshotPlanModeSelectedNames, toolPolicyLabel } from "./tool-selection.js";
+import { applyJevPick, buildToolTree, leafCapabilities, treeToSelection } from "./tool-tree.js";
+import type { TracePane } from "./trace-view.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
 const STATE_ENTRY_TYPE = "plan-mode-state";
+const TIME_LIMIT_CHOICES = [15, 30, 45, 60, 90, 120, 180] as const;
 // Planner subprocesses load this same extension with `--extension` so they plan under Plan mode.
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const PROPOSED_PLAN_MESSAGE_TYPE = "proposed-plan";
@@ -194,6 +203,8 @@ interface PlanModeDependencies {
   loadInteractiveUi?(): Promise<InteractiveUi>;
   /** Test seam: replaces Jev's planner tool preselection. */
   pickTools?: typeof pickToolsWithJev;
+  /** Test seam: replaces reading the MCP servers and cached tools. */
+  readMcpCatalog?: typeof readMcpCatalog;
 }
 
 // Keep session state, persistence, tool, thinking, and mutex commits in this one closure so an
@@ -227,6 +238,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   let latestCommandContext: ExtensionCommandContext | undefined;
   let stagedFreshImplementation: DeferredFreshImplementation | undefined;
   const deferredFreshHandoff = createDeferredFreshHandoffCoordinator();
+  /** Traces of the latest multi-model run in this process, keyed to its candidate set. */
+  let lastTraces: { createdAt: number; panes: TracePane[] } | undefined;
   let nextReadyPresentationNonce = 0;
   let menuGeneration = 0;
   let workflowGeneration = 0;
@@ -339,12 +352,55 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     },
   });
 
+  // Planners and their scouts may only call the MCP tools chosen for the run (see mcp-tools.ts).
+  const mcpAllow = mcpAllowFromEnv();
+  if (mcpAllow) {
+    pi.on("tool_call", (event) => {
+      if (event.toolName !== "mcp") return;
+      const verdict = checkMcpCall(event.input, mcpAllow);
+      return verdict.allowed ? undefined : { block: true, reason: verdict.reason };
+    });
+  }
+
+  pi.registerMessageRenderer(MULTI_TASK_MESSAGE_TYPE, (message, _options, theme) => {
+    const details = message.details as { models?: unknown } | undefined;
+    const models = Array.isArray(details?.models) ? details.models.filter((model) => typeof model === "string") : [];
+    const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(
+      new Text(
+        theme.fg(
+          "customMessageLabel",
+          theme.bold(`Plan with ${models.length > 0 ? models.join(" + ") : "several models"}`),
+        ),
+        0,
+        0,
+      ),
+    );
+    box.addChild(new Markdown(String(message.content ?? ""), 0, 1, getMarkdownTheme()));
+    return box;
+  });
+  pi.registerMessageRenderer(SELECTED_PLAN_MESSAGE_TYPE, (message, options, theme) => {
+    const content = String(message.content ?? "");
+    const [heading = "Selected plan", ...rest] = content.replace(/^\*\*|\*\*$/gmu, "").split("\n");
+    const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(heading.trim())), 0, 0));
+    const body = rest.join("\n").trim();
+    box.addChild(
+      new Markdown(options.expanded ? body : body.split("\n").slice(0, 12).join("\n"), 0, 1, getMarkdownTheme()),
+    );
+    if (!options.expanded && body.split("\n").length > 12) {
+      box.addChild(new Text(theme.fg("dim", "… (expand to read the whole plan)"), 0, 1));
+    }
+    return box;
+  });
+
   // Planner subprocesses may fan out read-only scouts on a cheaper model (settings.scoutModelMap).
   const scoutSpec = isPlannerProcess() ? parseModelSpec(process.env[SCOUT_MODEL_ENV]) : undefined;
   // Extra read-only tools (web research) a planner may use; Plan mode admits them in planners only.
   const plannerExtraTools = new Set(isPlannerProcess() ? extraToolsFromEnv() : []);
   const scoutExtensions = isPlannerProcess() ? scoutExtensionsFromEnv() : [];
   const scoutTools = isPlannerProcess() ? scoutToolsFromEnv() : [];
+  const scoutMcpAllow = isPlannerProcess() ? mcpAllowFromEnv(SCOUT_MCP_ALLOW_ENV) : undefined;
   const activeScouts = new Set<import("node:child_process").ChildProcess>();
   const killScouts = () => {
     for (const child of activeScouts) {
@@ -375,6 +431,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               cwd: ctx.cwd,
               extensions: scoutExtensions,
               tools: scoutTools,
+              ...(scoutMcpAllow ? { mcpAllow: scoutMcpAllow, guardExtensionPath: EXTENSION_ENTRY_PATH } : {}),
               ...(signal ? { signal } : {}),
               track: (child) => {
                 activeScouts.add(child);
@@ -964,7 +1021,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           { triggerTurn: false },
         );
       }
-      if (ctx.hasUI && completedPlanIsCurrent(intent)) {
+      // Planner subprocesses (RPC, unattended) hand the plan back instead of opening menus.
+      if (ctx.hasUI && !isPlannerProcess() && completedPlanIsCurrent(intent)) {
         await planActions.showReady(latestCommandContext ?? ctx);
       }
       const request = stagedFreshImplementation;
@@ -1195,97 +1253,74 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         : undefined;
     const configured = configuredPlanners(settings);
     const sessionModel: ModelSpec[] = ctx.model ? [{ provider: ctx.model.provider, modelId: ctx.model.id }] : [];
-    const preselected = (configured.length > 0 ? configured : sessionModel).filter(
+    let preselected = (configured.length > 0 ? configured : sessionModel).filter(
       (spec) => !(current?.model && sameModel(spec, current.model) && !spec.thinkingLevel),
     );
     const toolsets = settings.plannerToolsets ?? {};
     const scoutTargets = [...new Set(Object.values(settings.scoutModelMap ?? {}).map(formatModelSpec))];
-    const capabilities: ToolCapability[] = [
-      {
-        id: "shell",
-        label: "Shell",
-        description:
-          "Read-only shell commands inside the repository: git history, diffs and blame, ripgrep searches, listing files, reading configs and lockfiles.",
-        fallbackSelected: true,
-      },
-      ...(scoutTargets.length > 0
-        ? [
-            {
-              id: "subagents",
-              label: "Subagents",
-              description:
-                "Parallel read-only helper agents that each investigate one part of a large codebase or one independent question and report back.",
-              fallbackSelected: true,
-            },
-          ]
-        : []),
-      ...Object.entries(toolsets).map(([id, toolset]) => ({
-        id: `toolset:${id}`,
-        label: toolset.label,
-        description: toolset.description ?? `${toolset.label}: ${toolset.tools.join(", ")}`,
-        fallbackSelected: toolset.enabled,
-      })),
-    ];
-    const pick: JevToolPick =
-      settings.jevToolSelection === false
-        ? { kind: "fallback", reason: "Jev tool selection is off in settings" }
-        : await (dependencies.pickTools ?? pickToolsWithJev)({
-            task,
-            conversation: transcript,
-            cwd: ctx.cwd,
-            capabilities,
-            ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
-            ...(settings.jevModel ? { model: settings.jevModel } : {}),
-            signal: lifecycle.signal,
-          });
-    if (!lifecycle.isCurrent()) return;
-    const percent = (id: string) =>
-      pick.kind === "jev" && pick.probabilities[id] !== undefined
-        ? Math.round(pick.probabilities[id] * 100)
-        : undefined;
-    const choice = await ui.choosePlanners(ctx, {
-      title: current ? "Compare with other models" : "Plan with multiple models",
-      lines: [
-        ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
-        ...(current ? ["The current plan joins the comparison as plan A."] : []),
-        pick.kind === "jev"
-          ? `Jev (${safeTerminalText(pick.model)}) preselected the tools this task needs; change any before starting.`
-          : `Tool defaults come from settings: ${safeTerminalText(pick.reason)}.`,
-      ],
-      preselected,
-      capabilities: capabilities.map((capability) => {
-        const jevPercent = percent(capability.id);
-        const detail =
-          capability.id === "shell"
-            ? "Read-only inspection commands (git, rg, cat, ls, …) under Plan mode's policy."
-            : capability.id === "subagents"
-              ? `Parallel read-only subagents on ${scoutTargets.join(", ")} (scoutModelMap).`
-              : (() => {
-                  const toolset = toolsets[capability.id.slice("toolset:".length)];
-                  return toolset
-                    ? `${toolset.tools.join(", ")}${toolset.scouts ? " · also for subagents" : ""}`
-                    : capability.description;
-                })();
-        return {
-          id: capability.id,
-          label: capability.label,
-          description: jevPercent === undefined ? detail : `Jev ${jevPercent}% · ${detail}`,
-          selected: pick.kind === "jev" ? pick.selected[capability.id] === true : capability.fallbackSelected,
-        };
-      }),
-      ...lifecycle,
-    });
-    const specs = choice?.specs;
-    if (!choice || !specs?.length || !lifecycle.isCurrent()) return;
-    const access = resolvePlannerAccess(
-      {
-        shell: choice.capabilities.includes("shell"),
-        subagents: choice.capabilities.includes("subagents"),
-        toolsets: choice.capabilities.flatMap((id) => (id.startsWith("toolset:") ? [id.slice("toolset:".length)] : [])),
-      },
+    const roots = buildToolTree({
       toolsets,
-      expandHome,
-    );
+      mcpCatalog: Object.values(toolsets).some((toolset) => toolset.mcp)
+        ? (dependencies.readMcpCatalog ?? readMcpCatalog)(ctx.cwd, getAgentDir())
+        : [],
+      scoutTargets,
+    });
+    const taskLines = [
+      ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
+      ...(current ? ["The current plan joins the comparison as plan A."] : []),
+    ];
+    let pick: JevToolPick | undefined;
+    let timeLimitMinutes = Math.round(configuredPlannerTimeoutSeconds(settings) / 60);
+    let specs: ModelSpec[] | undefined;
+    // Step 1 picks models, step 2 picks tools; Esc on the tools screen returns to the models.
+    for (;;) {
+      const choice = await ui.choosePlanners(ctx, {
+        title: `${current ? "Compare with other models" : "Plan with multiple models"} · 1/2 models`,
+        lines: taskLines,
+        preselected,
+        startLabel: "Next: choose tools",
+        ...lifecycle,
+      });
+      if (!choice || choice.specs.length === 0 || !lifecycle.isCurrent()) return;
+      specs = choice.specs;
+      preselected = choice.specs;
+      if (!pick) {
+        pick =
+          settings.jevToolSelection === false
+            ? { kind: "fallback", reason: "Jev tool selection is off in settings" }
+            : await (dependencies.pickTools ?? pickToolsWithJev)({
+                task,
+                conversation: transcript,
+                cwd: ctx.cwd,
+                capabilities: leafCapabilities(roots),
+                ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+                ...(settings.jevModel ? { model: settings.jevModel } : {}),
+                signal: lifecycle.signal,
+              });
+        if (!lifecycle.isCurrent()) return;
+        applyJevPick(roots, pick);
+      }
+      const tools = await ui.chooseTools(ctx, {
+        title: `${current ? "Compare with other models" : "Plan with multiple models"} · 2/2 tools`,
+        lines: [
+          ...taskLines,
+          pick.kind === "jev"
+            ? `Jev (${safeTerminalText(pick.model)}) preselected the tools this task needs; change any before starting.`
+            : `Tool defaults come from settings: ${safeTerminalText(pick.reason)}.`,
+          "Planners and their subagents can only call the MCP tools selected here.",
+        ],
+        roots,
+        startLabel: `Start planning with ${specs.length} model${specs.length === 1 ? "" : "s"}`,
+        timeLimitMinutes,
+        timeLimitChoices: TIME_LIMIT_CHOICES,
+        ...lifecycle,
+      });
+      if (!lifecycle.isCurrent() || tools.kind === "cancel") return;
+      if (tools.kind === "back") continue;
+      timeLimitMinutes = tools.timeLimitMinutes;
+      break;
+    }
+    const access = resolvePlannerAccess(treeToSelection(roots), toolsets, expandHome);
 
     let runLifecycle = lifecycle;
     if (!state.enabled) {
@@ -1298,8 +1333,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       pi.sendMessage(
         {
           customType: MULTI_TASK_MESSAGE_TYPE,
-          content: `Plan this task with several models:\n\n${task}`,
+          content: task,
           display: true,
+          details: { models: specs.map(formatModelSpec) },
         },
         { triggerTurn: false },
       );
@@ -1307,16 +1343,20 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
     const plannerCount = specs.length + (current ? 1 : 0);
     const offset = current ? 1 : 0;
-    const timeoutMs = configuredPlannerTimeoutSeconds(settings) * 1000;
-    const candidates = await ui.runPlannersWithProgress(ctx, {
-      specs,
+    const timeoutMs = timeLimitMinutes * 60 * 1000;
+    const plannerSpecs = specs;
+    const ids = plannerSpecs.map((_spec, index) => candidateId(index + offset));
+    const researchTools = [...access.tools, ...(access.mcpAllow ? [] : [])];
+    const run = await ui.runPlannersWithProgress(ctx, {
+      specs: plannerSpecs,
+      ids,
       ...runLifecycle,
-      run: (signal, onProgress) =>
+      run: (signal, onProgress, onTrace) =>
         Promise.all(
-          specs.map((spec, index) => {
+          plannerSpecs.map((spec, index) => {
             const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
             return runPlanner({
-              id: candidateId(index + offset),
+              id: ids[index] ?? candidateId(index + offset),
               spec,
               cwd: ctx.cwd,
               prompt: formatPlannerPrompt(
@@ -1324,7 +1364,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
                 transcript,
                 plannerCount,
                 scout ? formatModelSpec(scout) : undefined,
-                access.tools,
+                researchTools,
+                access.mcpAllow,
               ),
               ...(scout ? { scoutSpec: scout } : {}),
               access,
@@ -1333,12 +1374,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               loadUserExtensions: settings.plannerLoadExtensions === true,
               signal,
               onProgress: (progress) => onProgress(index, progress),
+              onTrace: (trace) => onTrace(index, trace),
             });
           }),
         ),
     });
     if (!runLifecycle.isCurrent()) return;
-    if (!candidates) {
+    if (!run) {
       ctx.ui.notify("Parallel planning cancelled.", "info");
       return;
     }
@@ -1346,8 +1388,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       version: 1,
       task: task || "Plan from the conversation",
       createdAt: Date.now(),
-      candidates: [...(current ? [current] : []), ...candidates],
+      candidates: [...(current ? [current] : []), ...run.candidates],
     };
+    lastTraces = { createdAt: set.createdAt, panes: [...run.traces.values()] };
     pi.appendEntry(CANDIDATES_ENTRY_TYPE, set);
     await compareCandidates(ctx, set);
   }
@@ -1363,7 +1406,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const lifecycle = captureMenuLifecycle();
     const ui = await loadInteractiveUi();
     if (!lifecycle.isCurrent()) return;
-    const outcome = await ui.showCandidateComparison(ctx, set, lifecycle);
+    const traces = lastTraces?.createdAt === set.createdAt ? lastTraces.panes : undefined;
+    let outcome = await ui.showCandidateComparison(ctx, set, lifecycle, { hasTraces: traces !== undefined });
+    while (outcome.kind === "traces" && traces && lifecycle.isCurrent()) {
+      await ui.showTraces(ctx, traces, "Planner traces");
+      if (!lifecycle.isCurrent()) return;
+      outcome = await ui.showCandidateComparison(ctx, set, lifecycle, { hasTraces: true });
+    }
     if (!lifecycle.isCurrent()) return;
     if (outcome.kind === "use") {
       await useCandidatePlan(ctx, outcome.candidate);

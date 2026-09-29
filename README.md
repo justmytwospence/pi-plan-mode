@@ -486,6 +486,12 @@ Guaranteed coexistence with Goal requires `@narumitw/pi-goal` `0.53.0` or newer 
 | Plan mode `>=0.52.0` with Goal `>=0.53.0` on Pi `0.84.2` | Workflow Mutex v1 coexistence guarantee |
 | Either package below its floor, or another Pi runtime | Standalone behavior only; mutual exclusion unsupported |
 
+### Herdr
+
+While a `plan_mode_question` dialog or the ready-plan menu is open, Plan mode emits `herdr:blocked` (`{ active: true, label }`, then `{ active: false }`) on the Pi event bus.
+Herdr's Pi integration counts these pairs and reports the agent as blocked, so the Agents panel and notifications show that it is waiting on you.
+Outside Herdr nothing listens and the events do nothing.
+
 ## 🛠️ Tools
 
 - `plan_mode_question` asks up to three structured questions, supports optional answer notes, submits one answer directly, and reviews multiple answers before TUI submission.

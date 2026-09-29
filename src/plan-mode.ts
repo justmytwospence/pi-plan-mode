@@ -37,6 +37,7 @@ import {
   formatTransferredPlanPrompt,
   startFreshImplementationFromState,
 } from "./fresh-implementation.js";
+import { whileBlocked } from "./herdr-blocked.js";
 import {
   formatModelSpec,
   type ImplementationModelOverride,
@@ -347,13 +348,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       const sessionGeneration = menuGeneration;
       const questionWorkflowGeneration = workflowGeneration;
       const questionOwner = workflowOwner;
-      return answerPlanModeQuestions(parsed.questions, ctx, {
-        isCurrent: () =>
-          sessionGeneration === menuGeneration &&
-          questionWorkflowGeneration === workflowGeneration &&
-          workflowMutex.isOwner(questionOwner),
-        isEnabled: () => state.enabled,
-      });
+      return whileBlocked(pi.events, "Plan-mode question", () =>
+        answerPlanModeQuestions(parsed.questions, ctx, {
+          isCurrent: () =>
+            sessionGeneration === menuGeneration &&
+            questionWorkflowGeneration === workflowGeneration &&
+            workflowMutex.isOwner(questionOwner),
+          isEnabled: () => state.enabled,
+        }),
+      );
     },
   });
 
@@ -1153,7 +1156,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       }
       // Planner subprocesses (RPC, unattended) hand the plan back instead of opening menus.
       if (ctx.hasUI && !isPlannerProcess() && completedPlanIsCurrent(intent)) {
-        await planActions.showReady(latestCommandContext ?? ctx);
+        await whileBlocked(pi.events, "Plan ready", () => planActions.showReady(latestCommandContext ?? ctx));
       }
       const request = stagedFreshImplementation;
       stagedFreshImplementation = undefined;
@@ -1752,7 +1755,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     stagedFreshImplementation = undefined;
     if (!(state.enabled && state.awaitingAction && state.latestPlan) || !ctx.hasUI) return;
     try {
-      await planActions.showReady(latestCommandContext ?? ctx);
+      await whileBlocked(pi.events, "Plan ready", () => planActions.showReady(latestCommandContext ?? ctx));
       const request = stagedFreshImplementation;
       stagedFreshImplementation = undefined;
       if (request) armDeferredFreshImplementation(request);

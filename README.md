@@ -48,9 +48,12 @@ Install only from sources you trust because Pi extensions run with Pi's permissi
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
    A widget shows each planner's progress; Escape cancels them all.
 3. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
-   rendered as Markdown and choose **Use this plan**, or choose **Synthesize…**, pick two or more candidates, and
-   optionally type guidance ("B's architecture with A's migration steps"). Synthesis runs in this session, so the
-   model can verify disagreements against the code and ask you questions before completing the merged plan.
+   rendered as Markdown and choose **Use this plan**, or choose **Synthesize…** and pick two or more candidates.
+   The prompt editor is then prefilled with `/plan synthesize A,B `: write optional guidance after the letters ("B's
+   architecture with A's migration steps") with the editor's usual wrapping, multi-line input, and any editor
+   extension such as vim mode, then press Enter. An unsent draft is never overwritten. Synthesis runs in this
+   session, so the model can verify disagreements against the code and ask you questions before completing the
+   merged plan. `/plan multi` without a task likewise prefills `/plan multi ` for you to finish.
 4. The chosen or synthesized plan goes through the normal ready flow.
 
 From a ready plan, **Compare with other models…** (in the ready menu or `/plan`) runs the same flow with the
@@ -159,6 +162,7 @@ sequenceDiagram
 | `/plan finalize` | Ask the active planner to finish or ask one remaining material question. |
 | `/plan multi [task]` | Plan with several models in parallel, then use one plan or synthesize several. |
 | `/plan compare` | Reopen the latest candidate plans, or compare the ready plan with other models. |
+| `/plan synthesize [A,B] [guidance]` | Merge candidate plans (all by default) with optional multi-line guidance. |
 | `/plan implement` | Implement a completed or saved plan with the default model, effort, and context, without a selector. |
 | `/plan save` | Save a ready plan in this Pi session and leave Plan mode. |
 | `/plan settings` | Open the same Plan Settings screen available from the menus. |

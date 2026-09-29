@@ -374,7 +374,7 @@ function multiPlanHarness(
           calls.compare?.push(set);
           if (outcome.kind === "use") return { kind: "use", candidate: set.candidates[outcome.index as number] };
           if (outcome.kind === "synthesize") {
-            return { kind: "synthesize", candidates: set.candidates, guidance: outcome.guidance };
+            return { kind: "synthesize", candidates: set.candidates };
           }
           return { kind: "close" };
         },
@@ -448,15 +448,50 @@ test("/plan multi runs the configured planners and using a candidate opens the r
   assert.equal(calls.run?.length, 1);
 });
 
-test("synthesis sends one Plan-mode prompt with every candidate and the user's guidance", async () => {
-  const { mock, context } = multiPlanHarness({ kind: "synthesize", guidance: "Prefer A's migrations" });
+test("choosing Synthesize prefills the prompt editor, and /plan synthesize sends the plans with multi-line guidance", async () => {
+  const { mock, context, branch } = multiPlanHarness({ kind: "synthesize" });
   await mock.events.get("session_start")?.[0]?.({}, context.ctx);
   await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
 
+  assert.equal(context.editorText, "/plan synthesize A,B ");
+  assert.match(context.notifications.at(-1)?.message ?? "", /Add optional guidance after "A,B"/u);
+  assert.equal(mock.sentUserMessages.length, 0, "nothing is sent until the guidance is submitted");
+
+  const candidatesEntry = mock.entries.find((entry) => entry.customType === CANDIDATES_ENTRY_TYPE);
+  branch.push({ type: "custom", customType: CANDIDATES_ENTRY_TYPE, data: candidatesEntry?.data });
+  await mock.commands.get("plan")?.handler("synthesize A,B Prefer A's migrations.\nKeep B's test plan.", context.ctx);
   const prompt = mock.sentUserMessages.at(-1)?.text ?? "";
-  assert.match(prompt, /Guidance from the user: Prefer A's migrations/u);
+  assert.match(prompt, /Guidance from the user: Prefer A's migrations\.\nKeep B's test plan\./u);
   assert.match(prompt, /<candidate id="A"[^>]*>\n# Plan A/u);
   assert.match(prompt, /<candidate id="B"[^>]*>\n# Plan B/u);
+
+  await mock.commands.get("plan")?.handler("synthesize Use your judgment", context.ctx);
+  assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /Guidance from the user: Use your judgment/u);
+
+  const before = mock.sentUserMessages.length;
+  await mock.commands.get("plan")?.handler("synthesize A,Z", context.ctx);
+  assert.equal(mock.sentUserMessages.length, before);
+  assert.match(context.notifications.at(-1)?.message ?? "", /unknown: Z/u);
+});
+
+test("prefilling never overwrites a draft, and /plan multi without a task opens the editor", async () => {
+  const { mock, context } = multiPlanHarness({ kind: "synthesize" });
+  (context.ctx as { ui: { setEditorText(text: string): void } }).ui.setEditorText("my unsent draft");
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
+  assert.equal(context.editorText, "my unsent draft");
+  assert.match(context.notifications.at(-1)?.message ?? "", /run: \/plan synthesize A,B <text>/u);
+
+  const empty = createMockPi({ activeTools: ["read", "edit"] });
+  planMode(empty.pi, {
+    readSettings: async () => ({ kind: "missing" as const }),
+    loadInteractiveUi: async () => ({}) as never,
+  });
+  const emptyContext = createMockContext({ mode: "rpc", hasUI: true });
+  await empty.events.get("session_start")?.[0]?.({}, emptyContext.ctx);
+  await empty.commands.get("plan")?.handler("multi", emptyContext.ctx);
+  assert.equal(emptyContext.editorText, "/plan multi ");
+  assert.match(emptyContext.notifications.at(-1)?.message ?? "", /Describe the task after \/plan multi/u);
 });
 
 test("comparing from a ready plan adds it as candidate A and skips its model by default", async () => {

@@ -244,7 +244,8 @@ export function progressLines(specs: readonly ModelSpec[], progress: ReadonlyArr
 
 export type ComparisonOutcome =
   | { kind: "use"; candidate: PlanCandidate }
-  | { kind: "synthesize"; candidates: PlanCandidate[]; guidance: string }
+  /** Guidance is written afterwards in the regular prompt editor. */
+  | { kind: "synthesize"; candidates: PlanCandidate[] }
   | { kind: "close" };
 
 /** Browse candidate plans, then use one as-is or synthesize a selection with optional guidance. */
@@ -258,7 +259,7 @@ export async function showCandidateComparison(
   let viewing: PlanCandidate | undefined = ready[0];
   const synthesisSelection = new Set(ready.map((candidate) => candidate.id));
   let outcome: ComparisonOutcome = { kind: "close" };
-  type Screen = "candidates" | "review" | "synth-select" | "synth-guidance";
+  type Screen = "candidates" | "review" | "synth-select";
   type Action = "view" | "use" | "toggle-synth" | "synthesize";
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
     start: "candidates",
@@ -286,7 +287,7 @@ export async function showCandidateComparison(
                 {
                   id: "synthesize",
                   label: "Synthesize…",
-                  description: "Merge chosen plans in this session, with optional guidance.",
+                  description: "Merge chosen plans in this session; you write optional guidance next.",
                   to: "synth-select" as const,
                 },
               ]
@@ -307,7 +308,10 @@ export async function showCandidateComparison(
       "synth-select": () => ({
         kind: "multiSelect",
         title: "Plans to synthesize",
-        lines: ["The current session model merges the selected plans and may ask you questions."],
+        lines: [
+          "The current session model merges the selected plans and may ask you questions.",
+          "Next, write optional guidance in the prompt editor, then press Enter.",
+        ],
         items: ready.map((candidate) => ({
           id: candidate.id,
           label: `${candidate.id} · ${safeText(candidate.label)}`,
@@ -318,21 +322,10 @@ export async function showCandidateComparison(
           {
             id: "guidance",
             label: "Continue",
-            to: "synth-guidance",
+            action: "synthesize",
             ...(synthesisSelection.size < 2 ? { disabled: true, disabledReason: "Select at least two plans" } : {}),
           },
         ],
-        hint: "back",
-      }),
-      "synth-guidance": () => ({
-        kind: "input",
-        title: "Synthesis guidance (optional)",
-        lines: [
-          "For example: use B's architecture with A's migration steps and C's tests.",
-          "Submit an empty value to let the model pick the best base and graft in the rest.",
-        ],
-        placeholder: "",
-        action: "synthesize",
         hint: "back",
       }),
     },
@@ -352,10 +345,10 @@ export async function showCandidateComparison(
         else synthesisSelection.delete(itemId);
         return { kind: "stay" };
       },
-      synthesize: async ({ value }) => {
+      synthesize: async () => {
         const candidates = ready.filter((candidate) => synthesisSelection.has(candidate.id));
         if (candidates.length < 2) return { kind: "rejected" };
-        outcome = { kind: "synthesize", candidates, guidance: value?.trim() ?? "" };
+        outcome = { kind: "synthesize", candidates };
         return { kind: "close" };
       },
     },

@@ -461,6 +461,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         await runMultiPlan(ctx, { task: multiMatch[1], includeCurrentPlan: false });
         return;
       }
+      const synthesizeMatch = /^synthesize(?:\s+([\s\S]*))?$/iu.exec(prompt);
+      if (synthesizeMatch) {
+        synthesizeCandidates(ctx, synthesizeMatch[1] ?? "");
+        return;
+      }
       if (command === "compare") {
         const set = latestCandidateSet(ctx.sessionManager.getBranch());
         if (set) await compareCandidates(ctx, set);
@@ -1170,10 +1175,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     if (!lifecycle.isCurrent()) return;
 
     const transcript = buildPlannerTranscript(ctx.sessionManager.getBranch());
-    let task = request.task?.trim() ?? "";
+    const task = request.task?.trim() ?? "";
     if (!task && !transcript.trim()) {
-      task = (await ctx.ui.input("What should the planners plan?", ""))?.trim() ?? "";
-      if (!task || !lifecycle.isCurrent()) return;
+      // Write the task in the regular prompt editor (wrapping, multi-line, vim mode) and resubmit.
+      startCommandInEditor(ctx, "/plan multi ", "Describe the task after /plan multi, then press Enter.");
+      return;
     }
 
     const current: PlanCandidate | undefined =
@@ -1362,11 +1368,66 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     if (outcome.kind === "use") {
       await useCandidatePlan(ctx, outcome.candidate);
     } else if (outcome.kind === "synthesize") {
-      if (!state.enabled && !enterPlanMode(ctx)) return;
-      sendPlanModeUserMessage(formatSynthesisPrompt(outcome.candidates, outcome.guidance), ctx);
+      const ids = outcome.candidates.map((candidate) => candidate.id).join(",");
+      startCommandInEditor(
+        ctx,
+        `/plan synthesize ${ids} `,
+        `Add optional guidance after "${ids}" (e.g. B's architecture with A's tests), then press Enter.`,
+      );
     } else {
       ctx.ui.notify("Candidate plans kept. Reopen them with /plan compare.", "info");
     }
+  }
+
+  /**
+   * Put a command prefix in the regular prompt editor so free text is written with its wrapping,
+   * multi-line editing, and any editor extension such as vim mode. A draft already in the editor
+   * is never overwritten.
+   */
+  function startCommandInEditor(ctx: ExtensionContext, prefix: string, hint: string) {
+    let draft = "";
+    try {
+      draft = ctx.ui.getEditorText();
+    } catch {
+      draft = "";
+    }
+    if (draft.trim() && draft.trim() !== prefix.trim()) {
+      ctx.ui.notify(`Your draft is still in the editor. When ready, run: ${prefix.trim()} <text>`, "info");
+      return;
+    }
+    try {
+      ctx.ui.setEditorText(prefix);
+      ctx.ui.notify(hint, "info");
+    } catch {
+      ctx.ui.notify(`Run: ${prefix.trim()} <text>`, "info");
+    }
+  }
+
+  /** `/plan synthesize [A,B,…] [guidance]`: merge candidates from the latest set in this branch. */
+  function synthesizeCandidates(ctx: ExtensionContext, args: string) {
+    const set = latestCandidateSet(ctx.sessionManager.getBranch());
+    const usable = (set?.candidates ?? []).filter((candidate) => candidate.status === "done" && candidate.plan);
+    if (usable.length < 2) {
+      ctx.ui.notify("No candidate plans to synthesize in this branch. Use /plan multi <task> first.", "warning");
+      return;
+    }
+    const match = /^([A-Za-z](?:\s*,\s*[A-Za-z])*)(?=\s|$)/u.exec(args.trimStart());
+    const requested = match?.[1]
+      ?.split(",")
+      .map((id) => id.trim().toUpperCase())
+      .filter(Boolean);
+    const guidance = (match ? args.trimStart().slice(match[0].length) : args).trim();
+    const chosen = requested ? usable.filter((candidate) => requested.includes(candidate.id)) : usable;
+    const unknown = requested?.filter((id) => !usable.some((candidate) => candidate.id === id)) ?? [];
+    if (unknown.length > 0 || chosen.length < 2) {
+      ctx.ui.notify(
+        `Choose at least two of ${usable.map((candidate) => candidate.id).join(", ")}${unknown.length ? ` (unknown: ${unknown.join(", ")})` : ""}.`,
+        "warning",
+      );
+      return;
+    }
+    if (!state.enabled && !enterPlanMode(ctx)) return;
+    sendPlanModeUserMessage(formatSynthesisPrompt(chosen, guidance), ctx);
   }
 
   async function useCandidatePlan(ctx: ExtensionContext, candidate: PlanCandidate) {

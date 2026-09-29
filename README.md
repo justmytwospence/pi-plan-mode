@@ -52,12 +52,14 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    configured `planners` start picked. The line under the list shows the highlighted model's id, context window,
    and price.
 2. **Tools**: a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools (from
-   pi-mcp-adapter's config and metadata cache). Enter or `→` opens a server or toolset, `←` closes it, and Space
-   selects or clears a tool or a whole group; `[-]` marks a partly selected group. Click a label to open a group,
+   pi-mcp-adapter's config and metadata cache). `→` opens a server or toolset (again: steps into it), `←` closes it
+   or goes up to it, and Space selects or clears a tool or a whole group; `[-]` marks a partly selected group.
+   Enter starts planning from anywhere: it asks first (a second Enter starts, Esc keeps editing), except on the
+   **Start** row. Click a label to open a group,
    click a checkbox to toggle. The highlighted row is described at the bottom. Jev picks tools while the screen is
    open (a spinner shows it working); its picks apply when they arrive unless you already changed something.
    The **Time limit** row (`←`/`→`) sets how long planners may run (default 45 min); at 80% each planner is steered
-   to submit its best plan, and one that stops without a plan is nudged once to submit it. `tab` jumps to **Start**.
+   to submit its best plan, and one that stops without a plan is nudged once to submit it.
    Each planner runs as `pi --mode rpc --no-session --no-extensions --extension <this package> …` in the project
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
    Planners and their subagents can only call the selected MCP tools; anything else is blocked with a list of

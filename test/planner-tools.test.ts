@@ -170,7 +170,7 @@ test("the tool tree groups toolsets and MCP servers, toggles groups, and maps to
   );
 });
 
-test("the tool tree view starts on Start, toggles and expands rows, and returns the time limit", () => {
+test("the tool tree view starts on the first tool, toggles and expands rows, and returns the time limit", () => {
   const roots = sampleTree();
   const results: unknown[] = [];
   const view = new ToolTreeView(theme, {
@@ -186,30 +186,61 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
     onDone: (result) => results.push(result),
   });
   let screen = view.render(120).join("\n");
-  assert.match(screen, /› ▶ Start planning with 2 models {2}4 of 7 tools · 45 min limit/u);
-  assert.match(screen, /⏎ start planning/u);
+  assert.match(screen, / {3}▶ Start planning with 2 models {2}4 of 7 tools · 45 min limit/u);
+  assert.match(screen, /› +\[x\] Shell/u, "the cursor starts on the first tool");
+  assert.match(screen, /⏎ start planning +space clear/u);
   assert.match(screen, /Time limit {2}‹ 45 min ›/u);
   assert.match(screen, /▾ \[ \] MCP servers +0\/3/u);
   assert.match(screen, /▸ \[ \] obsidian/u);
   assert.doesNotMatch(screen, /search_notes/u);
 
-  view.handleInput("\u001b[B"); // down to time limit
+  view.handleInput("\u001b[A"); // up to the time limit
   view.handleInput("\u001b[C"); // right: 60 min
   for (let index = 0; index < 7; index += 1) view.handleInput("\u001b[B"); // to obsidian
   screen = view.render(120).join("\n");
   assert.match(screen, /› +▸ \[ \] obsidian/u);
-  assert.match(screen, /space select all +⏎ open/u, "hints follow the highlighted row");
-  view.handleInput("\u001b[C"); // expand obsidian
+  assert.match(screen, /⏎ start planning +space select all +→ open/u, "hints follow the highlighted row");
+  view.handleInput("\u001b[C"); // open obsidian
   view.handleInput(" "); // select all of obsidian
   screen = view.render(120).join("\n");
   assert.match(screen, /▾ \[x\] obsidian +2\/2/u);
   assert.match(screen, /\[x\] search_notes/u);
-  view.handleInput("\t"); // jump to Start
+  view.handleInput("\r"); // Enter away from Start asks first
+  screen = view.render(120).join("\n");
+  assert.match(screen, /Start planning with 2 models\? +6 of 7 tools · 60 min limit +⏎ start +esc keep editing/u);
+  assert.deepEqual(results, []);
+  view.handleInput("\u001b"); // keep editing
+  assert.doesNotMatch(view.render(120).join("\n"), /keep editing/u);
+  assert.deepEqual(results, []);
   view.handleInput("\r");
+  view.handleInput("\r"); // confirm
   assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 60 }]);
   assert.deepEqual(treeToSelection(roots).mcp, ["obsidian/*"]);
   view.handleInput("\u001b");
   assert.deepEqual(results.at(-1), { kind: "back" });
+});
+
+test("Enter on the Start row starts at once, and any other key after Enter keeps editing", () => {
+  const results: unknown[] = [];
+  const view = new ToolTreeView(theme, {
+    title: "t",
+    notes: [],
+    roots: sampleTree(),
+    startLabel: "Start",
+    timeLimitMinutes: 45,
+    timeLimitChoices: [45],
+    rows: () => 30,
+    requestRender: () => undefined,
+    onDone: (result) => results.push(result),
+  });
+  view.handleInput("\r");
+  view.handleInput("\u001b[B"); // moving on dismisses the question and moves
+  assert.doesNotMatch(view.render(120).join("\n"), /keep editing/u);
+  assert.match(view.render(120).join("\n"), /› +\[x\] Subagents/u);
+  assert.deepEqual(results, []);
+  view.handleInput("g"); // top: the Start row
+  view.handleInput("\r");
+  assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 45 }]);
 });
 
 test("Jev's picks arrive after the tools screen opens, and never override your own changes", async () => {
@@ -241,7 +272,7 @@ test("Jev's picks arrive after the tools screen opens, and never override your o
   }
 });
 
-test("Enter opens and closes servers, Space selects them, and the mouse does both", () => {
+test("→ and ← open and close servers, Space selects them, and the mouse does both", () => {
   const roots = sampleTree();
   const view = new ToolTreeView(theme, {
     title: "tools",
@@ -255,15 +286,16 @@ test("Enter opens and closes servers, Space selects them, and the mouse does bot
     onDone: () => undefined,
   });
   const screen = () => view.render(120);
-  for (let index = 0; index < 8; index += 1) view.handleInput("\u001b[B"); // obsidian
-  view.handleInput("\r");
+  for (let index = 0; index < 6; index += 1) view.handleInput("\u001b[B"); // obsidian
+  view.handleInput("\u001b[C"); // open
   assert.match(screen().join("\n"), /▾ \[ \] obsidian[\s\S]*\[ \] search_notes[\s\S]*\[ \] delete_note/u);
-  view.handleInput("\u001b[B"); // search_notes
+  view.handleInput("\u001b[C"); // on an open group, → steps into its first tool
+  assert.match(screen().join("\n"), /› +\[ \] search_notes/u);
   assert.match(screen().join("\n"), /Search notes/u, "the highlighted tool is described at the bottom");
-  view.handleInput("\r");
+  view.handleInput(" ");
   assert.match(screen().join("\n"), /▾ \[-\] obsidian +1\/2[\s\S]*\[x\] search_notes/u);
-  view.handleInput("\u001b[A"); // back to obsidian
-  view.handleInput("\r"); // close it again
+  view.handleInput("\u001b[D"); // ← on a tool: up to its server
+  view.handleInput("\u001b[D"); // ← on an open server: close it
   assert.doesNotMatch(screen().join("\n"), /search_notes/u);
   view.handleInput(" "); // select the whole server
   assert.match(screen().join("\n"), /▸ \[x\] obsidian +2\/2/u);

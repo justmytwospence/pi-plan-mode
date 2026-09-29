@@ -53,11 +53,13 @@ type Row = { kind: "start" } | { kind: "time" } | { kind: "node"; node: ToolNode
  * tools are selected. The highlighted row is described at the bottom.
  */
 export class ToolTreeView implements Component {
-  private cursor = 0;
+  /** Starts on the first tool, so Space works at once; Enter starts from anywhere. */
+  private cursor = 2;
+  /** Enter away from the Start row asks first. */
+  private confirming = false;
   private scroll = 0;
   private timeLimit: number;
   private readonly expanded = new Set<string>();
-  private lastTreeCursor = 2;
   private jevStatus: { kind: "pending" } | { kind: "done"; message: string } | undefined;
   /** True once the user changed any selection; Jev never overrides that. */
   touched = false;
@@ -120,24 +122,28 @@ export class ToolTreeView implements Component {
     const is = (...keys: KeyId[]) => keys.some((key) => matchesKey(data, key));
     const row = rows[this.cursor];
     if (is("ctrl+c")) return this.finish({ kind: "cancel" });
-    if (is("escape")) return this.finish({ kind: "back" });
-    if (row?.kind === "start" && is("enter", "space")) {
-      return this.finish({ kind: "start", timeLimitMinutes: this.timeLimit });
+    const dismissed = this.confirming;
+    if (this.confirming) {
+      this.confirming = false;
+      if (is("enter", "y")) return this.start();
+      if (is("escape", "n")) {
+        this.options.requestRender();
+        return;
+      }
+      // Any other key keeps editing and does what it normally does.
     }
-    if (is("up", "k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
+    if (is("escape")) return this.finish({ kind: "back" });
+    // Enter starts from anywhere: directly on the Start row, after a confirmation elsewhere.
+    if (is("enter")) {
+      if (row?.kind === "start") return this.start();
+      this.confirming = true;
+    } else if (is("up", "k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
     else if (is("down", "j")) this.cursor = (this.cursor + 1) % rows.length;
     else if (is("pageUp")) this.cursor = Math.max(0, this.cursor - 10);
     else if (is("pageDown")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
     else if (is("home", "g")) this.cursor = 0;
     else if (is("end", "shift+g")) this.cursor = rows.length - 1;
-    else if (is("tab")) {
-      // Jump to Start and back to where you were in the tree.
-      if (this.cursor === 0) this.cursor = Math.min(rows.length - 1, this.lastTreeCursor);
-      else {
-        this.lastTreeCursor = this.cursor;
-        this.cursor = 0;
-      }
-    } else if (is("+", "=")) this.stepTime(1);
+    else if (is("+", "=")) this.stepTime(1);
     else if (is("-")) this.stepTime(-1);
     else if (is("a")) {
       for (const leaf of leaves(this.options.roots)) leaf.selected = true;
@@ -145,14 +151,14 @@ export class ToolTreeView implements Component {
     } else if (is("n")) {
       for (const leaf of leaves(this.options.roots)) leaf.selected = false;
       this.touched = true;
-    } else if (row?.kind === "time" && is("right", "l", "enter", "space")) this.stepTime(1);
+    } else if (row?.kind === "time" && is("right", "l", "space")) this.stepTime(1);
     else if (row?.kind === "time" && is("left", "h")) this.stepTime(-1);
     else if (row?.kind === "node" && is("space", "x")) this.change(row.node);
-    else if (row?.kind === "node" && is("enter")) {
-      if (row.node.children) this.toggleExpanded(row.node.id);
-      else this.change(row.node);
-    } else if (row?.kind === "node" && is("right", "l")) {
-      if (row.node.children) this.expanded.add(row.node.id);
+    else if (row?.kind === "node" && is("right", "l")) {
+      // Open a group; on an open group, step into its first tool.
+      if (!row.node.children) return;
+      if (this.expanded.has(row.node.id)) this.cursor = Math.min(rows.length - 1, this.cursor + 1);
+      else this.expanded.add(row.node.id);
     } else if (row?.kind === "node" && is("left", "h")) {
       if (row.node.children && this.expanded.has(row.node.id)) this.expanded.delete(row.node.id);
       else {
@@ -165,8 +171,12 @@ export class ToolTreeView implements Component {
           }
         }
       }
-    } else return;
+    } else if (!this.confirming && !dismissed) return;
     this.options.requestRender();
+  }
+
+  private start() {
+    this.finish({ kind: "start", timeLimitMinutes: this.timeLimit });
   }
 
   private toggleExpanded(id: string) {
@@ -233,12 +243,21 @@ export class ToolTreeView implements Component {
       "",
     ];
     const current = rows[this.cursor];
-    const detail = this.detail(current, width);
+    const detail = this.detail(this.confirming ? { kind: "start" } : current, width);
     const footer = [
       rule(theme, width),
       ...padLines(detail, 3),
       rule(theme, width),
-      hintLine(theme, width, this.hints(current)),
+      this.confirming
+        ? `${truncateToWidth(
+            ` ${theme.fg("warning", theme.bold(`${this.options.startLabel}?`))}  ${theme.fg("muted", `${selectedCount} of ${all.length} tools · ${this.timeLimit} min limit`)}`,
+            Math.max(10, width - 32),
+            "…",
+          )}   ${hintLine(theme, 30, [
+            { key: "⏎", label: "start", primary: true },
+            { key: "esc", label: "keep editing" },
+          ]).trimStart()}`
+        : hintLine(theme, width, this.hints(current)),
     ];
     // Only as tall as the tree needs, up to the terminal height.
     const available = Math.max(4, height - header.length - footer.length);
@@ -315,37 +334,25 @@ export class ToolTreeView implements Component {
   }
 
   private hints(row: Row | undefined): Hint[] {
+    const start: Hint = { key: "⏎", label: "start planning", primary: true };
     const common: Hint[] = [
+      { key: "↑↓", label: "move" },
       { key: "a/n", label: "all/none" },
       { key: "esc", label: "back to models" },
     ];
-    if (row?.kind === "start") {
-      return [{ key: "⏎", label: "start planning", primary: true }, { key: "↓", label: "change tools" }, ...common];
-    }
-    if (row?.kind === "time") {
-      return [
-        { key: "←→", label: "time limit", primary: true },
-        { key: "tab", label: "start" },
-        { key: "↑↓", label: "move" },
-        ...common,
-      ];
-    }
+    if (row?.kind === "start") return [start, ...common];
+    if (row?.kind === "time") return [start, { key: "←→", label: "time limit" }, ...common];
     const node = row?.kind === "node" ? row.node : undefined;
     const isGroup = node?.children !== undefined;
+    const all = node !== undefined && groupState(node) === "all";
     return [
-      {
-        key: "space",
-        label: node
-          ? groupState(node) === "all"
-            ? `clear ${isGroup ? "all" : ""}`.trim()
-            : `select${isGroup ? " all" : ""}`
-          : "select",
-      },
-      ...(isGroup
-        ? [{ key: "⏎", label: node && this.expanded.has(node.id) ? "close" : "open" }]
-        : [{ key: "←", label: "up to group" }]),
-      { key: "tab", label: "start", primary: true },
-      { key: "↑↓", label: "move" },
+      start,
+      { key: "space", label: `${all ? "clear" : "select"}${isGroup ? " all" : ""}` },
+      ...(isGroup && node
+        ? [this.expanded.has(node.id) ? { key: "←", label: "close" } : { key: "→", label: "open" }]
+        : row?.kind === "node" && row.depth > 0
+          ? [{ key: "←", label: "up to group" }]
+          : []),
       ...common,
     ];
   }

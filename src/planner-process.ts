@@ -8,6 +8,7 @@ import {
   PLANNER_ENV,
   type PlanCandidate,
   type PlannerAccess,
+  type PlannerSessionRef,
   SCOUT_EXTENSIONS_ENV,
   SCOUT_MCP_ALLOW_ENV,
   SCOUT_TOOLS_ENV,
@@ -29,6 +30,8 @@ export const WRAP_UP_MESSAGE =
   "Time is almost up. Stop investigating now and call plan_mode_complete alone with your best complete plan. Record anything you could not verify as explicit assumptions or open questions in the plan.";
 export const NUDGE_MESSAGE =
   "You stopped without submitting a plan. Call plan_mode_complete now, alone, with your complete plan based on what you found. Record anything unresolved as explicit assumptions.";
+export const FOLLOW_UP_WRAP_UP_MESSAGE =
+  "Time is almost up. Stop investigating and give the user your answer now. If you were revising the plan, call plan_mode_complete with the complete revised plan first.";
 
 export interface PlannerProgress {
   spec: ModelSpec;
@@ -63,6 +66,17 @@ export interface PlannerRunOptions {
   onTrace?(trace: PlannerTrace): void;
   /** Receives the planner's subagents (same objects, growing list) whenever any of them changes. */
   onSubagents?(subagents: readonly SubagentView[]): void;
+  /** Keep the planner's session on disk (instead of `--no-session`) so later turns can resume it. */
+  session?: PlannerSessionRef;
+  /**
+   * A later turn in an existing planner session: the planner answers the user and resubmits the
+   * plan only if it changed. It is not nudged to submit one, and prose is never taken as a plan.
+   */
+  followUp?: boolean;
+  /** Continue this trace (earlier turns) instead of starting a new one. */
+  trace?: PlannerTrace;
+  /** Subagents from earlier turns, so new ones continue the numbering. */
+  subagentOffset?: number;
   /** Test seam: replaces `child_process.spawn`. */
   spawnProcess?: typeof spawn;
   /** Test seam: replaces how the Pi CLI is invoked. */
@@ -70,7 +84,10 @@ export interface PlannerRunOptions {
 }
 
 export function plannerArgs(
-  options: Pick<PlannerRunOptions, "spec" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access">,
+  options: Pick<
+    PlannerRunOptions,
+    "spec" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access" | "session"
+  >,
 ) {
   const access = options.access ?? DEFAULT_PLANNER_ACCESS;
   const tools = [
@@ -83,7 +100,9 @@ export function plannerArgs(
   return [
     "--mode",
     "rpc",
-    "--no-session",
+    ...(options.session
+      ? ["--session-dir", options.session.dir, "--session-id", options.session.id]
+      : ["--no-session"]),
     "--model",
     formatModelSpec(options.spec),
     "--tools",
@@ -122,10 +141,18 @@ export function plannerEnv(options: Pick<PlannerRunOptions, "scoutSpec" | "acces
  * submits with plan_mode_complete. RPC keeps a channel open so the planner can be asked to wrap up
  * at the soft deadline and nudged once if it stops without a plan. Never rejects.
  */
-export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
+export interface PlannerTurnResult extends PlanCandidate {
+  /** The planner's last reply text (follow-up turns). */
+  reply?: string;
+  /** True when this turn submitted a plan through plan_mode_complete. */
+  planSubmitted?: boolean;
+}
+
+export function runPlanner(options: PlannerRunOptions): Promise<PlannerTurnResult> {
   const startedAt = Date.now();
-  const trace = new PlannerTrace();
-  const subagents = new SubagentTracker(options.id);
+  const trace = options.trace ?? new PlannerTrace();
+  const subagents = new SubagentTracker(options.id, options.subagentOffset ?? 0);
+  const followUp = options.followUp === true;
   const progress: PlannerProgress = {
     spec: options.spec,
     state: "starting",
@@ -208,6 +235,52 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
       let finalPlan = plan;
       let planFromText = false;
       let error: string | undefined;
+      if (followUp) {
+        // A reply is enough; a plan only when it was resubmitted.
+        const replied = lastAssistantText.trim().length > 0 || plan !== undefined;
+        if (terminalState && !plan) {
+          status = terminalState;
+          error =
+            terminalState === "timeout" ? `Timed out after ${Math.round(options.timeoutMs / 1000)}s.` : "Cancelled.";
+        } else if (replied && !assistantError) status = "done";
+        else {
+          status = "failed";
+          error =
+            assistantError ??
+            (stderrTail.trim()
+              ? stderrTail.trim().split("\n").slice(-3).join(" ")
+              : `Planner exited with code ${exitCode ?? "unknown"} without replying.`);
+        }
+        progress.state = status;
+        progress.endedAt = Date.now();
+        for (const agent of subagents.agents) {
+          if (agent.stats.state === "running" || agent.stats.state === "starting") {
+            agent.stats.state = terminalState ?? "failed";
+            agent.stats.endedAt = progress.endedAt;
+          }
+        }
+        reportSubagents();
+        trace.note(
+          status !== "done" ? `Stopped: ${error ?? status}` : plan ? "Replied with a revised plan." : "Replied.",
+          status === "done" ? "info" : "warning",
+        );
+        report();
+        reportTrace();
+        resolve({
+          ...base,
+          status,
+          ...(plan ? { plan } : {}),
+          planSubmitted: plan !== undefined,
+          reply: lastAssistantText.trim(),
+          ...(error ? { error } : {}),
+          durationMs: Date.now() - startedAt,
+          toolCalls: progress.toolCalls,
+          ...(progress.subagentTasks ? { subagentTasks: progress.subagentTasks } : {}),
+          totalTokens: progress.totalTokens,
+          costUsd: progress.costUsd,
+        });
+        return;
+      }
       if (!finalPlan) {
         const parsed = parseProposedPlan(lastAssistantText);
         if (parsed.kind === "valid") finalPlan = parsed.plan;
@@ -249,6 +322,7 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         ...base,
         status,
         ...(finalPlan ? { plan: finalPlan } : {}),
+        planSubmitted: plan !== undefined,
         ...(planFromText ? { planFromText } : {}),
         ...(error ? { error } : {}),
         durationMs: Date.now() - startedAt,
@@ -280,11 +354,16 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
     timeout.unref?.();
     const softDeadline = setTimeout(
       () => {
-        if (settled || plan || closing) return;
+        if (settled || (plan && !followUp) || closing) return;
         progress.wrappingUp = true;
         progress.lastActivity = "asked to wrap up";
-        trace.note("Soft deadline reached: asked the planner to submit its best plan now.", "warning");
-        send({ type: "steer", message: WRAP_UP_MESSAGE });
+        trace.note(
+          followUp
+            ? "Soft deadline reached: asked the planner to answer now."
+            : "Soft deadline reached: asked the planner to submit its best plan now.",
+          "warning",
+        );
+        send({ type: "steer", message: followUp ? FOLLOW_UP_WRAP_UP_MESSAGE : WRAP_UP_MESSAGE });
         report();
         reportTrace();
       },
@@ -351,7 +430,7 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
           assistantError = undefined;
         }
       } else if (record.type === "agent_settled") {
-        if (plan || terminalState) {
+        if (followUp || plan || terminalState) {
           closeInput();
         } else if (!nudged && !assistantError) {
           nudged = true;

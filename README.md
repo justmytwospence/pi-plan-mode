@@ -86,6 +86,29 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
 
 In RPC mode the same steps use Pi's standard menus.
 
+### Keep talking to a planner, then merge, then keep going
+
+Planners keep their own Pi session (in `~/.pi/agent/plan-mode/planner-sessions/`, pruned after 30 days), so a
+plan is the start of a conversation, not the end of one:
+
+1. In Compare, press `r` on a plan (or run `/plan talk A`). A bar above the editor says who you are talking to;
+   what you type now goes to that planner instead of the main model, in the normal prompt editor. Commands
+   (`/…`) and shell input (`!…`) still work as usual.
+2. The planner resumes its session with everything it already read, answers you (it may ask you questions back
+   in its reply), and resubmits the plan only when it changes: the chat shows its reply and the revised plan,
+   and the candidate becomes **A v2** in Compare, with its time, tools, tokens, and cost added up. It keeps its
+   tools, subagents, and read-only policy; the bar shows what it is doing while it works.
+3. Switch planners with `r` in `/plan compare` or `/plan talk B`; several planners can work on replies at once.
+   `/plan talk off` goes back to the main model, and `/plan talk cancel` stops replies in progress.
+4. Merge with `m` in Compare as before. The merge prompt carries each plan's latest version and your conversation
+   with its planner, so the main model knows what you settled with each one. Using or merging a plan ends talk
+   mode.
+5. After the merge you are in ordinary Plan mode with the main model: keep refining with it, or go back to a
+   planner with `/plan compare`.
+
+Your conversations with planners appear in the chat but are left out of the main model's context (the merge
+passes them on explicitly). Plans from runs before this feature cannot be resumed.
+
 From a ready plan, **Compare with other models…** (in the ready menu or `/plan`) runs the same flow with the
 current plan as candidate A; planners do not see it, so their plans stay independent.
 Candidates are stored in the session branch; `/plan compare` reopens the latest set.
@@ -190,6 +213,7 @@ sequenceDiagram
 | `/plan finalize` | Ask the active planner to finish or ask one remaining material question. |
 | `/plan multi [task]` | Plan with several models in parallel, then use one plan or synthesize several. |
 | `/plan compare` | Reopen the latest candidate plans, or compare the ready plan with other models. |
+| `/plan talk [A\|off\|cancel]` | Talk to one planner about its plan; `off` returns to the main model, `cancel` stops replies. |
 | `/plan synthesize [A,B] [guidance]` | Merge candidate plans (all by default) with optional multi-line guidance. |
 | `/plan implement` | Implement a completed or saved plan with the default model, effort, and context, without a selector. |
 | `/plan save` | Save a ready plan in this Pi session and leave Plan mode. |

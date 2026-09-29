@@ -13,6 +13,7 @@ import {
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
   PLANNER_ENV,
+  PLANNER_TALK_MESSAGE_TYPE,
   type PlanCandidate,
 } from "../src/multi-plan.js";
 import { progressLines } from "../src/multi-plan-menu.js";
@@ -385,13 +386,22 @@ function multiPlanHarness(
           calls.chooseTools?.push({ ...options, jevMessage: picked?.message });
           return (extraDependencies.toolsResult as unknown) ?? { kind: "start", timeLimitMinutes: 45 };
         },
-        runPlannersWithProgress: async (_ctx: unknown, options: { specs: unknown[] }) => {
+        runPlannersWithProgress: async (
+          _ctx: unknown,
+          options: { specs: unknown[]; run(signal: AbortSignal, ...callbacks: unknown[]): Promise<PlanCandidate[]> },
+        ) => {
           calls.run?.push(options.specs);
+          if (extraDependencies.runPlanner) {
+            const noop = () => undefined;
+            const candidates = await options.run(new AbortController().signal, noop, noop, noop);
+            return { candidates, traces: new Map() };
+          }
           return { candidates: plannerCandidates, traces: new Map() };
         },
         showCandidateComparison: async (_ctx: unknown, set: { candidates: PlanCandidate[] }) => {
           calls.compare?.push(set);
           if (outcome.kind === "use") return { kind: "use", candidate: set.candidates[outcome.index as number] };
+          if (outcome.kind === "talk") return { kind: "talk", candidate: set.candidates[outcome.index as number] };
           if (outcome.kind === "synthesize") {
             return { kind: "synthesize", candidates: set.candidates };
           }
@@ -410,7 +420,8 @@ function multiPlanHarness(
     sessionManager: {
       getSessionId: () => "multi-plan-session",
       getSessionName: () => undefined,
-      getBranch: () => branch,
+      // Entries appended by the extension join the branch, like in a real session.
+      getBranch: () => [...branch, ...mock.entries.map((entry) => ({ type: "custom", ...entry }))],
       getEntries: () => branch,
     },
     modelRegistry: {
@@ -847,4 +858,91 @@ test("the comparison screen previews, reads, marks, merges, and uses plans", asy
   view.handleInput("\u001b");
   view.handleInput("t");
   assert.deepEqual(results.at(-1), { kind: "traces" });
+});
+
+test("planners keep their sessions; talk mode sends your messages to one, and a merge carries the discussion", async () => {
+  const runs: Record<string, unknown>[] = [];
+  const fakePlanner = async (options: {
+    id: string;
+    spec: { provider: string; modelId: string };
+    followUp?: boolean;
+  }) => {
+    runs.push(options as never);
+    const base = {
+      id: options.id,
+      label: `${options.spec.provider}/${options.spec.modelId}`,
+      origin: "planner" as const,
+      model: options.spec,
+      status: "done" as const,
+      durationMs: 10,
+      toolCalls: 1,
+      totalTokens: 100,
+      costUsd: 0.01,
+    };
+    return options.followUp
+      ? { ...base, reply: "Dropped the migration step.", plan: `# Plan ${options.id} v2`, planSubmitted: true }
+      : { ...base, plan: `# Plan ${options.id}`, planSubmitted: true };
+  };
+  const { mock, context } = multiPlanHarness({ kind: "talk", index: 0 }, {}, { runPlanner: fakePlanner });
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
+
+  const first = runs[0]?.session as { dir: string; id: string } | undefined;
+  assert.match(first?.dir ?? "", /plan-mode[/\\]planner-sessions$/u);
+  assert.match(first?.id ?? "", /^plan\d+-A$/u);
+  const saved = mock.entries.filter((entry) => entry.customType === CANDIDATES_ENTRY_TYPE).at(-1)?.data as {
+    candidates: PlanCandidate[];
+  };
+  assert.deepEqual(saved.candidates[0]?.session, first);
+  assert.equal(saved.candidates[0]?.revision, 1);
+  assert.ok(saved.candidates[0]?.launch?.access);
+
+  // Talk mode (from Compare's `r`): plain input goes to planner A, commands still work.
+  const input = mock.events.get("input")?.[0];
+  const routed = await input?.({ type: "input", text: "Drop the migration step", source: "interactive" }, context.ctx);
+  assert.deepEqual(routed, { action: "handled" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(runs.length, 3);
+  assert.equal(runs[2]?.followUp, true);
+  assert.deepEqual(runs[2]?.session, first);
+  assert.match(String(runs[2]?.prompt), /Drop the migration step/u);
+  const talkMessages = mock.sentMessages
+    .map(
+      (entry) =>
+        entry.message as { customType?: string; content?: string; details?: { role?: string; revision?: number } },
+    )
+    .filter((message) => message.customType === PLANNER_TALK_MESSAGE_TYPE);
+  assert.deepEqual(
+    talkMessages.map((message) => [message.details?.role, message.content, message.details?.revision]),
+    [
+      ["user", "Drop the migration step", undefined],
+      ["planner", "Dropped the migration step.", 2],
+    ],
+  );
+  const command = await input?.({ type: "input", text: "/plan compare", source: "interactive" }, context.ctx);
+  assert.notDeepEqual(command, { action: "handled" }, "commands are not sent to the planner");
+
+  // The side conversation stays out of the main model's context.
+  const contextHandler = mock.events.get("context")?.[0];
+  const filtered = (await contextHandler?.(
+    {
+      type: "context",
+      messages: [
+        { role: "user", content: "hi", timestamp: 1 },
+        { role: "custom", customType: PLANNER_TALK_MESSAGE_TYPE, content: "x", display: true, timestamp: 2 },
+      ],
+    },
+    context.ctx,
+  )) as { messages: Array<{ role: string; customType?: string }> };
+  assert.ok(filtered.messages.some((message) => message.role === "user"));
+  assert.ok(!filtered.messages.some((message) => message.customType === PLANNER_TALK_MESSAGE_TYPE));
+
+  // Back to the main model, then merge: the discussion and the revised plan go into the prompt.
+  await mock.commands.get("plan")?.handler("talk off", context.ctx);
+  const main = await input?.({ type: "input", text: "hello", source: "interactive" }, context.ctx);
+  assert.notDeepEqual(main, { action: "handled" });
+  await mock.commands.get("plan")?.handler("synthesize A,B keep it small", context.ctx);
+  const prompt = mock.sentUserMessages.at(-1)?.text ?? "";
+  assert.match(prompt, /<candidate id="A" source="[^"]+" revision="2">\n# Plan A v2/u);
+  assert.match(prompt, /<discussion>[\s\S]*User: Drop the migration step\n\nPlanner: Dropped the migration step\./u);
 });

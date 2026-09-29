@@ -155,7 +155,11 @@ export class SubagentTracker {
   readonly agents: SubagentView[] = [];
   private readonly byKey = new Map<string, SubagentView>();
 
-  constructor(private readonly plannerId: string) {}
+  /** `offset` continues the numbering of subagents from earlier turns (A1, A2, … then A3). */
+  constructor(
+    private readonly plannerId: string,
+    private readonly offset = 0,
+  ) {}
 
   /** Apply one `tool_execution_update` partial result; returns true when anything changed. */
   apply(toolCallId: string, details: unknown): boolean {
@@ -195,7 +199,7 @@ export class SubagentTracker {
     let view = this.byKey.get(key);
     if (!view) {
       view = {
-        id: `${this.plannerId}${this.agents.length + 1}`,
+        id: `${this.plannerId}${this.offset + this.agents.length + 1}`,
         label: scout.label,
         model: scout.model,
         task: scout.task,

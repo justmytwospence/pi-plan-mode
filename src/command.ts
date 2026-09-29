@@ -14,6 +14,16 @@ const PLAN_COMMAND_COMPLETIONS: readonly CommandArgumentCompletion[] = [
     label: "compare",
     description: "Reopen candidate plans, or compare the ready plan with other models",
   },
+  {
+    value: "talk",
+    label: "talk",
+    description: "Talk to one planner (talk A), back to the main model (talk off), or stop replies (talk cancel)",
+  },
+  {
+    value: "synthesize",
+    label: "synthesize",
+    description: "Merge candidate plans (synthesize A,B guidance)",
+  },
   { value: "implement", label: "implement", description: "Implement the completed or saved plan" },
   { value: "save", label: "save", description: "Save the completed plan for later" },
   { value: "settings", label: "settings", description: "Open Plan mode settings" },

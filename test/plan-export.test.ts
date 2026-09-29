@@ -40,6 +40,8 @@ test("plan export autocomplete exposes a path-taking public route", () => {
       "finalize",
       "multi",
       "compare",
+      "talk",
+      "synthesize",
       "implement",
       "save",
       "settings",

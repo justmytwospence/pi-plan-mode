@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { watch } from "node:fs";
-import { basename, dirname } from "node:path";
+import { readdir, stat, unlink } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { stripVTControlCharacters } from "node:util";
 import {
@@ -63,19 +64,24 @@ import {
   type PlanModeContract,
   reconcileModeContract,
 } from "./mode-contract.js";
+import { modelCatalog } from "./model-catalog.js";
 import {
   buildPlannerTranscript,
   CANDIDATES_ENTRY_TYPE,
   type CandidateSet,
   candidateId,
   extraToolsFromEnv,
+  formatCost,
+  formatDuration,
   formatPlannerPrompt,
   formatSelectedPlanMessage,
   formatSynthesisPrompt,
+  formatTokens,
   isPlannerProcess,
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
   mcpAllowFromEnv,
+  PLANNER_TALK_MESSAGE_TYPE,
   type PlanCandidate,
   resolvePlannerAccess,
   SCOUT_MCP_ALLOW_ENV,
@@ -87,6 +93,8 @@ import { createPlanActionController, type FreshImplementationTiming } from "./pl
 import { createPlanExportController } from "./plan-export-controller.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { runPlanner } from "./planner-process.js";
+import { PlannerTalk, type TalkMessageDetails } from "./planner-talk.js";
+import { PlannerTrace } from "./planner-trace.js";
 import {
   clearPlanModeUi,
   planModeStatusText as formatPlanModeStatusText,
@@ -205,6 +213,8 @@ interface PlanModeDependencies {
   loadInteractiveUi?(): Promise<InteractiveUi>;
   /** Test seam: replaces Jev's planner tool preselection. */
   pickTools?: typeof pickToolsWithJev;
+  /** Test seam: replaces planner subprocesses (first runs and later turns in talk mode). */
+  runPlanner?: typeof runPlanner;
   /** Test seam: replaces reading the MCP servers and cached tools. */
   readMcpCatalog?: typeof readMcpCatalog;
 }
@@ -242,6 +252,17 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   const deferredFreshHandoff = createDeferredFreshHandoffCoordinator();
   /** Traces of the latest multi-model run in this process, keyed to its candidate set. */
   let lastTraces: { createdAt: number; panes: TracePane[] } | undefined;
+  const talk = new PlannerTalk({
+    pi,
+    extensionPath: EXTENSION_ENTRY_PATH,
+    loadUserExtensions: () => settings.plannerLoadExtensions === true,
+    timeoutMs: () => configuredPlannerTimeoutSeconds(settings) * 1000,
+    latestSet: (ctx) => latestCandidateSet(ctx.sessionManager.getBranch()),
+    saveSet: (set) => pi.appendEntry(CANDIDATES_ENTRY_TYPE, set),
+    describeModel: (ctx, spec) => modelCatalog(ctx).describe(spec),
+    pane: (ctx, set, candidate) => talkPane(ctx, set, candidate),
+    ...(dependencies.runPlanner ? { runPlanner: dependencies.runPlanner } : {}),
+  });
   let nextReadyPresentationNonce = 0;
   let menuGeneration = 0;
   let workflowGeneration = 0;
@@ -379,6 +400,43 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       ),
     );
     box.addChild(new Markdown(String(message.content ?? ""), 0, 1, getMarkdownTheme()));
+    return box;
+  });
+  pi.registerMessageRenderer(PLANNER_TALK_MESSAGE_TYPE, (message, options, theme) => {
+    const details = (message.details ?? {}) as Partial<TalkMessageDetails>;
+    const content = String(message.content ?? "");
+    const who = `planner ${details.candidate ?? "?"}${details.name ? ` · ${details.name}` : ""}`;
+    const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+    if (details.role === "user") {
+      box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(`You → ${who}`)), 0, 0));
+      box.addChild(new Markdown(content, 0, 1, getMarkdownTheme()));
+      return box;
+    }
+    const failed = details.status !== undefined && details.status !== "done";
+    const revision = details.revision;
+    const heading = `${who[0]?.toUpperCase() ?? ""}${who.slice(1)}${revision !== undefined ? ` · revised its plan: ${details.candidate} v${revision}` : ""}`;
+    box.addChild(new Text(theme.fg(failed ? "warning" : "customMessageLabel", theme.bold(heading)), 0, 0));
+    box.addChild(new Markdown(content, 0, 1, getMarkdownTheme()));
+    if (revision !== undefined && details.plan) {
+      const lines = details.plan.split("\n");
+      box.addChild(new Text(theme.fg("customMessageLabel", `Plan ${details.candidate} v${revision}`), 0, 1));
+      box.addChild(
+        new Markdown(options.expanded ? details.plan : lines.slice(0, 12).join("\n"), 0, 0, getMarkdownTheme()),
+      );
+      if (!options.expanded && lines.length > 12) {
+        box.addChild(new Text(theme.fg("dim", "… (expand to read the whole plan)"), 0, 0));
+      }
+    }
+    const stats = details.stats;
+    if (stats) {
+      const parts = [
+        formatDuration(stats.durationMs),
+        `${stats.toolCalls} tools`,
+        ...(stats.totalTokens ? [`${formatTokens(stats.totalTokens)} tok`] : []),
+        ...(stats.costUsd ? [formatCost(stats.costUsd)] : []),
+      ];
+      box.addChild(new Text(theme.fg("dim", parts.join(" · ")), 0, 1));
+    }
     return box;
   });
   pi.registerMessageRenderer(SELECTED_PLAN_MESSAGE_TYPE, (message, options, theme) => {
@@ -542,6 +600,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         await runMultiPlan(ctx, { task: multiMatch[1], includeCurrentPlan: false });
         return;
       }
+      const talkMatch = /^talk(?:\s+(\S+))?\s*$/iu.exec(prompt);
+      if (talkMatch) {
+        handleTalkCommand(ctx, talkMatch[1]?.toLowerCase());
+        return;
+      }
       const synthesizeMatch = /^synthesize(?:\s+([\s\S]*))?$/iu.exec(prompt);
       if (synthesizeMatch) {
         synthesizeCandidates(ctx, synthesizeMatch[1] ?? "");
@@ -683,6 +746,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   };
 
   pi.on("session_start", async (event, ctx) => {
+    talk.reset(ctx);
     cancelDeferredFreshImplementation();
     const generation = ++menuGeneration;
     finalizationRequest.reset();
@@ -927,7 +991,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   pi.on("context", async (event, ctx) => {
     resolvePendingWorkflowToolPolicy(ctx);
-    const result = implementationRetention.transformContext(event.messages, state);
+    // Your side conversations with planners stay out of the main model's context; a merge
+    // passes them on explicitly.
+    const withoutPlannerTalk = event.messages.filter(
+      (message) => !(message.role === "custom" && message.customType === PLANNER_TALK_MESSAGE_TYPE),
+    );
+    const result = implementationRetention.transformContext(withoutPlannerTalk, state);
     if (result.clearActiveImplementationId) {
       clearActiveImplementation(result.clearActiveImplementationId, ctx);
     }
@@ -939,6 +1008,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   });
 
   pi.on("input", async (event, ctx) => {
+    // Talk mode: what you type goes to the planner you are talking to, not the main model.
+    // Commands (/…) and shell input (!…) still work as usual.
+    if (talk.active && !isPlannerProcess() && event.source !== "extension") {
+      const text = event.text.trim();
+      if (text && !text.startsWith("/") && !text.startsWith("!")) {
+        if (event.images?.length) ctx.ui.notify("Planners only receive text; the image was not sent.", "warning");
+        talk.send(ctx, event.text);
+        return { action: "handled" };
+      }
+    }
     refreshStateForFirstPrompt(ctx);
     const waitsForRuntimeAdmission =
       activeImplementationRuntimeApplication?.sessionManager === ctx.sessionManager ||
@@ -1255,6 +1334,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const lifecycle = captureMenuLifecycle();
     const ui = await loadInteractiveUi();
     if (!lifecycle.isCurrent()) return;
+    talk.stop(ctx, true);
 
     const transcript = buildPlannerTranscript(ctx.sessionManager.getBranch());
     const task = request.task?.trim() ?? "";
@@ -1387,6 +1467,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
     const plannerCount = specs.length + (current ? 1 : 0);
     const offset = current ? 1 : 0;
+    // Each planner keeps its own Pi session on disk, so you can keep talking to it afterwards.
+    const runCreatedAt = Date.now();
+    const sessionDir = plannerSessionDir();
+    prunePlannerSessions(sessionDir);
     const timeoutMs = timeLimitMinutes * 60 * 1000;
     const plannerSpecs = specs;
     const ids = plannerSpecs.map((_spec, index) => candidateId(index + offset));
@@ -1399,8 +1483,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         Promise.all(
           plannerSpecs.map((spec, index) => {
             const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
-            return runPlanner({
-              id: ids[index] ?? candidateId(index + offset),
+            const id = ids[index] ?? candidateId(index + offset);
+            const session = { dir: sessionDir, id: `plan${runCreatedAt}-${id}` };
+            return (dependencies.runPlanner ?? runPlanner)({
+              id,
+              session,
               spec,
               cwd: ctx.cwd,
               prompt: formatPlannerPrompt(
@@ -1420,7 +1507,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               onProgress: (progress) => onProgress(index, progress),
               onTrace: (trace) => onTrace(index, trace),
               onSubagents: (subagents) => onSubagents(index, subagents),
-            });
+            }).then(({ reply: _reply, planSubmitted: _submitted, ...candidate }) => ({
+              ...candidate,
+              session,
+              launch: { access, ...(scout ? { scoutSpec: scout } : {}) },
+              ...(candidate.plan ? { revision: 1 } : {}),
+            }));
           }),
         ),
     });
@@ -1432,12 +1524,77 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const set: CandidateSet = {
       version: 1,
       task: task || "Plan from the conversation",
-      createdAt: Date.now(),
+      createdAt: runCreatedAt,
       candidates: [...(current ? [current] : []), ...run.candidates],
     };
     lastTraces = { createdAt: set.createdAt, panes: [...run.traces.values()] };
     pi.appendEntry(CANDIDATES_ENTRY_TYPE, set);
     await compareCandidates(ctx, set);
+  }
+
+  /** `/plan talk A` talks to planner A; `off` returns to the main model; `cancel` stops replies. */
+  function handleTalkCommand(ctx: ExtensionContext, argument: string | undefined) {
+    if (argument === "off" || argument === "main" || argument === "stop" || (!argument && talk.active)) {
+      if (talk.active) talk.stop(ctx);
+      else ctx.ui.notify("You are already talking to the main model.", "info");
+      return;
+    }
+    if (argument === "cancel") {
+      talk.cancel(ctx);
+      return;
+    }
+    const set = latestCandidateSet(ctx.sessionManager.getBranch());
+    const talkable = (set?.candidates ?? []).filter((candidate) => PlannerTalk.canTalk(candidate));
+    if (!set || talkable.length === 0) {
+      ctx.ui.notify("No planner to talk to in this branch. Use /plan multi <task> first.", "info");
+      return;
+    }
+    if (!argument) {
+      ctx.ui.notify(
+        `Talk to a planner with /plan talk ${talkable.map((candidate) => candidate.id).join("|")}, or press r in /plan compare.`,
+        "info",
+      );
+      return;
+    }
+    talk.start(ctx, set, argument.toUpperCase());
+  }
+
+  function plannerSessionDir() {
+    return join(getAgentDir(), "plan-mode", "planner-sessions");
+  }
+
+  /** Planner sessions older than 30 days are deleted when a new run starts. */
+  function prunePlannerSessions(dir: string) {
+    const cutoff = Date.now() - 30 * 24 * 60 * 60 * 1000;
+    void (async () => {
+      try {
+        for (const name of await readdir(dir)) {
+          if (!name.endsWith(".jsonl")) continue;
+          const path = join(dir, name);
+          if ((await stat(path)).mtimeMs < cutoff) await unlink(path);
+        }
+      } catch {
+        // Nothing to prune yet.
+      }
+    })();
+  }
+
+  /** The monitor pane of a candidate; recreated (empty) when this process no longer has the run's traces. */
+  function talkPane(ctx: ExtensionContext, set: CandidateSet, candidate: PlanCandidate): TracePane {
+    if (lastTraces?.createdAt !== set.createdAt) lastTraces = { createdAt: set.createdAt, panes: [] };
+    let pane = lastTraces.panes.find((entry) => entry.id === candidate.id);
+    if (!pane) {
+      const described = modelCatalog(ctx).describe(candidate.label);
+      pane = {
+        id: candidate.id,
+        model: candidate.label,
+        name: described.name,
+        ...(described.effort ? { effort: described.effort } : {}),
+        trace: new PlannerTrace(),
+      };
+      lastTraces.panes.push(pane);
+    }
+    return pane;
   }
 
   /** Say which helper model each chosen planner would fan out to. */
@@ -1470,6 +1627,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       outcome = await ui.showCandidateComparison(ctx, set, lifecycle, { hasTraces: true });
     }
     if (!lifecycle.isCurrent()) return;
+    if (outcome.kind === "talk") {
+      const latest = latestCandidateSet(ctx.sessionManager.getBranch()) ?? set;
+      talk.start(ctx, latest, outcome.candidate.id);
+      return;
+    }
+    if (outcome.kind === "use" || outcome.kind === "synthesize") talk.stop(ctx, true);
     if (outcome.kind === "use") {
       await useCandidatePlan(ctx, outcome.candidate);
     } else if (outcome.kind === "synthesize") {

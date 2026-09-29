@@ -143,6 +143,8 @@ export function resolvePlannerAccess(
 export const CANDIDATES_ENTRY_TYPE = "plan-mode-candidates";
 export const MULTI_TASK_MESSAGE_TYPE = "plan-mode-multi-task";
 export const SELECTED_PLAN_MESSAGE_TYPE = "plan-mode-selected-plan";
+/** A message you sent to a planner, or its reply, shown in the chat but never sent to the main model. */
+export const PLANNER_TALK_MESSAGE_TYPE = "plan-mode-planner-talk";
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const MAX_TOOL_RESULT_CHARS = 4_000;
 const CANDIDATE_IDS = "ABCDEFGHIJ";
@@ -168,6 +170,32 @@ export interface PlanCandidate {
   subagentTasks?: number;
   totalTokens?: number;
   costUsd?: number;
+  /** The planner's own Pi session, so you can keep talking to it after it submits a plan. */
+  session?: PlannerSessionRef;
+  /** How the planner was launched (tools, subagents), reused for every later turn. */
+  launch?: PlannerLaunch;
+  /** 1 for the first plan; each revision from a later turn adds one. */
+  revision?: number;
+  /** Your later turns with this planner and its replies. */
+  thread?: ThreadEntry[];
+}
+
+export interface PlannerSessionRef {
+  dir: string;
+  id: string;
+}
+
+export interface PlannerLaunch {
+  access: PlannerAccess;
+  scoutSpec?: ModelSpec;
+}
+
+export interface ThreadEntry {
+  role: "user" | "planner";
+  text: string;
+  at: number;
+  /** Planner replies that revised the plan carry the new revision number. */
+  revision?: number;
 }
 
 export interface CandidateSet {
@@ -175,6 +203,11 @@ export interface CandidateSet {
   task: string;
   createdAt: number;
   candidates: PlanCandidate[];
+}
+
+/** You can keep talking to a planner whose session was kept (runs from before that cannot). */
+export function canTalkToPlanner(candidate: PlanCandidate) {
+  return candidate.origin === "planner" && candidate.session !== undefined && candidate.model !== undefined;
 }
 
 export function candidateId(index: number) {
@@ -373,10 +406,44 @@ export function formatSynthesisPrompt(candidates: readonly PlanCandidate[], guid
     "",
     "Before deciding, check claims where the candidates disagree against the repository. Resolve every disagreement explicitly, and use plan_mode_question when one needs the user's decision. Then call plan_mode_complete with the complete synthesized plan, not a diff against a candidate.",
     "",
-    ...candidates.map(
-      (candidate) =>
-        `<candidate id="${candidate.id}" source="${escapeAttribute(candidate.label)}">\n${candidate.plan?.trim() ?? ""}\n</candidate>`,
-    ),
+    ...candidates.map((candidate) => {
+      const discussion = formatThread(candidate.thread ?? []);
+      return [
+        `<candidate id="${candidate.id}" source="${escapeAttribute(candidate.label)}"${candidate.revision && candidate.revision > 1 ? ` revision="${candidate.revision}"` : ""}>`,
+        candidate.plan?.trim() ?? "",
+        ...(discussion
+          ? [
+              "<discussion>",
+              "The user talked this plan over with its planner; the plan above already reflects what they settled. Weigh the user's stated preferences here when merging.",
+              discussion,
+              "</discussion>",
+            ]
+          : []),
+        "</candidate>",
+      ].join("\n");
+    }),
+  ].join("\n");
+}
+
+const MAX_THREAD_MESSAGE_CHARS = 3_000;
+
+function formatThread(thread: readonly ThreadEntry[]) {
+  return thread
+    .map(
+      (entry) =>
+        `${entry.role === "user" ? "User" : "Planner"}: ${truncate(entry.text.trim(), MAX_THREAD_MESSAGE_CHARS)}`,
+    )
+    .join("\n\n");
+}
+
+/** A later turn with a planner that already submitted its plan. */
+export function formatPlannerFollowUp(message: string) {
+  return [
+    "The user has read your plan and is now talking with you directly. Their message:",
+    "",
+    message.trim(),
+    "",
+    "Answer them directly and concisely in your reply. Investigate again if needed (still read-only). If they ask for changes, or your answers change the plan, call plan_mode_complete with the complete revised plan (not a diff); otherwise do not resubmit it. You cannot use question dialogs, but you may ask the user questions in your reply text; they will answer in their next message.",
   ].join("\n");
 }
 
@@ -419,6 +486,12 @@ export function normalizeCandidateSet(value: unknown): CandidateSet | undefined 
         ...numberField("subagentTasks", candidate.subagentTasks),
         ...numberField("totalTokens", candidate.totalTokens),
         ...numberField("costUsd", candidate.costUsd),
+        ...numberField("revision", candidate.revision),
+        ...(isSessionRef(candidate.session)
+          ? { session: { dir: candidate.session.dir, id: candidate.session.id } }
+          : {}),
+        ...(isLaunch(candidate.launch) ? { launch: candidate.launch } : {}),
+        ...(Array.isArray(candidate.thread) ? { thread: candidate.thread.filter(isThreadEntry) } : {}),
       },
     ];
   });
@@ -432,6 +505,37 @@ export function normalizeCandidateSet(value: unknown): CandidateSet | undefined 
 
 function numberField<Key extends string>(key: Key, value: unknown): Partial<Record<Key, number>> {
   return typeof value === "number" && Number.isFinite(value) ? ({ [key]: value } as Record<Key, number>) : {};
+}
+
+function isSessionRef(value: unknown): value is PlannerSessionRef {
+  return isRecord(value) && typeof value.dir === "string" && typeof value.id === "string";
+}
+
+function isLaunch(value: unknown): value is PlannerLaunch {
+  if (!isRecord(value) || !isRecord(value.access)) return false;
+  const access = value.access;
+  const strings = (list: unknown) => Array.isArray(list) && list.every((item) => typeof item === "string");
+  return (
+    typeof access.shell === "boolean" &&
+    typeof access.subagents === "boolean" &&
+    strings(access.extensions) &&
+    strings(access.tools) &&
+    strings(access.scoutExtensions) &&
+    strings(access.scoutTools) &&
+    (access.mcpAllow === undefined || strings(access.mcpAllow)) &&
+    (access.scoutMcpAllow === undefined || strings(access.scoutMcpAllow)) &&
+    (value.scoutSpec === undefined || isModel(value.scoutSpec))
+  );
+}
+
+function isThreadEntry(value: unknown): value is ThreadEntry {
+  return (
+    isRecord(value) &&
+    (value.role === "user" || value.role === "planner") &&
+    typeof value.text === "string" &&
+    typeof value.at === "number" &&
+    (value.revision === undefined || typeof value.revision === "number")
+  );
 }
 
 function isModel(value: unknown): value is ImplementationModelOverride {

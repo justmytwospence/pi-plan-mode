@@ -8,7 +8,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import { formatCost, formatDuration, formatTokens, type PlanCandidate } from "./multi-plan.js";
+import { canTalkToPlanner, formatCost, formatDuration, formatTokens, type PlanCandidate } from "./multi-plan.js";
 import {
   type Column,
   effortText,
@@ -27,6 +27,7 @@ import {
 
 export type CompareResult =
   | { kind: "use"; id: string }
+  | { kind: "talk"; id: string }
   | { kind: "synthesize"; ids: string[] }
   | { kind: "traces" }
   | { kind: "close" };
@@ -90,6 +91,7 @@ export class CompareView implements Component {
       const page = Math.max(1, this.readerHeight - 2);
       if (is("escape", "q", "left", "h")) this.reading = false;
       else if (is("enter")) return this.use(candidate);
+      else if (is("r") && canTalkToPlanner(candidate)) return this.options.onDone({ kind: "talk", id: candidate.id });
       else if (is("up", "k")) this.scrollPlan(candidate, -1, this.readerHeight);
       else if (is("down", "j")) this.scrollPlan(candidate, 1, this.readerHeight);
       else if (is("pageUp", "ctrl+u", "shift+space")) this.scrollPlan(candidate, -page, this.readerHeight);
@@ -121,6 +123,12 @@ export class CompareView implements Component {
         .map((plan) => plan.id);
       if (ids.length < 2) this.message = "Mark at least two plans with Space to merge them.";
       else return this.options.onDone({ kind: "synthesize", ids });
+    } else if (candidate && is("r")) {
+      if (canTalkToPlanner(candidate)) return this.options.onDone({ kind: "talk", id: candidate.id });
+      this.message =
+        candidate.origin === "session"
+          ? `${candidate.id} is this session's own plan: just keep talking to the main model.`
+          : `${candidate.id}'s planner cannot be resumed (it ran before planner sessions were kept).`;
     } else if (is("t") && this.options.hasTraces) return this.options.onDone({ kind: "traces" });
     else if (candidate && is("pageUp", "ctrl+u")) this.scrollPlan(candidate, -half, this.previewHeight);
     else if (candidate && is("pageDown", "ctrl+d")) this.scrollPlan(candidate, half, this.previewHeight);
@@ -240,7 +248,7 @@ export class CompareView implements Component {
       {
         header: "PLAN",
         get: (plan) =>
-          `${isReady(plan) ? theme.fg("success", "✓") : stateIcon(theme, plan.status === "cancelled" ? "cancelled" : "failed")} ${theme.bold(plan.id)}`,
+          `${isReady(plan) ? theme.fg("success", "✓") : stateIcon(theme, plan.status === "cancelled" ? "cancelled" : "failed")} ${theme.bold(plan.id)}${plan.revision && plan.revision > 1 ? theme.fg("accent", ` v${plan.revision}`) : ""}`,
       },
       { header: "MODEL", flex: true, min: 12, get: (plan) => this.options.describe(plan).name },
       {
@@ -267,7 +275,7 @@ export class CompareView implements Component {
               ? theme.fg("muted", "the plan from this session")
               : plan.planFromText
                 ? theme.fg("warning", "taken from its reply text")
-                : `${planSize(plan.plan ?? "")}`,
+                : `${planSize(plan.plan ?? "")}${talkNote(plan)}`,
       },
     ];
     const table = renderTable(theme, candidates, columns, width - 3);
@@ -306,7 +314,12 @@ export class CompareView implements Component {
         labeledRule(
           theme,
           width,
-          theme.fg("accent", theme.bold(`Plan ${candidate.id} · ${this.options.describe(candidate).name}`)),
+          theme.fg(
+            "accent",
+            theme.bold(
+              `Plan ${candidate.id}${candidate.revision && candidate.revision > 1 ? ` v${candidate.revision}` : ""} · ${this.options.describe(candidate).name}`,
+            ),
+          ),
           theme.fg("dim", where),
           "borderAccent",
         ),
@@ -342,7 +355,7 @@ export class CompareView implements Component {
       titleLine(
         theme,
         width,
-        `Plan ${candidate.id}`,
+        `Plan ${candidate.id}${candidate.revision && candidate.revision > 1 ? ` v${candidate.revision}` : ""}`,
         [described.name, described.effort ? `effort ${described.effort}` : ""].filter(Boolean).join(" · "),
         "Compare",
       ),
@@ -351,6 +364,7 @@ export class CompareView implements Component {
       rule(theme, width),
       hintLine(theme, width, [
         { key: "⏎", label: `use plan ${candidate.id}`, primary: true },
+        ...(canTalkToPlanner(candidate) ? [{ key: "r", label: `talk to ${candidate.id}` }] : []),
         { key: "↑↓", label: "scroll" },
         { key: "space", label: "page" },
         { key: "g/G", label: "top/end" },
@@ -382,6 +396,7 @@ export class CompareView implements Component {
     if (candidate && isReady(candidate)) {
       hints.push({ key: "⏎", label: `use plan ${candidate.id}`, primary: true }, { key: "→", label: "read it" });
     }
+    if (candidate && canTalkToPlanner(candidate)) hints.push({ key: "r", label: `talk to ${candidate.id}` });
     if (ready.length > 1) {
       hints.push({ key: "m", label: marked.length >= 2 ? `merge ${marked.join("+")}` : "merge (mark 2+)" });
       hints.push({ key: "space", label: candidate && this.marked.has(candidate.id) ? "unmark" : "mark" });
@@ -395,6 +410,11 @@ export class CompareView implements Component {
 
 function isReady(candidate: PlanCandidate) {
   return candidate.status === "done" && Boolean(candidate.plan);
+}
+
+function talkNote(plan: PlanCandidate) {
+  const yours = (plan.thread ?? []).filter((entry) => entry.role === "user").length;
+  return yours ? ` · you talked ${yours}×` : "";
 }
 
 function planSize(plan: string) {

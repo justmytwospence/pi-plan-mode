@@ -157,6 +157,8 @@ test("completePlanArguments suggests management tokens only", () => {
       "finalize",
       "multi",
       "compare",
+      "talk",
+      "synthesize",
       "implement",
       "save",
       "settings",

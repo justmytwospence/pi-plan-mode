@@ -553,6 +553,8 @@ test("plan save autocomplete is public and saving fails closed without a ready p
       "finalize",
       "multi",
       "compare",
+      "talk",
+      "synthesize",
       "implement",
       "save",
       "settings",

@@ -54,9 +54,14 @@ Install only from sources you trust because Pi extensions run with Pi's permissi
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
    Planners and their subagents can only call the selected MCP tools; anything else is blocked with a list of
    what is allowed.
-3. **Live traces**: while planners run, their traces stream side by side (or one at a time: `s`, `tab`), with
-   thinking, text, every tool call and its result, and aligned stats per planner. `↑↓`/`PgUp`/`PgDn` scroll, `End`
-   follows, `Esc` twice cancels. After the run, **Watch planner traces** in the comparison menu replays them.
+3. **Live monitor**: while planners run, the top half lists every planner and every subagent it has fanned out
+   (indented under it), each with its model and effort, elapsed time, tool calls, subagent count, tokens, cost, and
+   current activity; a planner's totals include its subagents. The bottom half previews the selected agent's live
+   trace, or `s` shows all planners side by side. `↑↓` selects an agent and Enter opens its full trace (thinking,
+   text, every tool call and result, and a subagent's task), where `↑↓`/`PgUp`/`PgDn`/`g` scroll, `End` follows,
+   `tab` moves to the next agent, and Esc returns. `Esc` twice in the overview cancels the run. After the run,
+   **Watch planner traces** in the comparison menu reopens it. Subagent activity reaches the monitor through the
+   planner's `plan_subagents` progress updates.
 4. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
    rendered as Markdown and choose **Use this plan**, or choose **Synthesize…** and pick two or more candidates.
    The prompt editor is then prefilled with `/plan synthesize A,B `: write optional guidance after the letters ("B's

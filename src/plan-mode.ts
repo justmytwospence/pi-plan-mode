@@ -135,6 +135,7 @@ import {
   type PlanModeWorkflowToolPolicy,
   restorePlanModeState,
 } from "./state.js";
+import { createSubagentReporter, type SubagentMeta } from "./subagent-progress.js";
 import {
   canSelectToolInPlanMode,
   classifyPlanModeTool,
@@ -419,16 +420,30 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       label: "Plan subagents",
       description: `Run up to 6 read-only subagents in parallel on ${formatModelSpec(scoutSpec)} to investigate the codebase while planning. Each gets only its task text and can read and search files (no shell, no edits), and returns a report. Use it for broad or independent investigations; verify decisive facts yourself.`,
       parameters: PLAN_SUBAGENTS_PARAMS,
-      async execute(_toolCallId, params: unknown, signal, _onUpdate, ctx) {
+      async execute(_toolCallId, params: unknown, signal, onUpdate, ctx) {
         if (!state.enabled) throw new Error("plan_subagents is only available while Plan mode is active");
         const parsed = normalizeScoutTasks(params);
         if (!parsed.ok) throw new Error(parsed.error);
+        // Stream each scout's activity to whoever runs this planner (the main session's monitor).
+        const metas: SubagentMeta[] = parsed.tasks.map((task, index) => ({
+          index,
+          label: task.label,
+          model: formatModelSpec(scoutSpec),
+          task: task.task,
+          state: "running",
+          startedAt: Date.now(),
+        }));
+        const reporter = createSubagentReporter(metas, (details, summary) =>
+          onUpdate?.({ content: [{ type: "text", text: summary }], details }),
+        );
+        reporter.flush();
         const results = await Promise.all(
-          parsed.tasks.map((task) =>
+          parsed.tasks.map((task, index) =>
             runScout({
               spec: scoutSpec,
               task,
               cwd: ctx.cwd,
+              onRecord: (record) => reporter.record(index, record),
               extensions: scoutExtensions,
               tools: scoutTools,
               ...(scoutMcpAllow ? { mcpAllow: scoutMcpAllow, guardExtensionPath: EXTENSION_ENTRY_PATH } : {}),
@@ -437,6 +452,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
                 activeScouts.add(child);
                 return () => activeScouts.delete(child);
               },
+            }).then((result) => {
+              const meta = metas[index];
+              if (meta) {
+                meta.state = result.status;
+                meta.endedAt = Date.now();
+              }
+              reporter.flush();
+              return result;
             }),
           ),
         );
@@ -1351,7 +1374,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       specs: plannerSpecs,
       ids,
       ...runLifecycle,
-      run: (signal, onProgress, onTrace) =>
+      run: (signal, onProgress, onTrace, onSubagents) =>
         Promise.all(
           plannerSpecs.map((spec, index) => {
             const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
@@ -1375,6 +1398,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               signal,
               onProgress: (progress) => onProgress(index, progress),
               onTrace: (trace) => onTrace(index, trace),
+              onSubagents: (subagents) => onSubagents(index, subagents),
             });
           }),
         ),

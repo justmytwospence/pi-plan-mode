@@ -15,6 +15,7 @@ import {
 import { piSpawnCommand } from "./pi-command.js";
 import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
 import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
+import { SubagentTracker, type SubagentView } from "./subagent-progress.js";
 
 export { piSpawnCommand } from "./pi-command.js";
 
@@ -60,6 +61,8 @@ export interface PlannerRunOptions {
   onProgress(progress: PlannerProgress): void;
   /** Receives the live trace (the same object on every call) whenever it changes. */
   onTrace?(trace: PlannerTrace): void;
+  /** Receives the planner's subagents (same objects, growing list) whenever any of them changes. */
+  onSubagents?(subagents: readonly SubagentView[]): void;
   /** Test seam: replaces `child_process.spawn`. */
   spawnProcess?: typeof spawn;
   /** Test seam: replaces how the Pi CLI is invoked. */
@@ -122,6 +125,7 @@ export function plannerEnv(options: Pick<PlannerRunOptions, "scoutSpec" | "acces
 export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
   const startedAt = Date.now();
   const trace = new PlannerTrace();
+  const subagents = new SubagentTracker(options.id);
   const progress: PlannerProgress = {
     spec: options.spec,
     state: "starting",
@@ -157,6 +161,13 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         options.onProgress({ ...progress });
       } catch {
         // Progress rendering must never break a planner run.
+      }
+    };
+    const reportSubagents = () => {
+      try {
+        options.onSubagents?.(subagents.agents);
+      } catch {
+        // Monitoring must never break a planner run.
       }
     };
     const reportTrace = () => {
@@ -221,6 +232,13 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
       }
       progress.state = status;
       progress.endedAt = Date.now();
+      for (const agent of subagents.agents) {
+        if (agent.stats.state === "running" || agent.stats.state === "starting") {
+          agent.stats.state = terminalState ?? "failed";
+          agent.stats.endedAt = progress.endedAt;
+        }
+      }
+      reportSubagents();
       trace.note(
         status === "done" ? "Plan submitted." : `Stopped: ${error ?? status}`,
         status === "done" ? "info" : "warning",
@@ -283,6 +301,12 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         }
         return;
       }
+      if (record.type === "tool_execution_update" && record.toolName === PLAN_SUBAGENTS_TOOL_NAME) {
+        const partial = isRecord(record.partialResult) ? record.partialResult : undefined;
+        const callId = typeof record.toolCallId === "string" ? record.toolCallId : "call";
+        if (subagents.apply(callId, partial?.details)) reportSubagents();
+        return;
+      }
       if (record.type === "response") {
         if (record.success === false && record.command === "prompt") {
           assistantError = typeof record.error === "string" ? record.error : "The planner rejected the prompt.";
@@ -304,6 +328,10 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
           progress.lastActivity = "submitted plan";
         }
       } else if (record.type === "tool_execution_end") {
+        if (record.toolName === PLAN_SUBAGENTS_TOOL_NAME && typeof record.toolCallId === "string") {
+          subagents.finish(record.toolCallId, terminalState === "cancelled");
+          reportSubagents();
+        }
         // Nested model work (plan_subagents) reports its usage on the tool result.
         const result = isRecord(record.result) ? record.result : undefined;
         if (result && isRecord(result.usage)) addUsage(progress, result.usage);
@@ -333,7 +361,15 @@ export function runPlanner(options: PlannerRunOptions): Promise<PlanCandidate> {
         } else {
           closeInput();
         }
-      } else if (record.type !== "message_update") {
+      } else if (record.type === "message_update") {
+        const update = isRecord(record.assistantMessageEvent) ? record.assistantMessageEvent : undefined;
+        const activity =
+          update?.type === "thinking_delta" ? "thinking" : update?.type === "text_delta" ? "writing" : undefined;
+        if (activity && !progress.wrappingUp && progress.lastActivity !== activity) {
+          progress.lastActivity = activity;
+          report();
+        }
+      } else {
         changed = record.type === "auto_retry_start" || record.type === "compaction_start";
       }
       if (changed) {

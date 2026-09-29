@@ -12,6 +12,7 @@ import {
 import { alignColumns, type CandidateSet, candidateSummary, type PlanCandidate, statsCells } from "./multi-plan.js";
 import type { PlannerProgress } from "./planner-process.js";
 import { PlannerTrace } from "./planner-trace.js";
+import type { SubagentView } from "./subagent-progress.js";
 import { leaves, type ToolNode } from "./tool-tree.js";
 import { type ToolTreeResult, ToolTreeView } from "./tool-tree-view.js";
 import { type TracePane, TraceView } from "./trace-view.js";
@@ -177,6 +178,7 @@ export interface RunPlannersWithProgressOptions extends Lifecycle {
     signal: AbortSignal,
     onProgress: (index: number, progress: PlannerProgress) => void,
     onTrace: (index: number, trace: PlannerTrace) => void,
+    onSubagents: (index: number, subagents: readonly SubagentView[]) => void,
   ): Promise<PlanCandidate[]>;
 }
 
@@ -197,7 +199,7 @@ export async function runPlannersWithProgress(
   const progress: Array<PlannerProgress | undefined> = options.specs.map(() => undefined);
   const panes: TracePane[] = options.specs.map((spec, index) => ({
     id: options.ids[index] ?? String(index + 1),
-    label: safeText(formatModelSpec(spec)),
+    model: safeText(formatModelSpec(spec)),
     trace: new PlannerTrace(),
   }));
   const traces = () => new Map(panes.map((pane) => [pane.id, pane]));
@@ -234,6 +236,10 @@ export async function runPlannersWithProgress(
           (index, trace) => {
             const pane = panes[index];
             if (pane) pane.trace = trace;
+          },
+          (index, subagents) => {
+            const pane = panes[index];
+            if (pane) pane.children = subagents.map(subagentPane);
           },
         ),
     });
@@ -298,6 +304,11 @@ async function runWithTraceView(
           if (pane) pane.trace = trace;
           requestRender();
         },
+        (index, subagents) => {
+          const pane = panes[index];
+          if (pane) pane.children = subagents.map(subagentPane);
+          requestRender();
+        },
       )
       .then((candidates) => {
         result = candidates;
@@ -342,6 +353,25 @@ export async function showTraces(ctx: ExtensionContext, panes: readonly TracePan
       invalidate: () => view.invalidate(),
     };
   });
+}
+
+/** Subagent views keep their identity, so a pane per subagent can be reused across updates. */
+const subagentPanes = new WeakMap<SubagentView, TracePane>();
+function subagentPane(view: SubagentView): TracePane {
+  let pane = subagentPanes.get(view);
+  if (!pane) {
+    pane = {
+      id: view.id,
+      model: view.model,
+      label: view.label,
+      task: view.task,
+      trace: view.trace,
+      progress: view.stats,
+    };
+    subagentPanes.set(view, pane);
+  }
+  pane.label = view.label;
+  return pane;
 }
 
 export interface ChooseToolsOptions extends Lifecycle {

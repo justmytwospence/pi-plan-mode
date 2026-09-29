@@ -157,6 +157,8 @@ export interface RunScoutOptions {
   /** MCP tools the scout may call; loads `guardExtensionPath` to enforce it. */
   mcpAllow?: readonly string[];
   guardExtensionPath?: string;
+  /** Receives every JSON record the scout emits, for live monitoring. */
+  onRecord?(record: Record<string, unknown>): void;
   signal?: AbortSignal;
   timeoutMs?: number;
   /** Receives every spawned child so the caller can kill stragglers on shutdown. */
@@ -268,7 +270,13 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
         } catch {
           continue;
         }
-        if (!isRecord(event) || event.type !== "message_end" || !isRecord(event.message)) continue;
+        if (!isRecord(event)) continue;
+        try {
+          options.onRecord?.(event);
+        } catch {
+          // Monitoring must never break a scout.
+        }
+        if (event.type !== "message_end" || !isRecord(event.message)) continue;
         if (event.message.role !== "assistant") continue;
         addUsage(usage, event.message.usage);
         const text = textOf(event.message.content);

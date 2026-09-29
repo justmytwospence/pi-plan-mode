@@ -10,6 +10,7 @@ import { MCP_ALLOW_ENV } from "../src/multi-plan.js";
 import planMode from "../src/plan-mode.js";
 import { NUDGE_MESSAGE, runPlanner, WRAP_UP_MESSAGE } from "../src/planner-process.js";
 import { PlannerTrace } from "../src/planner-trace.js";
+import { compactRecord, createSubagentReporter, SubagentTracker } from "../src/subagent-progress.js";
 import {
   applyJevPick,
   buildToolTree,
@@ -291,20 +292,26 @@ test("traces record streamed text, thinking, tool calls with results, and notes"
 });
 
 function tracePanes() {
-  const panes = ["A", "B"].map((id) => ({
+  const stats = (toolCalls: number, subagentTasks = 0) => ({
+    state: "running" as const,
+    startedAt: Date.now() - 65_000,
+    toolCalls,
+    subagentTasks,
+    totalTokens: 1_234_567,
+    costUsd: 1.5,
+    lastActivity: "thinking",
+  });
+  const planner = (id: string, model: string, toolCalls: number) => ({
     id,
-    label: id === "A" ? "anthropic/claude-fable-5-1:xhigh" : "openai-codex/gpt-6-astra:xhigh",
+    model,
     trace: new PlannerTrace(),
-    progress: {
-      spec: { provider: "p", modelId: id },
-      state: "running" as const,
-      startedAt: Date.now() - 65_000,
-      toolCalls: id === "A" ? 12 : 3,
-      subagentTasks: 0,
-      totalTokens: 1_234_567,
-      costUsd: 1.5,
-    },
-  }));
+    progress: stats(toolCalls, 2),
+    children: [] as Record<string, unknown>[],
+  });
+  const panes = [
+    planner("A", "anthropic/claude-fable-5-1:xhigh", 12),
+    planner("B", "openai-codex/gpt-6-astra:xhigh", 3),
+  ];
   for (let index = 0; index < 60; index += 1) {
     panes[0]?.trace.apply({
       type: "tool_execution_start",
@@ -319,10 +326,39 @@ function tracePanes() {
       args: { pattern: `b${index}` },
     });
   }
-  return panes;
+  const scout = new PlannerTrace();
+  scout.apply({
+    type: "message_update",
+    assistantMessageEvent: { type: "thinking_delta", delta: "Scout is thinking hard." },
+  });
+  scout.apply({
+    type: "tool_execution_start",
+    toolCallId: "s1",
+    toolName: "web_search",
+    args: { query: "pymc horseshoe" },
+  });
+  panes[0]?.children.push(
+    {
+      id: "A1",
+      model: "anthropic/claude-opus-5-5:high",
+      label: "schema audit",
+      task: "Audit the schema module and report every validation gap.",
+      trace: scout,
+      progress: { ...stats(4), lastActivity: 'web_search "pymc horseshoe"' },
+    },
+    {
+      id: "A2",
+      model: "anthropic/claude-opus-5-5:high",
+      label: "docs research",
+      task: "Find the PyMC docs",
+      trace: new PlannerTrace(),
+      progress: { ...stats(1), state: "done" as const, endedAt: Date.now() },
+    },
+  );
+  return panes as never as import("../src/trace-view.js").TracePane[];
 }
 
-test("the trace view shows planners side by side, follows the tail, scrolls, and confirms cancelling", () => {
+test("the monitor lists planners and their subagents, previews the selected one, and opens any full trace", () => {
   const panes = tracePanes();
   const events: string[] = [];
   let live = true;
@@ -330,40 +366,82 @@ test("the trace view shows planners side by side, follows the tail, scrolls, and
     title: "Planning with 2 models",
     getPanes: () => panes,
     isLive: () => live,
-    rows: () => 30,
+    rows: () => 34,
     requestRender: () => undefined,
     onCancel: () => events.push("cancel"),
     onClose: () => events.push("close"),
   });
-  let screen = view.render(160).join("\n");
-  assert.match(screen, /… A anthropic\/claude-fable-5-1:xhigh +1m 05s +12 tools +1.23M tok +\$1.50/u);
-  assert.match(screen, /⋯ read a59\.ts +│ ⋯ grep b59/u, "both panes follow their latest entries side by side");
-  assert.doesNotMatch(screen, /read a0\.ts/u);
+  let screen = view.render(170).join("\n");
+  assert.match(
+    screen,
+    /› … A +anthropic\/claude-fable-5-1:xhigh +1m 05s +12 tools +2 subagents +1.23M tok +\$1.50 +thinking/u,
+  );
+  assert.match(
+    screen,
+    /├ … A1 +anthropic\/claude-opus-5-5:high +schema audit +1m 05s +4 tools +1.23M tok +\$1.50 +web_search "pymc horseshoe"/u,
+  );
+  assert.match(screen, /└ ✓ A2 +anthropic\/claude-opus-5-5:high +docs research .*done/u);
+  assert.match(screen, /… B +openai-codex\/gpt-6-astra:xhigh/u);
+  assert.match(
+    screen,
+    /A · anthropic\/claude-fable-5-1:xhigh\n[\s\S]*read a59\.ts/u,
+    "the preview follows the selected agent",
+  );
 
-  view.handleInput("g"); // top of the focused pane (A)
-  screen = view.render(160).join("\n");
-  assert.match(screen, /read a0\.ts/u);
-  assert.match(screen, /A · anthropic\/claude-fable-5-1:xhigh · 1-/u);
+  view.handleInput("\u001b[B"); // select A1
+  screen = view.render(170).join("\n");
+  assert.match(screen, /A1 · anthropic\/claude-opus-5-5:high · schema audit\n[\s\S]*Scout is thinking hard\./u);
+  assert.match(screen, /⋯ web_search "pymc horseshoe"/u);
 
-  view.handleInput("s"); // one at a time
-  view.handleInput("\t"); // focus B
-  screen = view.render(160).join("\n");
-  assert.match(screen, /\[ B · openai-codex\/gpt-6-astra:xhigh \]/u);
-  assert.match(screen, /grep b59/u);
-  assert.doesNotMatch(screen, /read a/u);
+  view.handleInput("\r"); // open A1's full trace
+  screen = view.render(170).join("\n");
+  assert.match(screen, /A1 · anthropic\/claude-opus-5-5:high · schema audit/u);
+  assert.match(screen, /Task: Audit the schema module/u);
+  assert.match(screen, /Esc back to overview/u);
+  view.handleInput("\t"); // next agent: A2
+  assert.match(
+    view.render(170).join("\n"),
+    /A2 · anthropic\/claude-opus-5-5:high · docs research[\s\S]*\(no activity yet\)/u,
+  );
+  view.handleInput("\u001b"); // back
+  assert.doesNotMatch(view.render(170).join("\n"), /Esc back to overview/u);
+
+  view.handleInput("s"); // planners side by side
+  screen = view.render(170).join("\n");
+  assert.match(screen, /⋯ read a59\.ts +│ ⋯ grep b59/u);
 
   view.handleInput("\u001b");
-  assert.match(view.render(160).join("\n"), /Cancel every planner\?/u);
+  assert.match(view.render(170).join("\n"), /Cancel every planner\?/u);
   view.handleInput("n");
   assert.deepEqual(events, []);
   view.handleInput("\u001b");
   view.handleInput("\u001b");
   assert.deepEqual(events, ["cancel"]);
-
   live = false;
-  view.handleInput("\r");
+  view.handleInput("\u001b");
   assert.deepEqual(events, ["cancel", "close"]);
-  assert.ok(view.render(60).every((line) => line.length <= 60 + 20));
+});
+
+test("in a full trace the agent scrolls from the top and follows again with End", () => {
+  const panes = tracePanes();
+  const view = new TraceView(theme, {
+    title: "t",
+    getPanes: () => panes,
+    isLive: () => false,
+    rows: () => 30,
+    requestRender: () => undefined,
+    onCancel: () => undefined,
+    onClose: () => undefined,
+  });
+  view.handleInput("\r"); // open A
+  assert.match(view.render(120).join("\n"), /read a59\.ts/u);
+  view.handleInput("g");
+  let screen = view.render(120).join("\n");
+  assert.match(screen, /read a0\.ts/u);
+  assert.doesNotMatch(screen, /read a59\.ts/u);
+  view.handleInput("\u001b[F"); // End
+  screen = view.render(120).join("\n");
+  assert.match(screen, /read a59\.ts/u);
 });
 
 class RpcChild extends EventEmitter {
@@ -519,4 +597,167 @@ test("the MCP allowlist env makes Plan mode block unselected mcp calls in planne
     if (previous === undefined) delete process.env[MCP_ALLOW_ENV];
     else process.env[MCP_ALLOW_ENV] = previous;
   }
+});
+
+test("subagent activity is compacted, batched through progress updates, and rebuilt per subagent", async () => {
+  assert.equal(
+    compactRecord({ type: "message_update", assistantMessageEvent: { type: "toolcall_delta", delta: "x" } }),
+    undefined,
+  );
+  assert.deepEqual(
+    compactRecord({
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "hm", partial: {} },
+    }),
+    {
+      type: "message_update",
+      assistantMessageEvent: { type: "thinking_delta", delta: "hm" },
+    },
+  );
+  assert.deepEqual(
+    compactRecord({
+      type: "tool_execution_end",
+      toolCallId: "t",
+      toolName: "read",
+      isError: false,
+      result: { content: [{ type: "text", text: "x".repeat(2_000) }], details: { huge: true } },
+    }),
+    {
+      type: "tool_execution_end",
+      toolCallId: "t",
+      toolName: "read",
+      isError: false,
+      result: { content: [{ type: "text", text: "x".repeat(600) }] },
+    },
+  );
+
+  const metas = [
+    {
+      index: 0,
+      label: "schema audit",
+      model: "anthropic/claude-opus-5-5:high",
+      task: "Audit",
+      state: "running" as const,
+      startedAt: 1,
+    },
+    {
+      index: 1,
+      label: "docs",
+      model: "anthropic/claude-opus-5-5:high",
+      task: "Docs",
+      state: "running" as const,
+      startedAt: 1,
+    },
+  ];
+  const sent: Array<{ details: unknown; summary: string }> = [];
+  const reporter = createSubagentReporter(metas, (details, summary) => sent.push({ details, summary }));
+  reporter.record(0, {
+    type: "message_update",
+    assistantMessageEvent: { type: "thinking_delta", delta: "Let me check." },
+  });
+  reporter.record(0, { type: "tool_execution_start", toolCallId: "r1", toolName: "read", args: { path: "schema.py" } });
+  reporter.record(1, {
+    type: "message_end",
+    message: { role: "assistant", usage: { totalTokens: 500, cost: { total: 0.25 } }, stopReason: "stop", content: [] },
+  });
+  assert.equal(sent.length, 0, "records are batched");
+  (metas[1] as { state: string }).state = "done";
+  reporter.flush();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.summary, "1/2 subagents finished");
+
+  const tracker = new SubagentTracker("A");
+  assert.equal(tracker.apply("call-1", sent[0]?.details), true);
+  assert.deepEqual(
+    tracker.agents.map((agent) => [
+      agent.id,
+      agent.label,
+      agent.model,
+      agent.stats.state,
+      agent.stats.toolCalls,
+      agent.stats.totalTokens,
+      agent.stats.costUsd,
+    ]),
+    [
+      ["A1", "schema audit", "anthropic/claude-opus-5-5:high", "running", 1, 0, 0],
+      ["A2", "docs", "anthropic/claude-opus-5-5:high", "done", 0, 500, 0.25],
+    ],
+  );
+  assert.deepEqual(
+    tracker.agents[0]?.trace.entries.map((entry) => entry.kind),
+    ["thinking", "tool"],
+  );
+  assert.equal(tracker.agents[0]?.stats.lastActivity, "read schema.py");
+  tracker.finish("call-1", false);
+  assert.equal(tracker.agents[0]?.stats.state, "failed");
+  assert.equal(tracker.apply("call-1", { kind: "other" }), false);
+});
+
+test("a planner's plan_subagents progress updates reach the monitor as subagent views", async () => {
+  const seen: Array<Array<{ id: string; state: string; entries: number }>> = [];
+  let child: RpcChild | undefined;
+  const result = runPlanner({
+    id: "B",
+    spec: { provider: "p", modelId: "m" },
+    cwd: process.cwd(),
+    prompt: "Plan it",
+    timeoutMs: 5_000,
+    extensionPath: "/ext",
+    loadUserExtensions: false,
+    signal: new AbortController().signal,
+    onProgress: () => undefined,
+    onSubagents: (agents) =>
+      seen.push(
+        agents.map((agent) => ({ id: agent.id, state: agent.stats.state, entries: agent.trace.entries.length })),
+      ),
+    spawnProcess: (() => {
+      child = new RpcChild();
+      const current = child;
+      setTimeout(() => {
+        const scouts = [
+          { index: 0, label: "x", model: "openai-codex/gpt-6-sol:high", task: "t", state: "running", startedAt: 1 },
+        ];
+        current.send({
+          type: "tool_execution_start",
+          toolCallId: "ps",
+          toolName: "plan_subagents",
+          args: { tasks: [{ task: "t" }] },
+        });
+        current.send({
+          type: "tool_execution_update",
+          toolCallId: "ps",
+          toolName: "plan_subagents",
+          partialResult: {
+            content: [{ type: "text", text: "0/1" }],
+            details: {
+              kind: "plan-subagents-progress",
+              version: 1,
+              scouts,
+              events: [
+                {
+                  scout: 0,
+                  record: { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "Found it." } },
+                },
+              ],
+            },
+          },
+        });
+        current.send({
+          type: "tool_execution_end",
+          toolCallId: "ps",
+          toolName: "plan_subagents",
+          isError: false,
+          result: { content: [] },
+        });
+        current.send(planCall);
+        current.send({ type: "agent_settled" });
+      }, 0);
+      return current;
+    }) as never,
+    piCommand: { command: "pi", args: [] },
+  });
+  assert.equal((await result).status, "done");
+  assert.deepEqual(seen[0], [{ id: "B1", state: "running", entries: 1 }]);
+  assert.equal(seen.at(-1)?.[0]?.state, "failed", "a subagent still running when its call ends is closed out");
+  assert.ok(child);
 });

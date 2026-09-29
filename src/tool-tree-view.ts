@@ -1,5 +1,13 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { type Component, type KeyId, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import {
+  type Component,
+  type KeyId,
+  matchesKey,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
+  truncateToWidth,
+  visibleWidth,
+} from "@earendil-works/pi-tui";
 import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.js";
 
 export type ToolTreeResult = { kind: "start"; timeLimitMinutes: number } | { kind: "back" } | { kind: "cancel" };
@@ -68,8 +76,12 @@ export class ToolTreeView implements Component {
       return;
     } else if (row?.kind === "time" && is("right", "l", "enter", "space")) this.stepTime(1);
     else if (row?.kind === "time" && is("left", "h")) this.stepTime(-1);
-    else if (row?.kind === "node" && is("space", "enter")) toggle(row.node);
-    else if (row?.kind === "node" && is("right", "l")) {
+    else if (row?.kind === "node" && is("space")) toggle(row.node);
+    else if (row?.kind === "node" && is("enter")) {
+      // Enter opens and closes groups (servers, toolsets); on a single tool it toggles it.
+      if (row.node.children) this.toggleExpanded(row.node.id);
+      else toggle(row.node);
+    } else if (row?.kind === "node" && is("right", "l")) {
       if (row.node.children) this.expanded.add(row.node.id);
     } else if (row?.kind === "node" && is("left", "h")) {
       if (row.node.children && this.expanded.has(row.node.id)) this.expanded.delete(row.node.id);
@@ -85,6 +97,45 @@ export class ToolTreeView implements Component {
       }
     } else return;
     this.options.requestRender();
+  }
+
+  private toggleExpanded(id: string) {
+    if (this.expanded.has(id)) this.expanded.delete(id);
+    else this.expanded.add(id);
+  }
+
+  /** Rendered line index of the first row, and the rows shown, from the last render. */
+  private rowsTop = 0;
+  private shownRows: Row[] = [];
+
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const rows = this.visibleRows();
+    if (event.type === "wheel") {
+      const delta = Math.sign(event.wheelDelta ?? 0);
+      if (delta !== 0) this.cursor = Math.min(rows.length - 1, Math.max(0, this.cursor + delta));
+      this.options.requestRender();
+      return { handled: true };
+    }
+    if (event.type !== "click" || event.button !== "left")
+      return event.type === "press" ? { handled: true } : undefined;
+    const index = event.y - this.rowsTop;
+    const row = this.shownRows[index];
+    if (!row) return undefined;
+    this.cursor = this.scroll + index;
+    if (row.kind === "start") {
+      this.options.onDone({ kind: "start", timeLimitMinutes: this.timeLimit });
+      return { handled: true };
+    }
+    if (row.kind === "time") this.stepTime(event.x < 24 ? -1 : 1);
+    else {
+      // Clicking the checkbox selects or clears; clicking elsewhere on a group opens or closes it.
+      const boxStart = 2 + row.depth * 2 + 2;
+      const onBox = event.x >= boxStart && event.x < boxStart + 3;
+      if (row.node.children && !onBox) this.toggleExpanded(row.node.id);
+      else toggle(row.node);
+    }
+    this.options.requestRender();
+    return { handled: true };
   }
 
   private stepTime(direction: 1 | -1) {
@@ -109,7 +160,7 @@ export class ToolTreeView implements Component {
       truncateToWidth(
         theme.fg(
           "dim",
-          "↑↓ move · space toggle · →/← open/close · a all · n none · Enter on Start runs · Esc back · Ctrl+C cancel",
+          "↑↓ move · Enter/→ open a server · ← close · Space select/clear · a all · n none · mouse works · Esc back",
         ),
         width,
       ),
@@ -118,10 +169,12 @@ export class ToolTreeView implements Component {
     if (this.cursor < this.scroll) this.scroll = this.cursor;
     if (this.cursor >= this.scroll + height) this.scroll = this.cursor - height + 1;
     const labelWidth = Math.min(
-      44,
+      Math.max(30, Math.floor(width * 0.4)),
       Math.max(12, ...rows.map((row) => (row.kind === "node" ? row.depth * 2 + 6 + visibleWidth(row.node.label) : 0))),
     );
-    const body = rows.slice(this.scroll, this.scroll + height).map((row, offset) => {
+    this.rowsTop = header.length;
+    this.shownRows = rows.slice(this.scroll, this.scroll + height);
+    const body = this.shownRows.map((row, offset) => {
       const selected = this.scroll + offset === this.cursor;
       const pointer = selected ? theme.fg("accent", "›") : " ";
       let line: string;

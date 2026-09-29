@@ -1,4 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { defineMenu, runMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
 import {
   type AvailableImplementationModel,
@@ -309,6 +310,7 @@ async function runWithTraceView(
     return {
       render: (width: number) => view.render(width),
       handleInput: (data: string) => view.handleInput(data),
+      handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
       invalidate: () => view.invalidate(),
       dispose: () => {
         clearInterval(ticker);
@@ -336,6 +338,7 @@ export async function showTraces(ctx: ExtensionContext, panes: readonly TracePan
     return {
       render: (width: number) => view.render(width),
       handleInput: (data: string) => view.handleInput(data),
+      handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
       invalidate: () => view.invalidate(),
     };
   });
@@ -371,6 +374,7 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
       return {
         render: (width: number) => view.render(width),
         handleInput: (data: string) => view.handleInput(data),
+        handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
         invalidate: () => view.invalidate(),
       };
     });

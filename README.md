@@ -45,8 +45,9 @@ Install only from sources you trust because Pi extensions run with Pi's permissi
 
 1. **Models** (screen 1/2): configured `planners` are preselected; any available model can be toggled.
 2. **Tools** (screen 2/2): a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools
-   (from pi-mcp-adapter's config and metadata cache). Space toggles a tool, or a whole toolset or server; `→`/`←`
-   open and close groups; `[-]` marks a partly selected group. Jev preselects each tool and shows its percentage.
+   (from pi-mcp-adapter's config and metadata cache). Enter or `→` opens a server or toolset to show its tools, `←`
+   closes it, and Space selects or clears a tool or a whole group; the mouse works too (click a label to open a
+   group, click a checkbox to toggle, scroll with the wheel). `[-]` marks a partly selected group. Jev preselects each tool and shows its percentage.
    The **Time limit** row sets how long planners may run (default 45 min); at 80% each planner is steered to
    submit its best plan, and one that stops without a plan is nudged once to submit it.
    Each planner runs as `pi --mode rpc --no-session --no-extensions --extension <this package> …` in the project

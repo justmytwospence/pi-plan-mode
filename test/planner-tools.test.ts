@@ -208,6 +208,45 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
   assert.deepEqual(results.at(-1), { kind: "back" });
 });
 
+test("Enter opens and closes servers, Space selects them, and the mouse does both", () => {
+  const roots = sampleTree();
+  const view = new ToolTreeView(theme, {
+    title: "tools",
+    lines: [],
+    roots,
+    startLabel: "Start",
+    timeLimitMinutes: 45,
+    timeLimitChoices: [45],
+    rows: () => 40,
+    requestRender: () => undefined,
+    onDone: () => undefined,
+  });
+  const screen = () => view.render(120);
+  for (let index = 0; index < 8; index += 1) view.handleInput("\u001b[B"); // obsidian
+  view.handleInput("\r");
+  assert.match(screen().join("\n"), /▾ \[ \] obsidian[\s\S]*\[ \] search_notes[\s\S]*\[ \] delete_note/u);
+  view.handleInput("\u001b[B"); // search_notes
+  view.handleInput("\r");
+  assert.match(screen().join("\n"), /▾ \[-\] obsidian +1\/2[\s\S]*\[x\] search_notes/u);
+  view.handleInput("\u001b[A"); // back to obsidian
+  view.handleInput("\r"); // close it again
+  assert.doesNotMatch(screen().join("\n"), /search_notes/u);
+  view.handleInput(" "); // select the whole server
+  assert.match(screen().join("\n"), /▸ \[x\] obsidian +2\/2/u);
+
+  // Mouse: clicking a group's label opens it; clicking its checkbox clears it.
+  const lines = screen();
+  const obsidianLine = lines.findIndex((line) => line.includes("obsidian"));
+  view.handleMouse({ type: "click", button: "left", x: 30, y: obsidianLine } as never);
+  assert.match(screen().join("\n"), /▾ \[x\] obsidian[\s\S]*\[x\] delete_note/u);
+  const boxX = (screen()[obsidianLine] ?? "").indexOf("[x]");
+  view.handleMouse({ type: "click", button: "left", x: boxX, y: obsidianLine } as never);
+  assert.match(screen().join("\n"), /▾ \[ \] obsidian +0\/2/u);
+  assert.deepEqual(view.handleMouse({ type: "wheel", button: "none", x: 0, y: 0, wheelDelta: 1 } as never), {
+    handled: true,
+  });
+});
+
 test("traces record streamed text, thinking, tool calls with results, and notes", () => {
   const trace = new PlannerTrace();
   trace.apply({ type: "message_update", assistantMessageEvent: { type: "thinking_delta", delta: "Let me " } });

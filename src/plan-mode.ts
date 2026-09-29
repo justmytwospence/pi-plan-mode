@@ -1307,7 +1307,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           pick.kind === "jev"
             ? `Jev (${safeTerminalText(pick.model)}) preselected the tools this task needs; change any before starting.`
             : `Tool defaults come from settings: ${safeTerminalText(pick.reason)}.`,
-          "Planners and their subagents can only call the MCP tools selected here.",
+          "Open a server with Enter or → to pick its tools; Space selects or clears a whole server. Planners and their subagents can only call the MCP tools selected here.",
         ],
         roots,
         startLabel: `Start planning with ${specs.length} model${specs.length === 1 ? "" : "s"}`,

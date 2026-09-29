@@ -3,6 +3,8 @@ import {
   type Component,
   type KeyId,
   matchesKey,
+  type TuiMouseEvent,
+  type TuiMouseEventResult,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -92,6 +94,33 @@ export class TraceView implements Component {
     this.options.requestRender();
   }
 
+  /** Mouse wheel scrolls the pane under the pointer (or the focused one); a click focuses a pane. */
+  handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    const panes = this.options.getPanes();
+    if (this.lastSplitWidth > 0 && panes.length > 1) {
+      const column = Math.floor(event.x / (this.lastSplitWidth + SEPARATOR.length));
+      if ((event.type === "click" || event.type === "wheel") && column >= 0 && column < panes.length)
+        this.focus = column;
+    }
+    if (event.type === "wheel") {
+      const pane = panes[this.focus];
+      if (!pane) return { handled: true };
+      const total = this.lastLineCounts.get(pane.id) ?? 0;
+      const maxTop = Math.max(0, total - this.lastBodyHeight);
+      const current = this.scrollTop.get(pane.id) ?? maxTop;
+      const next = current + Math.sign(event.wheelDelta ?? 0) * 3;
+      this.scrollTop.set(pane.id, next >= maxTop ? undefined : Math.max(0, next));
+      this.options.requestRender();
+      return { handled: true };
+    }
+    if (event.type === "click") {
+      this.options.requestRender();
+      return { handled: true };
+    }
+    return event.type === "press" ? { handled: true } : undefined;
+  }
+
+  private lastSplitWidth = 0;
   private lastBodyHeight = 10;
   private readonly lastLineCounts = new Map<string, number>();
 
@@ -157,6 +186,7 @@ export class TraceView implements Component {
     const columns = panes.length;
     const splitWidth = columns > 0 ? Math.floor((width - (columns - 1) * SEPARATOR.length) / columns) : width;
     const useSplit = this.split && columns > 1 && columns <= 3 && splitWidth >= MIN_SPLIT_COLUMN;
+    this.lastSplitWidth = useSplit ? splitWidth : 0;
     const body: string[] = [];
     if (useSplit) {
       const rendered = panes.map((pane, index) => this.paneLines(pane, splitWidth, bodyHeight, index === this.focus));

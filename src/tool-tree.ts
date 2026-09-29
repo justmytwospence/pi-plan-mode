@@ -53,7 +53,7 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
               description: `MCP server ${server.name}`,
               children: server.tools.map((tool) => ({
                 id: `mcp:${server.name}/${tool.name}`,
-                label: tool.name,
+                label: stripServerPrefix(tool.name, server.name),
                 description: `${server.name}: ${oneLine(tool.description) || tool.name}`,
                 selected: toolset.enabled,
               })),
@@ -161,6 +161,19 @@ export function treeToSelection(nodes: readonly ToolNode[]): ToolSelection {
   };
   for (const node of nodes) visit(node);
   return selection;
+}
+
+/** `paperless__bulk_edit` reads better as `bulk_edit` under the paperless group. */
+function stripServerPrefix(tool: string, server: string) {
+  for (const prefix of [
+    `${server}__`,
+    `${server}_`,
+    `${server.replace(/-/gu, "_")}__`,
+    `${server.replace(/-/gu, "_")}_`,
+  ]) {
+    if (tool.startsWith(prefix) && tool.length > prefix.length) return tool.slice(prefix.length);
+  }
+  return tool;
 }
 
 function splitOnce(value: string, separator: string): [string, string] {

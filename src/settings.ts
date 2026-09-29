@@ -4,6 +4,7 @@ import { lstat, mkdir, open, realpath, rename, rm, writeFile } from "node:fs/pro
 import { basename, dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import type { KeyId } from "@earendil-works/pi-tui";
+import type { CommandGrant } from "./command-grants.js";
 import {
   formatModelSpec,
   IMPLEMENTATION_CONTEXT_CHOICES,
@@ -116,6 +117,8 @@ export interface PlanModeSettings {
   plannerLoadExtensions?: boolean;
   /** Named bundles of extensions and tools planners can be given, chosen per run in the planner picker. */
   plannerToolsets?: Record<string, PlannerToolset>;
+  /** Commands Plan mode's read-only bash policy lets through when granted (e.g. marimo-pair's scripts). */
+  commandGrants?: Record<string, CommandGrant>;
   /** Let Jev preselect planner tools from the task (default true; needs TYPESAFE_API_KEY). */
   jevToolSelection?: boolean;
   /** Jev probability at or above which a tool is preselected (default 0.5). */
@@ -244,6 +247,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (typeof load !== "boolean") return undefined;
     settings.plannerLoadExtensions = load;
   }
+  if (Object.hasOwn(value, "commandGrants")) {
+    const grants = normalizeCommandGrants(Reflect.get(value, "commandGrants"));
+    if (!grants) return undefined;
+    settings.commandGrants = grants;
+  }
   if (Object.hasOwn(value, "plannerToolsets")) {
     const toolsets = normalizePlannerToolsets(Reflect.get(value, "plannerToolsets"));
     if (!toolsets) return undefined;
@@ -321,6 +329,36 @@ function normalizePlannerToolsets(value: unknown): Record<string, PlannerToolset
     };
   }
   return toolsets;
+}
+
+function normalizeCommandGrants(value: unknown): Record<string, CommandGrant> | undefined {
+  if (!isSettingsDocument(value)) return undefined;
+  const grants: Record<string, CommandGrant> = {};
+  const strings = (list: unknown) =>
+    Array.isArray(list) && list.every((item) => typeof item === "string" && item.trim().length > 0)
+      ? (list as string[]).map((item) => item.trim())
+      : undefined;
+  for (const [id, raw] of Object.entries(value)) {
+    if (!/^[A-Za-z0-9_-]{1,40}$/u.test(id) || !isSettingsDocument(raw)) return undefined;
+    const commands = strings(raw.commands);
+    const skills = raw.skills === undefined ? [] : strings(raw.skills);
+    if (!commands || commands.length === 0 || !skills) return undefined;
+    if (raw.label !== undefined && (typeof raw.label !== "string" || !raw.label.trim())) return undefined;
+    if (raw.description !== undefined && (typeof raw.description !== "string" || !raw.description.trim())) {
+      return undefined;
+    }
+    if (raw.enabled !== undefined && typeof raw.enabled !== "boolean") return undefined;
+    if (raw.planMode !== undefined && typeof raw.planMode !== "boolean") return undefined;
+    grants[id] = {
+      label: typeof raw.label === "string" ? raw.label.trim() : id,
+      ...(typeof raw.description === "string" ? { description: raw.description.trim() } : {}),
+      commands,
+      skills,
+      enabled: raw.enabled === true,
+      planMode: raw.planMode === true,
+    };
+  }
+  return grants;
 }
 
 function normalizePlanners(value: unknown): ModelSpec[] | undefined {

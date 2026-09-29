@@ -144,6 +144,7 @@ test("the tool tree groups toolsets and MCP servers, toggles groups, and maps to
     subagents: true,
     toolsetTools: { web: ["web_search", "fetch_content"] },
     mcp: ["obsidian/search_notes"],
+    grants: [],
   });
   toggle(mcpGroup);
   assert.equal(groupState(mcpGroup), "all");

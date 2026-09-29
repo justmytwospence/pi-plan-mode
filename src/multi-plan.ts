@@ -1,3 +1,4 @@
+import { type CommandGrant, describeGrants, type ResolvedGrant, resolveGrant } from "./command-grants.js";
 import { formatModelSpec, type ImplementationModelOverride, type ModelSpec } from "./implementation-models.js";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
@@ -73,6 +74,8 @@ export interface ToolSelection {
   toolsetTools: Record<string, string[]>;
   /** Chosen MCP tools as `server/tool`, or `server/*` for a whole server. */
   mcp: string[];
+  /** Chosen command grants, by id. */
+  grants?: string[];
 }
 
 /** What planners may use in one run. */
@@ -88,6 +91,8 @@ export interface PlannerAccess {
   scoutExtensions: string[];
   scoutTools: string[];
   scoutMcpAllow?: string[];
+  /** Extra commands bash may run (command grants), with the skills that explain them. */
+  grants?: ResolvedGrant[];
 }
 
 export const DEFAULT_PLANNER_ACCESS: PlannerAccess = {
@@ -103,7 +108,12 @@ export function resolvePlannerAccess(
   selection: ToolSelection,
   toolsets: Readonly<Record<string, PlannerToolset>>,
   resolvePath: (path: string) => string = (path) => path,
+  commandGrants: Readonly<Record<string, CommandGrant>> = {},
 ): PlannerAccess {
+  const grants = (selection.grants ?? []).flatMap((id) => {
+    const grant = commandGrants[id];
+    return grant ? [resolveGrant(id, grant, resolvePath)] : [];
+  });
   const extensions: string[] = [];
   const tools: string[] = [];
   const scoutExtensions: string[] = [];
@@ -129,8 +139,10 @@ export function resolvePlannerAccess(
   }
   const unique = (values: string[]) => [...new Set(values)];
   return {
-    shell: selection.shell,
+    // Granted commands run through bash.
+    shell: selection.shell || grants.length > 0,
     subagents: selection.subagents,
+    ...(grants.length > 0 ? { grants } : {}),
     extensions: unique(extensions),
     tools: unique(tools),
     ...(mcpAllow ? { mcpAllow } : {}),
@@ -367,6 +379,7 @@ export function formatPlannerPrompt(
   scoutLabel?: string,
   researchTools: readonly string[] = [],
   mcpAllow?: readonly string[],
+  grants: readonly ResolvedGrant[] = [],
 ) {
   const others =
     plannerCount > 1 ? `${plannerCount - 1} other model${plannerCount > 2 ? "s are" : " is"}` : "Other models may be";
@@ -381,6 +394,11 @@ export function formatPlannerPrompt(
     ...(researchTools.includes("mcp")
       ? [
           `Through the mcp tool you may call only these MCP tools (server/tool; * means every tool on that server): ${(mcpAllow ?? []).join(", ") || "none"}. Use mcp search or describe to see their arguments. MCP tools reach external services and some can change things; use them only to read.`,
+        ]
+      : []),
+    ...(grants.length > 0
+      ? [
+          `Besides read-only commands, bash may run these granted commands (one command per call; a quoted heredoc may feed it input): ${describeGrants(grants)}. Use them to inspect, not to change anything; any skill that explains them is loaded.`,
         ]
       : []),
     ...(scoutLabel
@@ -524,6 +542,16 @@ function isLaunch(value: unknown): value is PlannerLaunch {
     strings(access.scoutTools) &&
     (access.mcpAllow === undefined || strings(access.mcpAllow)) &&
     (access.scoutMcpAllow === undefined || strings(access.scoutMcpAllow)) &&
+    (access.grants === undefined ||
+      (Array.isArray(access.grants) &&
+        access.grants.every(
+          (grant) =>
+            isRecord(grant) &&
+            typeof grant.id === "string" &&
+            typeof grant.label === "string" &&
+            strings(grant.commands) &&
+            strings(grant.skills),
+        ))) &&
     (value.scoutSpec === undefined || isModel(value.scoutSpec))
   );
 }

@@ -128,6 +128,38 @@ and its cached tools. Scouts inherit toolsets with `"scouts": true` (the default
 this extension enforces inside them too. For the main `/plan` session, list tools in `defaultPlanTools` or choose
 them per run with `/plan tools`.
 
+### Command grants
+
+Plan mode's bash policy only runs reviewed read-only commands, so anything that executes code (Python, scripts)
+is blocked. A `commandGrants` entry lets specific commands through, for tools that must run code to inspect
+things, such as the marimo-pair skill, which runs Python in a live notebook kernel:
+
+```json
+"commandGrants": {
+  "marimo": {
+    "label": "Marimo notebooks",
+    "description": "Run Python in a live marimo notebook kernel to inspect notebook variables, dataframes, and cells.",
+    "commands": [
+      "bash ~/.agents/skills/marimo-pair/scripts/discover-servers.sh",
+      "bash ~/.agents/skills/marimo-pair/scripts/execute-code.sh"
+    ],
+    "skills": ["~/.agents/skills/marimo-pair"],
+    "enabled": false,
+    "planMode": true
+  }
+}
+```
+
+- A granted command must be one simple command that starts with a listed prefix (paths compare through `~` and
+  symlinks). Quoted arguments may span lines, and a heredoc with a quoted delimiter (`- <<'PY'`) may feed it input;
+  `2>&1` and `>/dev/null` are fine. Separators, pipes, other redirections, substitutions, variables, globs, and
+  assignments are still blocked, so a grant cannot be chained into anything else.
+- In `/plan multi`, grants appear under **Shell** in the tools tree, where Jev scores them like any tool (the
+  `description` is what Jev reads); `enabled` is the default without Jev. A selected grant turns on bash, loads its
+  `skills` into planners (which otherwise run without skills), and is described in the planner prompt.
+- `planMode: true` also allows the grant in the main Plan mode session, and the model is told about it.
+- The granted code can do anything its tool can; granting it is your call. Everything else stays read-only.
+
 When `TYPESAFE_API_KEY` is set, every tool in the tree is preselected by [Jev](https://docs.typesafe.ai), TypeSafe's
 fast System One model: one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
 tokens) asks whether planners writing a plan for this task would materially benefit from it. Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you

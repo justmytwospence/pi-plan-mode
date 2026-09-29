@@ -1,3 +1,4 @@
+import type { CommandGrant } from "./command-grants.js";
 import type { JevToolPick, ToolCapability } from "./jev-tool-picker.js";
 import type { McpServerCatalog } from "./mcp-tools.js";
 import type { PlannerToolset, ToolSelection } from "./multi-plan.js";
@@ -29,6 +30,8 @@ export interface BuildToolTreeInput {
   mcpCatalog: readonly McpServerCatalog[];
   /** Scout model labels; the Subagents row appears only when there are any. */
   scoutTargets: readonly string[];
+  /** Extra commands bash may run when granted; they join Shell as its own rows. */
+  grants?: Readonly<Record<string, CommandGrant>>;
 }
 
 /**
@@ -36,7 +39,27 @@ export interface BuildToolTreeInput {
  * servers, and each server groups its cached tools (or is itself a leaf when no tools are cached).
  */
 export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
-  const roots: ToolNode[] = [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true }];
+  const grants = Object.entries(input.grants ?? {});
+  const roots: ToolNode[] =
+    grants.length === 0
+      ? [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true }]
+      : [
+          {
+            id: "shell-group",
+            label: "Shell",
+            description: "Commands planners may run with bash (a granted command also turns on the read-only ones)",
+            children: [
+              { id: "shell", label: "Read-only commands", description: SHELL_DESCRIPTION, selected: true },
+              ...grants.map(([id, grant]) => ({
+                id: `grant:${id}`,
+                label: grant.label,
+                description: grant.description ?? `Run ${grant.commands.join(", ")}`,
+                detail: `${grant.description ?? grant.label} Allows: ${grant.commands.join(", ")}.`,
+                selected: grant.enabled,
+              })),
+            ],
+          },
+        ];
   if (input.scoutTargets.length > 0) {
     roots.push({
       id: "subagents",
@@ -134,10 +157,12 @@ export function applyJevPick(nodes: readonly ToolNode[], pick: JevToolPick, keep
 }
 
 export function treeToSelection(nodes: readonly ToolNode[]): ToolSelection {
-  const selection: ToolSelection = { shell: false, subagents: false, toolsetTools: {}, mcp: [] };
+  const selection: ToolSelection = { shell: false, subagents: false, toolsetTools: {}, mcp: [], grants: [] };
   const visit = (node: ToolNode) => {
     if (node.id === "shell") selection.shell = node.selected === true;
-    else if (node.id === "subagents") selection.subagents = node.selected === true;
+    else if (node.id.startsWith("grant:")) {
+      if (node.selected) selection.grants?.push(node.id.slice("grant:".length));
+    } else if (node.id === "subagents") selection.subagents = node.selected === true;
     else if (node.id.startsWith("mcp:")) {
       const server = node.id.slice("mcp:".length);
       if (!node.children) {

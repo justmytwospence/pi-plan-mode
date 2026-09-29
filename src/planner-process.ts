@@ -1,4 +1,5 @@
 import { type ChildProcess, spawn } from "node:child_process";
+import { COMMAND_GRANTS_ENV } from "./command-grants.js";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { parseProposedPlan } from "./message-transform.js";
 import {
@@ -108,6 +109,8 @@ export function plannerArgs(
     "--tools",
     tools.join(","),
     "--no-skills",
+    // Skills that explain granted commands (e.g. marimo-pair) still load explicitly.
+    ...(access.grants ?? []).flatMap((grant) => grant.skills.flatMap((skill) => ["--skill", skill])),
     "--no-prompt-templates",
     "--no-themes",
     ...(options.loadUserExtensions
@@ -132,6 +135,9 @@ export function plannerEnv(options: Pick<PlannerRunOptions, "scoutSpec" | "acces
     [SCOUT_EXTENSIONS_ENV]: JSON.stringify(access.scoutExtensions),
     [SCOUT_TOOLS_ENV]: access.scoutTools.join(","),
     ...(access.mcpAllow ? { [MCP_ALLOW_ENV]: JSON.stringify(access.mcpAllow) } : {}),
+    ...(access.grants?.length
+      ? { [COMMAND_GRANTS_ENV]: JSON.stringify(access.grants.flatMap((grant) => grant.commands)) }
+      : {}),
     ...(access.scoutMcpAllow ? { [SCOUT_MCP_ALLOW_ENV]: JSON.stringify(access.scoutMcpAllow) } : {}),
   };
 }

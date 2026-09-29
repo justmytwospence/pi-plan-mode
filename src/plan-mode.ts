@@ -15,6 +15,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { completePlanArguments } from "./command.js";
+import { commandGrantAllows, describeGrants, grantedPrefixesFromEnv, resolveGrant } from "./command-grants.js";
 import {
   normalizePlanModeCompletion,
   PLAN_MODE_COMPLETE_PARAMS,
@@ -461,6 +462,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   const scoutExtensions = isPlannerProcess() ? scoutExtensionsFromEnv() : [];
   const scoutTools = isPlannerProcess() ? scoutToolsFromEnv() : [];
   const scoutMcpAllow = isPlannerProcess() ? mcpAllowFromEnv(SCOUT_MCP_ALLOW_ENV) : undefined;
+  const plannerGrantPrefixes = isPlannerProcess() ? grantedPrefixesFromEnv() : [];
   const activeScouts = new Set<import("node:child_process").ChildProcess>();
   const killScouts = () => {
     for (const child of activeScouts) {
@@ -960,11 +962,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       };
     }
     if (event.toolName === "bash") {
-      const blocked = findBlockedCommandSegment(readCommand(event.input), settings.safeSubcommands, ctx.cwd);
+      const command = readCommand(event.input);
+      // Granted commands (settings.commandGrants, or the grants a planner was started with).
+      if (commandGrantAllows(command, grantedPrefixes())) return;
+      const blocked = findBlockedCommandSegment(command, settings.safeSubcommands, ctx.cwd);
       if (blocked !== undefined) {
         return {
           block: true,
-          reason: `Plan mode blocks bash commands outside its reviewed inspection policy or containing explicitly unsafe arguments.\nBlocked command: ${blocked}`,
+          reason: `Plan mode blocks bash commands outside its reviewed inspection policy or containing explicitly unsafe arguments.\nBlocked command: ${blocked}${grantedPrefixes().length > 0 ? `\nGranted commands also allowed (one per call): ${grantedPrefixes().join(", ")}` : ""}`,
         };
       }
     }
@@ -1004,8 +1009,30 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       state.enabled || modeContractsRelevant
         ? reconcileModeContract(result.messages, state.enabled ? "plan" : "normal")
         : result.messages;
-    return { messages: messages as typeof event.messages };
+    return { messages: (state.enabled ? withGrantNote(messages) : messages) as typeof event.messages };
   });
+
+  /** Tell the main model which extra commands bash may run, right after the Plan-mode contract. */
+  function withGrantNote(messages: unknown[]) {
+    const grants = mainSessionGrants();
+    if (grants.length === 0) return messages;
+    const contract = latestModeContract(messages);
+    const note = {
+      role: "custom",
+      customType: "plan-mode-command-grants",
+      content: `Plan mode also lets bash run these commands, one per call (a quoted heredoc may feed it input): ${describeGrants(grants)}. Use them to inspect; the rules against changing anything still apply.`,
+      display: false,
+      timestamp: 0,
+    };
+    const at = contract ? contract.index + 1 : messages.length;
+    return [...messages.slice(0, at), note, ...messages.slice(at)];
+  }
+
+  function mainSessionGrants() {
+    return Object.entries(settings.commandGrants ?? {})
+      .filter(([, grant]) => grant.planMode)
+      .map(([id, grant]) => resolveGrant(id, grant, expandHome));
+  }
 
   pi.on("input", async (event, ctx) => {
     // Talk mode: what you type goes to the planner you are talking to, not the main model.
@@ -1368,6 +1395,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         ? (dependencies.readMcpCatalog ?? readMcpCatalog)(ctx.cwd, getAgentDir())
         : [],
       scoutTargets,
+      grants: settings.commandGrants ?? {},
     });
     const taskLine = task ? safeTerminalText(task.split("\n")[0] ?? "").slice(0, 200) : "";
     const notes = current ? ["The current plan joins the comparison as plan A."] : [];
@@ -1444,7 +1472,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       timeLimitMinutes = tools.timeLimitMinutes;
       break;
     }
-    const access = resolvePlannerAccess(treeToSelection(roots), toolsets, expandHome);
+    const access = resolvePlannerAccess(treeToSelection(roots), toolsets, expandHome, settings.commandGrants ?? {});
 
     let runLifecycle = lifecycle;
     if (!state.enabled) {
@@ -1497,6 +1525,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
                 scout ? formatModelSpec(scout) : undefined,
                 researchTools,
                 access.mcpAllow,
+                access.grants ?? [],
               ),
               ...(scout ? { scoutSpec: scout } : {}),
               access,
@@ -1530,6 +1559,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     lastTraces = { createdAt: set.createdAt, panes: [...run.traces.values()] };
     pi.appendEntry(CANDIDATES_ENTRY_TYPE, set);
     await compareCandidates(ctx, set);
+  }
+
+  /** Command prefixes bash may run beyond the read-only policy: a planner's grants, or the main session's. */
+  function grantedPrefixes() {
+    if (isPlannerProcess()) return plannerGrantPrefixes;
+    return mainSessionGrants().flatMap((grant) => grant.commands);
   }
 
   /** `/plan talk A` talks to planner A; `off` returns to the main model; `cancel` stops replies. */

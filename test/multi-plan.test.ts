@@ -371,8 +371,18 @@ function multiPlanHarness(
           calls.choosePlanners?.push(options);
           return { specs: options.preselected, capabilities: [] };
         },
-        chooseTools: async (_ctx: unknown, options: { roots: unknown[]; lines: string[] }) => {
-          calls.chooseTools?.push(options);
+        chooseTools: async (
+          _ctx: unknown,
+          options: {
+            roots: unknown[];
+            notes: string[];
+            preselection?: { pending: Promise<{ message: string; apply(keep: boolean): void }> };
+          },
+        ) => {
+          // Like the screen: Jev's picks arrive and apply; its summary is shown.
+          const picked = await options.preselection?.pending;
+          picked?.apply(false);
+          calls.chooseTools?.push({ ...options, jevMessage: picked?.message });
           return (extraDependencies.toolsResult as unknown) ?? { kind: "start", timeLimitMinutes: 45 };
         },
         runPlannersWithProgress: async (_ctx: unknown, options: { specs: unknown[] }) => {
@@ -605,7 +615,7 @@ test("/plan multi picks models, then tools from a tree of toolsets and MCP serve
   await mock.events.get("session_start")?.[0]?.({}, context.ctx);
   await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
   const models = calls.choosePlanners?.[0] as { title: string } | undefined;
-  assert.match(models?.title ?? "", /1\/2 models/u);
+  assert.equal(models?.title, "Plan with multiple models");
   const tools = calls.chooseTools?.[0] as
     | {
         roots: Array<{
@@ -690,7 +700,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
     );
     await mock.events.get("session_start")?.[0]?.({}, context.ctx);
     await mock.commands.get("plan")?.handler("multi Build onboarding from my Obsidian notes", context.ctx);
-    const tools = calls.chooseTools?.[0] as { lines: string[]; roots: unknown[] } | undefined;
+    const tools = calls.chooseTools?.[0] as { jevMessage?: string; roots: unknown[] } | undefined;
     const flat = (nodes: unknown[]): [string, boolean | undefined, number | undefined][] =>
       (nodes as Array<{ id: string; selected?: boolean; jev?: number; children?: unknown[] }>).flatMap((node) =>
         node.children ? flat(node.children) : [[node.id, node.selected, node.jev]],
@@ -707,7 +717,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
         "mcp:obsidian/search_notes": true,
         "mcp:obsidian/delete_note": false,
       });
-      assert.ok(tools?.lines.some((line) => /Jev \(jev-1\.13\.0\) preselected/u.test(line)));
+      assert.match(tools?.jevMessage ?? "", /Picked 2 tools for this task \(jev-1\.13\.0\)/u);
     } else {
       assert.deepEqual(leaves, {
         shell: true,
@@ -715,11 +725,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
         "mcp:obsidian/search_notes": false,
         "mcp:obsidian/delete_note": false,
       });
-      assert.ok(
-        tools?.lines.some((line) =>
-          scenario === "off" ? /off in settings/u.test(line) : /TYPESAFE_API_KEY is not set/u.test(line),
-        ),
-      );
+      assert.match(tools?.jevMessage ?? "", scenario === "off" ? /off in settings/u : /TYPESAFE_API_KEY is not set/u);
       assert.equal(pickCalls.length, scenario === "off" ? 0 : 1);
     }
   }
@@ -772,11 +778,73 @@ test("the comparison list aligns each candidate's stats in columns", async () =>
     },
     { signal: new AbortController().signal, isCurrent: () => true },
   );
-  const rowA = rendered.find((line) => line.includes("A · anthropic")) ?? "";
-  const rowB = rendered.find((line) => line.includes("B · openai")) ?? "";
+  const screen = rendered.join("\n");
+  const rowA = rendered.find((line) => /✓ A +claude-fable-5-1/u.test(line)) ?? "";
+  const rowB = rendered.find((line) => /✓ B +gpt-6-astra/u.test(line)) ?? "";
   const end = (line: string, text: string) => line.indexOf(text) + text.length;
-  assert.ok(rowA && rowB, rendered.join("\n"));
-  assert.equal(end(rowA, "72 tools"), end(rowB, "8 tools"), rendered.join("\n"));
+  assert.ok(rowA && rowB, screen);
+  assert.match(screen, /MERGE +PLAN +MODEL +EFFORT +TIME +TOOLS +SUBAGENTS +TOKENS +COST/u);
+  assert.equal(end(rowA, " 72"), end(rowB, " 8"), screen);
   assert.equal(end(rowA, "$12.4"), end(rowB, "$5.06"));
-  assert.match(rowA, /10\.4M tok/u);
+  assert.match(rowA, /xhigh +13m 00s +72 +5 +10\.4M +\$12\.4/u);
+  assert.match(screen, /Plan A · claude-fable-5-1/u, "the highlighted plan is previewed");
+  assert.match(screen, /⏎ use plan A/u);
+  assert.match(screen, /m merge A\+B/u);
+});
+
+test("the comparison screen previews, reads, marks, merges, and uses plans", async () => {
+  const { CompareView } = await import("../src/compare-view.js");
+  const plain = {
+    fg: (_c: string, t: string) => t,
+    bg: (_c: string, t: string) => t,
+    bold: (t: string) => t,
+    italic: (t: string) => t,
+  } as never;
+  const results: unknown[] = [];
+  const long = Array.from({ length: 80 }, (_unused, index) => `${index + 1}. step ${index + 1}`).join("\n");
+  const view = new CompareView(plain, {
+    task: "Add caching",
+    candidates: [
+      { id: "A", label: "p/a:high", origin: "planner", status: "done", plan: long, durationMs: 60_000 },
+      { id: "B", label: "p/b", origin: "planner", status: "failed", error: "out of extra usage" },
+      { id: "C", label: "p/c", origin: "planner", status: "done", plan: "# C\nshort" },
+    ],
+    describe: (candidate) => ({ name: `Model ${candidate.id}` }),
+    hasTraces: true,
+    renderMarkdown: (text) => text.split("\n"),
+    rows: () => 30,
+    requestRender: () => undefined,
+    onDone: (result) => results.push(result),
+  });
+  let screen = view.render(140).join("\n");
+  assert.match(screen, /2 ready · 1 without a plan/u);
+  assert.match(screen, /✗ B +Model B .*no plan: out of extra usage/u);
+  assert.match(screen, /1\. step 1\n/u, "the preview starts at the top");
+  assert.match(screen, /1–\d+ of 80 lines/u);
+  view.handleInput("\u001b[6~"); // PgDn scrolls the preview
+  assert.doesNotMatch(view.render(140).join("\n"), / 1\. step 1\n/u);
+  view.handleInput("\u001b[B"); // B has no plan
+  view.handleInput("\r");
+  assert.match(view.render(140).join("\n"), /B produced no plan: out of extra usage/u);
+  assert.deepEqual(results, []);
+  view.handleInput("\u001b[B"); // C
+  view.handleInput(" "); // unmark C
+  view.handleInput("m");
+  assert.match(view.render(140).join("\n"), /Mark at least two plans/u);
+  view.handleInput(" "); // mark C again
+  view.handleInput("m");
+  assert.deepEqual(results.at(-1), { kind: "synthesize", ids: ["A", "C"] });
+  view.handleInput("\u001b[A");
+  view.handleInput("\u001b[A"); // A
+  view.handleInput("\u001b[C"); // read A full screen
+  screen = view.render(140).join("\n");
+  assert.match(screen, /Plan A +Model A/u);
+  assert.match(screen, /esc back to all plans/u);
+  view.handleMouse({ type: "wheel", button: "none", x: 5, y: 10, wheelDelta: 3 } as never);
+  assert.match(view.render(140).join("\n"), /4–\d+ of 80 lines/u, "the wheel scrolls by its line delta");
+  view.handleInput("\r");
+  assert.deepEqual(results.at(-1), { kind: "use", id: "A" });
+  view.handleInput("\u001b");
+  view.handleInput("t");
+  assert.deepEqual(results.at(-1), { kind: "traces" });
 });

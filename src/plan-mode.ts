@@ -144,7 +144,8 @@ import {
   readCommand,
 } from "./tool-policy.js";
 import { compareTools, snapshotPlanModeSelectedNames, toolPolicyLabel } from "./tool-selection.js";
-import { applyJevPick, buildToolTree, leafCapabilities, treeToSelection } from "./tool-tree.js";
+import { applyJevPick, buildToolTree, leafCapabilities, type ToolNode, treeToSelection } from "./tool-tree.js";
+import type { ToolPreselection } from "./tool-tree-view.js";
 import type { TracePane } from "./trace-view.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
 
@@ -1288,18 +1289,28 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         : [],
       scoutTargets,
     });
-    const taskLines = [
-      ...(task ? [`Task: ${safeTerminalText(task.split("\n")[0] ?? "").slice(0, 160)}`] : []),
-      ...(current ? ["The current plan joins the comparison as plan A."] : []),
-    ];
-    let pick: JevToolPick | undefined;
+    const taskLine = task ? safeTerminalText(task.split("\n")[0] ?? "").slice(0, 200) : "";
+    const notes = current ? ["The current plan joins the comparison as plan A."] : [];
+    const title = current ? "Compare with other models" : "Plan with multiple models";
+    const taskLines = [...(taskLine ? [`Task: ${taskLine}`] : []), ...notes];
+    const describePick = (result: JevToolPick) => {
+      if (result.kind !== "jev")
+        return `Not used (${safeTerminalText(result.reason)}); the defaults from settings apply.`;
+      const count = Object.values(result.selected).filter(Boolean).length;
+      return `Picked ${count} tool${count === 1 ? "" : "s"} for this task (${safeTerminalText(result.model)}).`;
+    };
+    let pickPromise: Promise<JevToolPick> | undefined;
+    let pickMessage: string | undefined;
     let timeLimitMinutes = Math.round(configuredPlannerTimeoutSeconds(settings) / 60);
     let specs: ModelSpec[] | undefined;
     // Step 1 picks models, step 2 picks tools; Esc on the tools screen returns to the models.
     for (;;) {
       const choice = await ui.choosePlanners(ctx, {
-        title: `${current ? "Compare with other models" : "Plan with multiple models"} · 1/2 models`,
+        title,
         lines: taskLines,
+        ...(taskLine ? { task: taskLine } : {}),
+        notes,
+        subagentsFor: (spec) => configuredScoutModel(settings, spec),
         preselected,
         startLabel: "Next: choose tools",
         ...lifecycle,
@@ -1307,31 +1318,41 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       if (!choice || choice.specs.length === 0 || !lifecycle.isCurrent()) return;
       specs = choice.specs;
       preselected = choice.specs;
-      if (!pick) {
-        pick =
-          settings.jevToolSelection === false
-            ? { kind: "fallback", reason: "Jev tool selection is off in settings" }
-            : await (dependencies.pickTools ?? pickToolsWithJev)({
-                task,
-                conversation: transcript,
-                cwd: ctx.cwd,
-                capabilities: leafCapabilities(roots),
-                ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
-                ...(settings.jevModel ? { model: settings.jevModel } : {}),
-                signal: lifecycle.signal,
-              });
-        if (!lifecycle.isCurrent()) return;
-        applyJevPick(roots, pick);
-      }
+      describeSubagents(roots, specs);
+      // Jev picks tools while the tools screen is already open (one request per run). Its picks
+      // apply when they arrive, unless you already changed the selection yourself.
+      pickPromise ??=
+        settings.jevToolSelection === false
+          ? Promise.resolve({ kind: "fallback", reason: "Jev tool selection is off in settings" })
+          : (dependencies.pickTools ?? pickToolsWithJev)({
+              task,
+              conversation: transcript,
+              cwd: ctx.cwd,
+              capabilities: leafCapabilities(roots),
+              ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+              ...(settings.jevModel ? { model: settings.jevModel } : {}),
+              signal: lifecycle.signal,
+            });
+      const preselection: ToolPreselection | undefined = pickMessage
+        ? undefined
+        : {
+            pending: pickPromise.then((result) => ({
+              message: describePick(result),
+              apply: (keepSelection: boolean) => {
+                applyJevPick(roots, result, keepSelection);
+                pickMessage = describePick(result);
+              },
+            })),
+          };
       const tools = await ui.chooseTools(ctx, {
-        title: `${current ? "Compare with other models" : "Plan with multiple models"} · 2/2 tools`,
-        lines: [
-          ...taskLines,
-          pick.kind === "jev"
-            ? `Jev (${safeTerminalText(pick.model)}) preselected the tools this task needs; change any before starting.`
-            : `Tool defaults come from settings: ${safeTerminalText(pick.reason)}.`,
-          "Open a server with Enter or → to pick its tools; Space selects or clears a whole server. Planners and their subagents can only call the MCP tools selected here.",
+        title,
+        ...(taskLine ? { task: taskLine } : {}),
+        notes: [
+          ...notes,
+          ...(pickMessage && !preselection ? [pickMessage] : []),
+          ...(ctx.mode === "tui" ? [] : ["Planners and their subagents can only call the MCP tools selected here."]),
         ],
+        ...(preselection ? { preselection } : {}),
         roots,
         startLabel: `Start planning with ${specs.length} model${specs.length === 1 ? "" : "s"}`,
         timeLimitMinutes,
@@ -1417,6 +1438,17 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     lastTraces = { createdAt: set.createdAt, panes: [...run.traces.values()] };
     pi.appendEntry(CANDIDATES_ENTRY_TYPE, set);
     await compareCandidates(ctx, set);
+  }
+
+  /** Say which helper model each chosen planner would fan out to. */
+  function describeSubagents(roots: ToolNode[], specs: readonly ModelSpec[]) {
+    const node = roots.find((root) => root.id === "subagents");
+    if (!node) return;
+    const lines = specs.map((spec) => {
+      const scout = configuredScoutModel(settings, spec);
+      return scout ? `${spec.modelId} → ${formatModelSpec(scout)}` : `${spec.modelId} has none (scoutModelMap)`;
+    });
+    node.detail = `Read-only helpers a planner can hand investigations to, several at once. ${lines.join("; ")}.`;
   }
 
   async function compareCandidates(ctx: ExtensionContext, set: CandidateSet) {

@@ -7,18 +7,39 @@ import {
   type TuiMouseEventResult,
   truncateToWidth,
   visibleWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.js";
+import {
+  fieldLine,
+  type Hint,
+  hintLine,
+  padLines,
+  padVisible,
+  rule,
+  selectedRow,
+  spinner,
+  titleLine,
+} from "./ui-kit.js";
 
 export type ToolTreeResult = { kind: "start"; timeLimitMinutes: number } | { kind: "back" } | { kind: "cancel" };
 
+/** Jev's preselection, arriving after the screen opens. */
+export interface ToolPreselection {
+  /** Resolves to a one-line summary and a function that applies the picks to the tree. */
+  pending: Promise<{ message: string; apply(keepSelection: boolean): void }>;
+}
+
 export interface ToolTreeViewOptions {
   title: string;
-  lines: readonly string[];
+  task?: string;
+  /** Short lines under the task, e.g. the Jev summary when it is already known. */
+  notes: readonly string[];
   roots: ToolNode[];
   startLabel: string;
   timeLimitMinutes: number;
   timeLimitChoices: readonly number[];
+  preselection?: ToolPreselection;
   rows(): number;
   requestRender(): void;
   onDone(result: ToolTreeResult): void;
@@ -27,14 +48,27 @@ export interface ToolTreeViewOptions {
 type Row = { kind: "start" } | { kind: "time" } | { kind: "node"; node: ToolNode; depth: number };
 
 /**
- * Tool picker as a tree: groups (toolsets, MCP servers) toggle every tool inside them and show a
- * partial mark when only some are selected; each leaf shows Jev's probability when available.
+ * Step 2: which tools planners may use. Groups (toolsets, MCP servers) open with Enter or →, Space
+ * selects or clears a tool or a whole group, and a partial mark shows a group where only some
+ * tools are selected. The highlighted row is described at the bottom.
  */
 export class ToolTreeView implements Component {
   private cursor = 0;
   private scroll = 0;
   private timeLimit: number;
   private readonly expanded = new Set<string>();
+  private lastTreeCursor = 2;
+  private jevStatus: { kind: "pending" } | { kind: "done"; message: string } | undefined;
+  /** True once the user changed any selection; Jev never overrides that. */
+  touched = false;
+  private rowsTop = 0;
+  private shownRows: Row[] = [];
+  private closed = false;
+
+  private finish(result: ToolTreeResult) {
+    this.closed = true;
+    this.options.onDone(result);
+  }
 
   constructor(
     private readonly theme: Theme,
@@ -43,6 +77,25 @@ export class ToolTreeView implements Component {
     this.timeLimit = options.timeLimitMinutes;
     // Toolsets start open; MCP servers start closed so a long catalog stays scannable.
     for (const root of options.roots) if (root.children) this.expanded.add(root.id);
+    if (options.preselection) {
+      this.jevStatus = { kind: "pending" };
+      options.preselection.pending.then(
+        (result) => {
+          // A closed screen leaves the picks for the next time the tools screen opens.
+          if (this.closed) return;
+          result.apply(this.touched);
+          this.jevStatus = {
+            kind: "done",
+            message: this.touched ? `${result.message} Your own changes were kept.` : result.message,
+          };
+          options.requestRender();
+        },
+        () => {
+          this.jevStatus = { kind: "done", message: "Jev could not pick tools; using the defaults from settings." };
+          options.requestRender();
+        },
+      );
+    }
   }
 
   invalidate() {}
@@ -57,30 +110,47 @@ export class ToolTreeView implements Component {
     return rows;
   }
 
+  private change(node: ToolNode) {
+    toggle(node);
+    this.touched = true;
+  }
+
   handleInput(data: string) {
     const rows = this.visibleRows();
     const is = (...keys: KeyId[]) => keys.some((key) => matchesKey(data, key));
     const row = rows[this.cursor];
-    if (is("ctrl+c")) this.options.onDone({ kind: "cancel" });
-    else if (is("escape")) this.options.onDone({ kind: "back" });
-    else if (is("up", "k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
+    if (is("ctrl+c")) return this.finish({ kind: "cancel" });
+    if (is("escape")) return this.finish({ kind: "back" });
+    if (row?.kind === "start" && is("enter", "space")) {
+      return this.finish({ kind: "start", timeLimitMinutes: this.timeLimit });
+    }
+    if (is("up", "k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
     else if (is("down", "j")) this.cursor = (this.cursor + 1) % rows.length;
     else if (is("pageUp")) this.cursor = Math.max(0, this.cursor - 10);
     else if (is("pageDown")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
     else if (is("home", "g")) this.cursor = 0;
     else if (is("end", "shift+g")) this.cursor = rows.length - 1;
-    else if (is("a")) for (const leaf of leaves(this.options.roots)) leaf.selected = true;
-    else if (is("n")) for (const leaf of leaves(this.options.roots)) leaf.selected = false;
-    else if (row?.kind === "start" && is("enter", "space")) {
-      this.options.onDone({ kind: "start", timeLimitMinutes: this.timeLimit });
-      return;
+    else if (is("tab")) {
+      // Jump to Start and back to where you were in the tree.
+      if (this.cursor === 0) this.cursor = Math.min(rows.length - 1, this.lastTreeCursor);
+      else {
+        this.lastTreeCursor = this.cursor;
+        this.cursor = 0;
+      }
+    } else if (is("+", "=")) this.stepTime(1);
+    else if (is("-")) this.stepTime(-1);
+    else if (is("a")) {
+      for (const leaf of leaves(this.options.roots)) leaf.selected = true;
+      this.touched = true;
+    } else if (is("n")) {
+      for (const leaf of leaves(this.options.roots)) leaf.selected = false;
+      this.touched = true;
     } else if (row?.kind === "time" && is("right", "l", "enter", "space")) this.stepTime(1);
     else if (row?.kind === "time" && is("left", "h")) this.stepTime(-1);
-    else if (row?.kind === "node" && is("space")) toggle(row.node);
+    else if (row?.kind === "node" && is("space", "x")) this.change(row.node);
     else if (row?.kind === "node" && is("enter")) {
-      // Enter opens and closes groups (servers, toolsets); on a single tool it toggles it.
       if (row.node.children) this.toggleExpanded(row.node.id);
-      else toggle(row.node);
+      else this.change(row.node);
     } else if (row?.kind === "node" && is("right", "l")) {
       if (row.node.children) this.expanded.add(row.node.id);
     } else if (row?.kind === "node" && is("left", "h")) {
@@ -104,10 +174,6 @@ export class ToolTreeView implements Component {
     else this.expanded.add(id);
   }
 
-  /** Rendered line index of the first row, and the rows shown, from the last render. */
-  private rowsTop = 0;
-  private shownRows: Row[] = [];
-
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     const rows = this.visibleRows();
     if (event.type === "wheel") {
@@ -120,19 +186,19 @@ export class ToolTreeView implements Component {
       return event.type === "press" ? { handled: true } : undefined;
     const index = event.y - this.rowsTop;
     const row = this.shownRows[index];
-    if (!row) return undefined;
+    if (!row) return { handled: true };
     this.cursor = this.scroll + index;
     if (row.kind === "start") {
-      this.options.onDone({ kind: "start", timeLimitMinutes: this.timeLimit });
+      this.finish({ kind: "start", timeLimitMinutes: this.timeLimit });
       return { handled: true };
     }
-    if (row.kind === "time") this.stepTime(event.x < 24 ? -1 : 1);
+    if (row.kind === "time") this.stepTime(event.x < 18 ? -1 : 1);
     else {
       // Clicking the checkbox selects or clears; clicking elsewhere on a group opens or closes it.
-      const boxStart = 2 + row.depth * 2 + 2;
+      const boxStart = 3 + row.depth * 2 + 2;
       const onBox = event.x >= boxStart && event.x < boxStart + 3;
       if (row.node.children && !onBox) this.toggleExpanded(row.node.id);
-      else toggle(row.node);
+      else this.change(row.node);
     }
     this.options.requestRender();
     return { handled: true };
@@ -149,66 +215,138 @@ export class ToolTreeView implements Component {
     const theme = this.theme;
     const rows = this.visibleRows();
     if (this.cursor >= rows.length) this.cursor = rows.length - 1;
+    const height = Math.max(14, this.options.rows());
+    const all = leaves(this.options.roots);
+    const selectedCount = all.filter((leaf) => leaf.selected).length;
+    const jev =
+      this.jevStatus?.kind === "pending"
+        ? `${theme.fg("accent", spinner())} ${theme.fg("muted", "Jev is picking the tools this task needs…")}`
+        : this.jevStatus?.kind === "done"
+          ? theme.fg("muted", this.jevStatus.message)
+          : undefined;
     const header = [
-      theme.fg("borderMuted", "─".repeat(width)),
-      truncateToWidth(theme.bold(this.options.title), width),
-      ...this.options.lines.map((line) => truncateToWidth(theme.fg("muted", line), width)),
+      rule(theme, width),
+      titleLine(theme, width, this.options.title, "what planners and their subagents may use", "Tools"),
+      ...(this.options.task ? [fieldLine(theme, width, "Task", this.options.task)] : []),
+      ...(jev ? [fieldLine(theme, width, "Jev", jev)] : []),
+      ...this.options.notes.map((note) => fieldLine(theme, width, "", theme.fg("muted", note))),
       "",
     ];
+    const current = rows[this.cursor];
+    const detail = this.detail(current, width);
     const footer = [
-      theme.fg("borderMuted", "─".repeat(width)),
-      truncateToWidth(
-        theme.fg(
-          "dim",
-          "↑↓ move · Enter/→ open a server · ← close · Space select/clear · a all · n none · mouse works · Esc back",
-        ),
-        width,
-      ),
+      rule(theme, width),
+      ...padLines(detail, 3),
+      rule(theme, width),
+      hintLine(theme, width, this.hints(current)),
     ];
-    const height = Math.max(6, this.options.rows() - header.length - footer.length);
+    // Only as tall as the tree needs, up to the terminal height.
+    const available = Math.max(4, height - header.length - footer.length);
+    const listHeight = rows.length > available ? available - 1 : rows.length;
     if (this.cursor < this.scroll) this.scroll = this.cursor;
-    if (this.cursor >= this.scroll + height) this.scroll = this.cursor - height + 1;
+    if (this.cursor >= this.scroll + listHeight) this.scroll = this.cursor - listHeight + 1;
     const labelWidth = Math.min(
-      Math.max(30, Math.floor(width * 0.4)),
-      Math.max(12, ...rows.map((row) => (row.kind === "node" ? row.depth * 2 + 6 + visibleWidth(row.node.label) : 0))),
+      Math.max(30, Math.floor(width * 0.5)),
+      Math.max(20, ...rows.map((row) => (row.kind === "node" ? row.depth * 2 + 8 + visibleWidth(row.node.label) : 0))),
     );
     this.rowsTop = header.length;
-    this.shownRows = rows.slice(this.scroll, this.scroll + height);
+    this.shownRows = rows.slice(this.scroll, this.scroll + listHeight);
     const body = this.shownRows.map((row, offset) => {
-      const selected = this.scroll + offset === this.cursor;
-      const pointer = selected ? theme.fg("accent", "›") : " ";
+      const isCursor = this.scroll + offset === this.cursor;
       let line: string;
       if (row.kind === "start") {
-        const count = leaves(this.options.roots).filter((leaf) => leaf.selected).length;
-        line = `${pointer} ${theme.bold(`▶ ${this.options.startLabel}`)}${theme.fg("dim", ` · ${count} tools selected`)}`;
+        line = `${theme.fg("success", theme.bold(`▶ ${this.options.startLabel}`))}  ${theme.fg("dim", `${selectedCount} of ${all.length} tools · ${this.timeLimit} min limit`)}`;
       } else if (row.kind === "time") {
-        line = `${pointer} Time limit  ${theme.fg("accent", `‹ ${this.timeLimit} min ›`)}${theme.fg("dim", "  planners are asked to wrap up at 80%")}`;
+        line = `  Time limit  ${theme.fg("accent", "‹")} ${theme.bold(`${this.timeLimit} min`)} ${theme.fg("accent", "›")}  ${theme.fg("dim", "planners are asked to wrap up at 80%")}`;
       } else {
         const node = row.node;
         const state = groupState(node);
-        const box = state === "all" ? "[x]" : state === "some" ? "[-]" : "[ ]";
-        const arrow = node.children ? (this.expanded.has(node.id) ? "▾ " : "▸ ") : "  ";
+        const box =
+          state === "all"
+            ? theme.fg("success", "[x]")
+            : state === "some"
+              ? theme.fg("warning", "[-]")
+              : theme.fg("dim", "[ ]");
+        const arrow = node.children ? theme.fg("accent", this.expanded.has(node.id) ? "▾ " : "▸ ") : "  ";
         const indent = "  ".repeat(row.depth);
-        const counts = node.children
-          ? `${leaves([node]).filter((leaf) => leaf.selected).length}/${leaves([node]).length}`
-          : "";
-        const jev = node.jev !== undefined ? `Jev ${Math.round(node.jev * 100)}%`.padStart(8) : "";
-        const label = padVisible(`${indent}${arrow}${box} ${node.label}`, labelWidth);
-        const extra = node.children ? counts : jev;
-        const detail = node.children ? "" : node.description.replace(/^[^:]+: /u, "");
-        line = `${pointer} ${selected ? theme.fg("accent", label) : label} ${theme.fg(node.jev !== undefined && node.jev >= 0.5 ? "success" : "muted", extra.padStart(8))}  ${theme.fg("dim", detail)}`;
+        const name = node.children ? theme.bold(node.label) : node.label;
+        const label = padVisible(`${indent}${arrow}${box} ${name}`, labelWidth);
+        const extra = node.children
+          ? theme.fg("dim", `${leaves([node]).filter((leaf) => leaf.selected).length}/${leaves([node]).length}`)
+          : node.jev !== undefined
+            ? theme.fg(node.jev >= 0.5 ? "success" : "dim", `Jev ${Math.round(node.jev * 100)}%`)
+            : "";
+        line = `${label} ${extra}`;
       }
-      return truncateToWidth(line, width);
+      return isCursor ? selectedRow(theme, width, `${theme.fg("accent", " › ")}${line}`) : `   ${line}`;
     });
-    const scrollInfo =
-      rows.length > height
-        ? [theme.fg("dim", `  ${this.scroll + 1}-${Math.min(rows.length, this.scroll + height)} of ${rows.length}`)]
-        : [];
-    return [...header, ...body, ...scrollInfo, ...footer];
+    if (rows.length > listHeight) {
+      body.push(theme.fg("dim", `   ${this.scroll + 1}–${this.scroll + this.shownRows.length} of ${rows.length} rows`));
+    }
+    return [...header, ...body, ...footer].map((line) => truncateToWidth(line, width));
   }
-}
 
-function padVisible(text: string, width: number) {
-  const visible = visibleWidth(text);
-  return visible >= width ? truncateToWidth(text, width) : text + " ".repeat(width - visible);
+  private detail(row: Row | undefined, width: number): string[] {
+    const theme = this.theme;
+    let text: string;
+    if (!row) return [];
+    if (row.kind === "start") {
+      const chosen = this.options.roots
+        .map((root) => {
+          const all = leaves([root]);
+          const picked = all.filter((leaf) => leaf.selected).length;
+          return picked === 0 ? undefined : all.length === 1 ? root.label : `${root.label} ${picked}/${all.length}`;
+        })
+        .filter(Boolean);
+      text = chosen.length ? `Planners get: ${chosen.join(" · ")}` : "Planners get only read, grep, find, and ls.";
+    } else if (row.kind === "time") {
+      text = "How long each planner may run. At 80% it is asked to wrap up; at the limit it is stopped.";
+    } else {
+      const node = row.node;
+      text = node.detail || node.description || node.label;
+      if (node.children) {
+        const all = leaves([node]);
+        text = `${text}${text.endsWith(".") ? "" : "."} ${all.filter((leaf) => leaf.selected).length} of ${all.length} tools selected.`;
+      }
+    }
+    return wrapTextWithAnsi(text, Math.max(10, width - 2))
+      .slice(0, 3)
+      .map((line) => ` ${theme.fg("muted", line)}`);
+  }
+
+  private hints(row: Row | undefined): Hint[] {
+    const common: Hint[] = [
+      { key: "a/n", label: "all/none" },
+      { key: "esc", label: "back to models" },
+    ];
+    if (row?.kind === "start") {
+      return [{ key: "⏎", label: "start planning", primary: true }, { key: "↓", label: "change tools" }, ...common];
+    }
+    if (row?.kind === "time") {
+      return [
+        { key: "←→", label: "time limit", primary: true },
+        { key: "tab", label: "start" },
+        { key: "↑↓", label: "move" },
+        ...common,
+      ];
+    }
+    const node = row?.kind === "node" ? row.node : undefined;
+    const isGroup = node?.children !== undefined;
+    return [
+      {
+        key: "space",
+        label: node
+          ? groupState(node) === "all"
+            ? `clear ${isGroup ? "all" : ""}`.trim()
+            : `select${isGroup ? " all" : ""}`
+          : "select",
+      },
+      ...(isGroup
+        ? [{ key: "⏎", label: node && this.expanded.has(node.id) ? "close" : "open" }]
+        : [{ key: "←", label: "up to group" }]),
+      { key: "tab", label: "start", primary: true },
+      { key: "↑↓", label: "move" },
+      ...common,
+    ];
+  }
 }

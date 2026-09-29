@@ -1,20 +1,25 @@
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TuiMouseEvent } from "@earendil-works/pi-tui";
+import { type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
+import { Markdown, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { defineMenu, runMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
+import { CompareView } from "./compare-view.js";
 import {
   type AvailableImplementationModel,
   formatModelKey,
   formatModelSpec,
+  MODEL_SPEC_THINKING_LEVELS,
   type ModelSpec,
+  type ModelSpecThinkingLevel,
+  parseModelSpec,
   sameModel,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
+import { type ModelPickerRow, ModelPickerView } from "./model-picker-view.js";
 import { alignColumns, type CandidateSet, candidateSummary, type PlanCandidate, statsCells } from "./multi-plan.js";
 import type { PlannerProgress } from "./planner-process.js";
 import { PlannerTrace } from "./planner-trace.js";
 import type { SubagentView } from "./subagent-progress.js";
 import { leaves, type ToolNode } from "./tool-tree.js";
-import { type ToolTreeResult, ToolTreeView } from "./tool-tree-view.js";
+import { type ToolPreselection, type ToolTreeResult, ToolTreeView } from "./tool-tree-view.js";
 import { type TracePane, TraceView } from "./trace-view.js";
 
 interface Lifecycle {
@@ -23,6 +28,81 @@ interface Lifecycle {
 }
 
 const PROGRESS_WIDGET_KEY = "plan-mode-planners";
+
+/**
+ * The planning screens are overlays, so every key (PgUp, Home, ...) and wheel event reaches them
+ * even in Pi's fullscreen mode. Dashboards take the whole terminal; pickers rise from the bottom
+ * and are only as tall as their content.
+ */
+const FULL_SCREEN = {
+  overlay: true,
+  overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center", margin: 0 },
+} as const;
+const SHEET = {
+  overlay: true,
+  overlayOptions: { width: "100%", maxHeight: "100%", anchor: "bottom-center", margin: 0 },
+} as const;
+
+function terminalRows(tui: unknown) {
+  const rows = (tui as { terminal?: { rows?: number } }).terminal?.rows;
+  return typeof rows === "number" && rows > 0 ? rows : 40;
+}
+
+type RegistryModel = {
+  provider: string;
+  id: string;
+  name?: string;
+  reasoning?: boolean;
+  thinkingLevelMap?: Record<string, unknown>;
+  contextWindow?: number;
+  cost?: { input?: number; output?: number };
+};
+
+/** Friendly names and supported efforts from the model registry. */
+export function modelCatalog(ctx: ExtensionContext) {
+  let available: RegistryModel[] = [];
+  try {
+    available = snapshotAvailableImplementationModels(ctx) as RegistryModel[];
+  } catch {
+    available = [];
+  }
+  const find = (spec: { provider: string; modelId: string }) =>
+    available.find((model) => model.provider === spec.provider && model.id === spec.modelId);
+  return {
+    available,
+    name(spec: { provider: string; modelId: string }) {
+      return safeText(find(spec)?.name || spec.modelId);
+    },
+    /** Effort levels a model accepts, mirroring Pi's own rules; `undefined` is the model default. */
+    efforts(spec: { provider: string; modelId: string }): Array<ModelSpecThinkingLevel | undefined> {
+      const model = find(spec);
+      if (!model?.reasoning) return [undefined];
+      const levels = MODEL_SPEC_THINKING_LEVELS.filter((level) => {
+        const mapped = model.thinkingLevelMap?.[level];
+        if (mapped === null) return false;
+        if (level === "xhigh" || level === "max") return mapped !== undefined;
+        return true;
+      });
+      return [undefined, ...levels];
+    },
+    /** `anthropic/claude-opus-5-5 · 200k context · $5 in / $25 out per M tokens` */
+    details(spec: { provider: string; modelId: string }) {
+      const model = find(spec);
+      const parts = [`${spec.provider}/${spec.modelId}`];
+      if (model?.contextWindow) parts.push(`${formatContext(model.contextWindow)} context`);
+      const input = model?.cost?.input;
+      const output = model?.cost?.output;
+      if (input || output) parts.push(`$${trimCost(input ?? 0)} in / $${trimCost(output ?? 0)} out per M tokens`);
+      return safeText(parts.join(" · "));
+    },
+    /** `Claude Opus 5.5 · high` for a spec string or spec. */
+    describe(value: string | ModelSpec) {
+      const spec = typeof value === "string" ? parseModelSpec(value) : value;
+      if (!spec) return { name: safeText(String(value)), effort: undefined as string | undefined };
+      return { name: this.name(spec), effort: spec.thinkingLevel as string | undefined };
+    },
+  };
+}
 
 export interface PlannerCapabilityRow {
   id: string;
@@ -39,6 +119,10 @@ export interface ChoosePlannersOptions extends Lifecycle {
   capabilities?: readonly PlannerCapabilityRow[];
   /** Label of the confirm row (default "Start planning with N models"). */
   startLabel?: string;
+  /** Full-screen view: the task line, extra notes, and each planner's subagent model. */
+  task?: string;
+  notes?: readonly string[];
+  subagentsFor?(spec: ModelSpec): ModelSpec | undefined;
 }
 
 export interface PlannerChoice {
@@ -54,6 +138,7 @@ export async function choosePlanners(
   ctx: ExtensionContext,
   options: ChoosePlannersOptions,
 ): Promise<PlannerChoice | undefined> {
+  if (ctx.mode === "tui" && !options.capabilities?.length) return choosePlannersFullScreen(ctx, options);
   const available = snapshotAvailableImplementationModels(ctx);
   const rows = plannerRows(options.preselected, available);
   const selected = new Set(rows.filter((row) => row.selected).map((row) => row.id));
@@ -67,7 +152,7 @@ export async function choosePlanners(
     screens: {
       planners: () => ({
         kind: "multiSelect",
-        title: options.title,
+        title: `${options.title} · 1/2 models`,
         lines: [
           ...(options.lines ?? []),
           capabilityRows.length > 0
@@ -128,6 +213,66 @@ export async function choosePlanners(
   });
   await runMenu(ctx, menu, { getState: () => undefined, signal: options.signal, isCurrent: options.isCurrent });
   return outcome;
+}
+
+async function choosePlannersFullScreen(
+  ctx: ExtensionContext,
+  options: ChoosePlannersOptions,
+): Promise<PlannerChoice | undefined> {
+  const catalog = modelCatalog(ctx);
+  const rows: ModelPickerRow[] = [];
+  const subagents = (row: { provider: string; modelId: string }) => () => {
+    const scout = options.subagentsFor?.({ provider: row.provider, modelId: row.modelId });
+    if (!scout) return undefined;
+    return `${catalog.name(scout)}${scout.thinkingLevel ? ` · ${scout.thinkingLevel}` : ""}`;
+  };
+  for (const spec of options.preselected) {
+    if (rows.some((row) => row.provider === spec.provider && row.modelId === spec.modelId)) continue;
+    rows.push({
+      provider: spec.provider,
+      modelId: spec.modelId,
+      name: catalog.name(spec),
+      details: catalog.details(spec),
+      efforts: catalog.efforts(spec),
+      ...(spec.thinkingLevel ? { effort: spec.thinkingLevel } : {}),
+      selected: true,
+      subagents: subagents(spec),
+    });
+  }
+  for (const model of catalog.available) {
+    const spec = { provider: model.provider, modelId: model.id };
+    if (rows.some((row) => row.provider === spec.provider && row.modelId === spec.modelId)) continue;
+    rows.push({
+      ...spec,
+      name: catalog.name(spec),
+      details: catalog.details(spec),
+      efforts: catalog.efforts(spec),
+      selected: false,
+      subagents: subagents(spec),
+    });
+  }
+  const result = await ctx.ui.custom<{ kind: "next"; specs: ModelSpec[] } | { kind: "cancel" }>(
+    (tui, theme, _keybindings, done) => {
+      const view = new ModelPickerView(theme, {
+        title: options.title,
+        ...(options.task ? { task: options.task } : {}),
+        notes: options.notes ?? [],
+        rows,
+        height: () => terminalRows(tui),
+        requestRender: () => tui.requestRender(),
+        onDone: done,
+      });
+      return {
+        render: (width: number) => view.render(width),
+        handleInput: (data: string) => view.handleInput(data),
+        handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
+        invalidate: () => view.invalidate(),
+      };
+    },
+    SHEET,
+  );
+  if (result?.kind !== "next" || !options.isCurrent()) return undefined;
+  return { specs: result.specs, capabilities: [] };
 }
 
 function plannerRows(preselected: readonly ModelSpec[], available: readonly AvailableImplementationModel[]) {
@@ -197,13 +342,17 @@ export async function runPlannersWithProgress(
   options: RunPlannersWithProgressOptions,
 ): Promise<PlannerRunResult | undefined> {
   const progress: Array<PlannerProgress | undefined> = options.specs.map(() => undefined);
+  const catalog = modelCatalog(ctx);
   const panes: TracePane[] = options.specs.map((spec, index) => ({
     id: options.ids[index] ?? String(index + 1),
     model: safeText(formatModelSpec(spec)),
+    name: catalog.name(spec),
+    ...(spec.thinkingLevel ? { effort: spec.thinkingLevel } : {}),
     trace: new PlannerTrace(),
   }));
+  const subagentPane = subagentPaneFactory(catalog);
   const traces = () => new Map(panes.map((pane) => [pane.id, pane]));
-  if (ctx.mode === "tui") return runWithTraceView(ctx, options, panes, progress, traces);
+  if (ctx.mode === "tui") return runWithTraceView(ctx, options, panes, progress, traces, subagentPane);
 
   let renderTimer: ReturnType<typeof setInterval> | undefined;
   const publish = () => {
@@ -262,6 +411,7 @@ async function runWithTraceView(
   panes: TracePane[],
   progress: Array<PlannerProgress | undefined>,
   traces: () => Map<string, TracePane>,
+  subagentPane: (view: SubagentView) => TracePane,
 ): Promise<PlannerRunResult | undefined> {
   const controller = new AbortController();
   const signal = AbortSignal.any([controller.signal, options.signal]);
@@ -269,6 +419,7 @@ async function runWithTraceView(
   let result: PlanCandidate[] | undefined;
   const outcome = await ctx.ui.custom<"done" | "cancelled">((tui, theme, _keybindings, done) => {
     let renderQueued = false;
+    let finished = false;
     const requestRender = () => {
       if (renderQueued) return;
       renderQueued = true;
@@ -277,18 +428,21 @@ async function runWithTraceView(
         tui.requestRender();
       }, 80).unref?.();
     };
-    const ticker = setInterval(requestRender, 1000);
+    // Fast enough for the spinners; the diff renderer only repaints changed rows.
+    const ticker = setInterval(requestRender, 250);
     ticker.unref?.();
     const view = new TraceView(theme, {
-      title: `Planning with ${panes.length} model${panes.length === 1 ? "" : "s"} in parallel`,
+      title: "Planning",
       getPanes: () => panes,
       isLive: () => running,
-      rows: () => Math.max(12, tui.terminal.rows - 9),
+      rows: () => terminalRows(tui),
       requestRender,
       onCancel: () => {
         controller.abort(new DOMException("Planners cancelled", "AbortError"));
       },
-      onClose: () => undefined,
+      onClose: () => {
+        if (finished) done(signal.aborted ? "cancelled" : "done");
+      },
     });
     options
       .run(
@@ -315,8 +469,11 @@ async function runWithTraceView(
       })
       .finally(() => {
         running = false;
+        finished = true;
         clearInterval(ticker);
-        done(signal.aborted ? "cancelled" : "done");
+        // Move on to comparing plans, unless the user is reading a trace: then offer it instead.
+        if (signal.aborted || !view.isBusy()) done(signal.aborted ? "cancelled" : "done");
+        else view.markFinished();
       });
     return {
       render: (width: number) => view.render(width),
@@ -328,7 +485,7 @@ async function runWithTraceView(
         if (running) controller.abort(new DOMException("Trace view closed", "AbortError"));
       },
     };
-  });
+  }, FULL_SCREEN);
   if (outcome !== "done" || !result || signal.aborted) return undefined;
   return { candidates: result, traces: traces() };
 }
@@ -341,7 +498,7 @@ export async function showTraces(ctx: ExtensionContext, panes: readonly TracePan
       title,
       getPanes: () => panes,
       isLive: () => false,
-      rows: () => Math.max(12, tui.terminal.rows - 9),
+      rows: () => terminalRows(tui),
       requestRender: () => tui.requestRender(),
       onCancel: () => done(),
       onClose: () => done(),
@@ -352,35 +509,43 @@ export async function showTraces(ctx: ExtensionContext, panes: readonly TracePan
       handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
       invalidate: () => view.invalidate(),
     };
-  });
+  }, FULL_SCREEN);
 }
 
 /** Subagent views keep their identity, so a pane per subagent can be reused across updates. */
-const subagentPanes = new WeakMap<SubagentView, TracePane>();
-function subagentPane(view: SubagentView): TracePane {
-  let pane = subagentPanes.get(view);
-  if (!pane) {
-    pane = {
-      id: view.id,
-      model: view.model,
-      label: view.label,
-      task: view.task,
-      trace: view.trace,
-      progress: view.stats,
-    };
-    subagentPanes.set(view, pane);
-  }
-  pane.label = view.label;
-  return pane;
+function subagentPaneFactory(catalog: ReturnType<typeof modelCatalog>) {
+  const panes = new WeakMap<SubagentView, TracePane>();
+  return (view: SubagentView): TracePane => {
+    let pane = panes.get(view);
+    if (!pane) {
+      const described = catalog.describe(view.model);
+      pane = {
+        id: view.id,
+        model: view.model,
+        name: described.name,
+        ...(described.effort ? { effort: described.effort } : {}),
+        label: safeText(view.label),
+        task: view.task,
+        trace: view.trace,
+        progress: view.stats,
+      };
+      panes.set(view, pane);
+    }
+    return pane;
+  };
 }
 
 export interface ChooseToolsOptions extends Lifecycle {
   title: string;
-  lines: readonly string[];
+  task?: string;
+  /** Short notes under the task (e.g. the Jev summary when it is already known). */
+  notes: readonly string[];
   roots: ToolNode[];
   startLabel: string;
   timeLimitMinutes: number;
   timeLimitChoices: readonly number[];
+  /** Jev's picks, arriving after the screen opens (TUI) or awaited first (other modes). */
+  preselection?: ToolPreselection;
 }
 
 /**
@@ -390,14 +555,25 @@ export interface ChooseToolsOptions extends Lifecycle {
 export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOptions): Promise<ToolTreeResult> {
   if (ctx.mode === "tui") {
     const result = await ctx.ui.custom<ToolTreeResult>((tui, theme, _keybindings, done) => {
+      let pending = options.preselection !== undefined;
+      const ticker = setInterval(() => {
+        if (pending) tui.requestRender();
+      }, 150);
+      ticker.unref?.();
+      options.preselection?.pending.finally(() => {
+        pending = false;
+        clearInterval(ticker);
+      });
       const view = new ToolTreeView(theme, {
         title: options.title,
-        lines: options.lines,
+        ...(options.task ? { task: options.task } : {}),
+        notes: options.notes,
         roots: options.roots,
         startLabel: options.startLabel,
         timeLimitMinutes: options.timeLimitMinutes,
         timeLimitChoices: options.timeLimitChoices,
-        rows: () => Math.max(12, tui.terminal.rows - 9),
+        ...(options.preselection ? { preselection: options.preselection } : {}),
+        rows: () => terminalRows(tui),
         requestRender: () => tui.requestRender(),
         onDone: done,
       });
@@ -406,9 +582,20 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
         handleInput: (data: string) => view.handleInput(data),
         handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
         invalidate: () => view.invalidate(),
+        dispose: () => clearInterval(ticker),
       };
-    });
+    }, SHEET);
     return result ?? { kind: "cancel" };
+  }
+  const notes = [...options.notes];
+  if (options.preselection) {
+    try {
+      const picked = await options.preselection.pending;
+      picked.apply(false);
+      notes.unshift(picked.message);
+    } catch {
+      notes.unshift("Jev could not pick tools; using the defaults from settings.");
+    }
   }
   const flat = leaves(options.roots);
   let outcome: ToolTreeResult = { kind: "cancel" };
@@ -417,8 +604,8 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
     screens: {
       tools: () => ({
         kind: "multiSelect",
-        title: options.title,
-        lines: [...options.lines],
+        title: `${options.title} · 2/2 tools`,
+        lines: [...(options.task ? [`Task: ${options.task}`] : []), ...notes],
         enableSearch: true,
         viewportSize: 14,
         items: flat.map((leaf) => ({
@@ -503,6 +690,7 @@ export async function showCandidateComparison(
   lifecycle: Lifecycle,
   options: { hasTraces?: boolean } = {},
 ): Promise<ComparisonOutcome> {
+  if (ctx.mode === "tui") return compareFullScreen(ctx, set, lifecycle, options);
   const ready = set.candidates.filter((candidate) => candidate.status === "done" && candidate.plan);
   const summaries = new Map(
     alignColumns(
@@ -634,6 +822,57 @@ export async function showCandidateComparison(
   });
   await runMenu(ctx, menu, { getState: () => undefined, signal: lifecycle.signal, isCurrent: lifecycle.isCurrent });
   return outcome;
+}
+
+async function compareFullScreen(
+  ctx: ExtensionContext,
+  set: CandidateSet,
+  lifecycle: Lifecycle,
+  options: { hasTraces?: boolean },
+): Promise<ComparisonOutcome> {
+  const catalog = modelCatalog(ctx);
+  const describe = (candidate: PlanCandidate) => {
+    // Planner labels are model specs (`provider/model:effort`); the session plan names its model.
+    const spec = parseModelSpec(candidate.label);
+    if (spec) return { name: catalog.name(spec), ...(spec.thinkingLevel ? { effort: spec.thinkingLevel } : {}) };
+    if (candidate.model) return { name: `Current plan · ${catalog.name(candidate.model)}` };
+    return { name: safeText(candidate.label) };
+  };
+  const result = await ctx.ui.custom<import("./compare-view.js").CompareResult>((tui, theme, _keybindings, done) => {
+    const view = new CompareView(theme, {
+      task: safeText(set.task),
+      candidates: set.candidates,
+      describe,
+      hasTraces: options.hasTraces === true,
+      renderMarkdown: (text, width) => new Markdown(text, 0, 0, getMarkdownTheme()).render(width),
+      rows: () => terminalRows(tui),
+      requestRender: () => tui.requestRender(),
+      onDone: done,
+    });
+    return {
+      render: (width: number) => view.render(width),
+      handleInput: (data: string) => view.handleInput(data),
+      handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
+      invalidate: () => view.invalidate(),
+    };
+  }, FULL_SCREEN);
+  if (!result || !lifecycle.isCurrent()) return { kind: "close" };
+  if (result.kind === "use") {
+    const candidate = set.candidates.find((plan) => plan.id === result.id);
+    return candidate ? { kind: "use", candidate } : { kind: "close" };
+  }
+  if (result.kind === "synthesize") {
+    return { kind: "synthesize", candidates: set.candidates.filter((plan) => result.ids.includes(plan.id)) };
+  }
+  return result.kind === "traces" ? { kind: "traces" } : { kind: "close" };
+}
+
+function formatContext(tokens: number) {
+  return tokens >= 1_000_000 ? `${Number((tokens / 1_000_000).toFixed(2))}M` : `${Math.round(tokens / 1_000)}k`;
+}
+
+function trimCost(value: number) {
+  return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/0+$/u, "");
 }
 
 function safeText(value: string) {

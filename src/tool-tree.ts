@@ -13,6 +13,8 @@ export interface ToolNode {
   selected?: boolean;
   /** Jev's probability that planners benefit from this leaf. */
   jev?: number;
+  /** Shown instead of the description when the row is highlighted. */
+  detail?: string;
 }
 
 export type GroupState = "all" | "some" | "none";
@@ -38,7 +40,7 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   if (input.scoutTargets.length > 0) {
     roots.push({
       id: "subagents",
-      label: `Subagents (${input.scoutTargets.join(", ")})`,
+      label: "Subagents",
       description: SUBAGENT_DESCRIPTION,
       selected: true,
     });
@@ -120,13 +122,14 @@ export function leafCapabilities(nodes: readonly ToolNode[]): ToolCapability[] {
 }
 
 /** Use Jev's picks as the defaults and keep its probabilities for display. */
-export function applyJevPick(nodes: readonly ToolNode[], pick: JevToolPick) {
+/** Show Jev's scores and, unless the user already chose, take its selection. */
+export function applyJevPick(nodes: readonly ToolNode[], pick: JevToolPick, keepSelection = false) {
   if (pick.kind !== "jev") return;
   for (const leaf of leaves(nodes)) {
     const probability = pick.probabilities[leaf.id];
     if (probability === undefined) continue;
     leaf.jev = probability;
-    leaf.selected = pick.selected[leaf.id] === true;
+    if (!keepSelection) leaf.selected = pick.selected[leaf.id] === true;
   }
 }
 

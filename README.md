@@ -43,33 +43,46 @@ Install only from sources you trust because Pi extensions run with Pi's permissi
 /plan multi Add rate limiting to the public API
 ```
 
-1. **Models** (screen 1/2): configured `planners` are preselected; any available model can be toggled.
-2. **Tools** (screen 2/2): a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools
-   (from pi-mcp-adapter's config and metadata cache). Enter or `→` opens a server or toolset to show its tools, `←`
-   closes it, and Space selects or clears a tool or a whole group; the mouse works too (click a label to open a
-   group, click a checkbox to toggle, scroll with the wheel). `[-]` marks a partly selected group. Jev preselects each tool and shows its percentage.
-   The **Time limit** row sets how long planners may run (default 45 min); at 80% each planner is steered to
-   submit its best plan, and one that stops without a plan is nudged once to submit it.
+The flow has four screens (Models, Tools, Planning, Compare), shown in a step bar at the top right. Every screen
+ends with a line of the keys that apply to the highlighted row, the next step first; mouse and trackpad work
+too. The screens are overlays, so all keys and wheel events reach them even in Pi's fullscreen mode.
+
+1. **Models**: one row per model with its effort and the model its subagents would run on. Space picks a model,
+   `←`/`→` sets its effort (from the levels the model supports), `/` filters, and Enter goes on to the tools. The
+   configured `planners` start picked. The line under the list shows the highlighted model's id, context window,
+   and price.
+2. **Tools**: a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools (from
+   pi-mcp-adapter's config and metadata cache). Enter or `→` opens a server or toolset, `←` closes it, and Space
+   selects or clears a tool or a whole group; `[-]` marks a partly selected group. Click a label to open a group,
+   click a checkbox to toggle. The highlighted row is described at the bottom. Jev picks tools while the screen is
+   open (a spinner shows it working); its picks apply when they arrive unless you already changed something.
+   The **Time limit** row (`←`/`→`) sets how long planners may run (default 45 min); at 80% each planner is steered
+   to submit its best plan, and one that stops without a plan is nudged once to submit it. `tab` jumps to **Start**.
    Each planner runs as `pi --mode rpc --no-session --no-extensions --extension <this package> …` in the project
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
    Planners and their subagents can only call the selected MCP tools; anything else is blocked with a list of
    what is allowed.
-3. **Live monitor**: while planners run, the top half lists every planner and every subagent it has fanned out
-   (indented under it), each with its model and effort, elapsed time, tool calls, subagent count, tokens, cost, and
-   current activity; a planner's totals include its subagents. The bottom half previews the selected agent's live
-   trace, or `s` shows all planners side by side. `↑↓` selects an agent and Enter opens its full trace (thinking,
-   text, every tool call and result, and a subagent's task), where `↑↓`/`PgUp`/`PgDn`/`g` scroll, `End` follows,
-   `tab` moves to the next agent, and Esc returns. `Esc` twice in the overview cancels the run. After the run,
-   **Watch planner traces** in the comparison menu reopens it. Subagent activity reaches the monitor through the
-   planner's `plan_subagents` progress updates.
-4. The comparison menu lists each candidate with its time, tool calls, tokens, and cost. Open one to read it
-   rendered as Markdown and choose **Use this plan**, or choose **Synthesize…** and pick two or more candidates.
-   The prompt editor is then prefilled with `/plan synthesize A,B `: write optional guidance after the letters ("B's
-   architecture with A's migration steps") with the editor's usual wrapping, multi-line input, and any editor
-   extension such as vim mode, then press Enter. An unsent draft is never overwritten. Synthesis runs in this
-   session, so the model can verify disagreements against the code and ask you questions before completing the
-   merged plan. `/plan multi` without a task likewise prefills `/plan multi ` for you to finish.
+3. **Planning** (full screen): the top lists every planner and, indented under it, every subagent it has fanned
+   out, with model, effort, time, tool calls, tokens, cost, and what it is doing now; a planner's totals include its
+   subagents, and the title line totals the run. Below, one lane per planner shows a live trace; selecting a
+   subagent shows it in its planner's lane. Each lane scrolls on its own: the wheel or trackpad scrolls the lane
+   under the pointer, `PgUp`/`PgDn` scroll the selected one, and `G` follows the end again (a scrolled lane says
+   "paused"). `s` switches to one full-width lane. Enter (or a double-click) opens an agent's full trace: thinking,
+   text, every tool call and result, and a subagent's task, with `↑↓`, `space`, `g`/`G` to move and `tab` for the
+   next agent. `esc` then `y` stops the run. When every planner is done the Compare screen opens, unless you are
+   reading a full trace; then `c` continues. Subagent activity reaches the monitor through the planner's
+   `plan_subagents` progress updates.
+4. **Compare** (full screen): a table of the plans (time, tools, subagents, tokens, cost, length) above a
+   scrollable preview of the highlighted plan. Enter uses it, `→` reads it full screen, and with several plans
+   Space marks plans and `m` merges the marked ones: the prompt editor is prefilled with `/plan synthesize A,B `
+   for optional guidance ("B's architecture with A's migration steps") with the editor's usual wrapping,
+   multi-line input, and any editor extension such as vim mode. An unsent draft is never overwritten. Synthesis
+   runs in this session, so the model can verify disagreements against the code and ask you questions before
+   completing the merged plan. `t` reopens the planning traces; `esc` keeps the plans for `/plan compare`.
+   `/plan multi` without a task likewise prefills `/plan multi ` for you to finish.
 5. The chosen or synthesized plan goes through the normal ready flow.
+
+In RPC mode the same steps use Pi's standard menus.
 
 From a ready plan, **Compare with other models…** (in the ready menu or `/plan`) runs the same flow with the
 current plan as candidate A; planners do not see it, so their plans stay independent.

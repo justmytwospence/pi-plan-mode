@@ -413,6 +413,12 @@ export function createCustomSelectorHarness(
       bold(text: string) {
         return text;
       },
+      bg(_color: string, text: string) {
+        return text;
+      },
+      italic(text: string) {
+        return text;
+      },
     },
     keybindingsOverride ?? {
       matches(data: string, key: string) {

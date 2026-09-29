@@ -174,8 +174,9 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
   const roots = sampleTree();
   const results: unknown[] = [];
   const view = new ToolTreeView(theme, {
-    title: "Plan with multiple models · 2/2 tools",
-    lines: ["Task: x"],
+    title: "Plan with multiple models",
+    task: "x",
+    notes: [],
     roots,
     startLabel: "Start planning with 2 models",
     timeLimitMinutes: 45,
@@ -185,7 +186,8 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
     onDone: (result) => results.push(result),
   });
   let screen = view.render(120).join("\n");
-  assert.match(screen, /› ▶ Start planning with 2 models · 4 tools selected/u);
+  assert.match(screen, /› ▶ Start planning with 2 models {2}4 of 7 tools · 45 min limit/u);
+  assert.match(screen, /⏎ start planning/u);
   assert.match(screen, /Time limit {2}‹ 45 min ›/u);
   assert.match(screen, /▾ \[ \] MCP servers +0\/3/u);
   assert.match(screen, /▸ \[ \] obsidian/u);
@@ -196,12 +198,13 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
   for (let index = 0; index < 7; index += 1) view.handleInput("\u001b[B"); // to obsidian
   screen = view.render(120).join("\n");
   assert.match(screen, /› +▸ \[ \] obsidian/u);
+  assert.match(screen, /space select all +⏎ open/u, "hints follow the highlighted row");
   view.handleInput("\u001b[C"); // expand obsidian
   view.handleInput(" "); // select all of obsidian
   screen = view.render(120).join("\n");
   assert.match(screen, /▾ \[x\] obsidian +2\/2/u);
   assert.match(screen, /\[x\] search_notes/u);
-  view.handleInput("g");
+  view.handleInput("\t"); // jump to Start
   view.handleInput("\r");
   assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 60 }]);
   assert.deepEqual(treeToSelection(roots).mcp, ["obsidian/*"]);
@@ -209,11 +212,40 @@ test("the tool tree view starts on Start, toggles and expands rows, and returns 
   assert.deepEqual(results.at(-1), { kind: "back" });
 });
 
+test("Jev's picks arrive after the tools screen opens, and never override your own changes", async () => {
+  for (const touchFirst of [false, true]) {
+    const roots = sampleTree();
+    let resolve: (value: { message: string; apply(keep: boolean): void }) => void = () => undefined;
+    const applied: boolean[] = [];
+    const view = new ToolTreeView(theme, {
+      title: "t",
+      notes: [],
+      roots,
+      startLabel: "Start",
+      timeLimitMinutes: 45,
+      timeLimitChoices: [45],
+      preselection: { pending: new Promise((done) => (resolve = done)) },
+      rows: () => 30,
+      requestRender: () => undefined,
+      onDone: () => undefined,
+    });
+    assert.match(view.render(120).join("\n"), /Jev is picking the tools this task needs…/u);
+    if (touchFirst) view.handleInput("n");
+    resolve({ message: "Jev picked 3 tools.", apply: (keep) => applied.push(keep) });
+    await new Promise((done) => setTimeout(done, 0));
+    assert.deepEqual(applied, [touchFirst]);
+    assert.match(
+      view.render(120).join("\n"),
+      touchFirst ? /Jev picked 3 tools\. Your own changes were kept\./u : /Jev picked 3 tools\.(?! Your)/u,
+    );
+  }
+});
+
 test("Enter opens and closes servers, Space selects them, and the mouse does both", () => {
   const roots = sampleTree();
   const view = new ToolTreeView(theme, {
     title: "tools",
-    lines: [],
+    notes: [],
     roots,
     startLabel: "Start",
     timeLimitMinutes: 45,
@@ -227,6 +259,7 @@ test("Enter opens and closes servers, Space selects them, and the mouse does bot
   view.handleInput("\r");
   assert.match(screen().join("\n"), /▾ \[ \] obsidian[\s\S]*\[ \] search_notes[\s\S]*\[ \] delete_note/u);
   view.handleInput("\u001b[B"); // search_notes
+  assert.match(screen().join("\n"), /Search notes/u, "the highlighted tool is described at the bottom");
   view.handleInput("\r");
   assert.match(screen().join("\n"), /▾ \[-\] obsidian +1\/2[\s\S]*\[x\] search_notes/u);
   view.handleInput("\u001b[A"); // back to obsidian
@@ -304,6 +337,8 @@ function tracePanes() {
   const planner = (id: string, model: string, toolCalls: number) => ({
     id,
     model,
+    name: id === "A" ? "Claude Fable 5.1" : "GPT-6 Astra",
+    effort: "xhigh",
     trace: new PlannerTrace(),
     progress: stats(toolCalls, 2),
     children: [] as Record<string, unknown>[],
@@ -341,6 +376,8 @@ function tracePanes() {
     {
       id: "A1",
       model: "anthropic/claude-opus-5-5:high",
+      name: "Claude Opus 5.5",
+      effort: "high",
       label: "schema audit",
       task: "Audit the schema module and report every validation gap.",
       trace: scout,
@@ -349,6 +386,8 @@ function tracePanes() {
     {
       id: "A2",
       model: "anthropic/claude-opus-5-5:high",
+      name: "Claude Opus 5.5",
+      effort: "high",
       label: "docs research",
       task: "Find the PyMC docs",
       trace: new PlannerTrace(),
@@ -358,68 +397,99 @@ function tracePanes() {
   return panes as never as import("../src/trace-view.js").TracePane[];
 }
 
-test("the monitor lists planners and their subagents, previews the selected one, and opens any full trace", () => {
+test("the monitor lists planners and their subagents with model, effort, and stats above one lane per planner", () => {
   const panes = tracePanes();
   const events: string[] = [];
   let live = true;
   const view = new TraceView(theme, {
-    title: "Planning with 2 models",
+    title: "Planning",
     getPanes: () => panes,
     isLive: () => live,
-    rows: () => 34,
+    rows: () => 40,
     requestRender: () => undefined,
     onCancel: () => events.push("cancel"),
     onClose: () => events.push("close"),
   });
   let screen = view.render(170).join("\n");
+  assert.match(screen, /Planning {2}2 planners · 2 subagents · 1m 05s · 2\.47M tok · \$3\.00/u);
+  assert.match(screen, /AGENT +MODEL +EFFORT +TIME +TOOLS +TOKENS +COST +NOW/u);
+  assert.match(screen, / › \S A +Claude Fable 5\.1 +xhigh +1m 05s +12 +1\.23M +\$1\.50 +thinking/u);
   assert.match(
     screen,
-    /› … A +anthropic\/claude-fable-5-1:xhigh +1m 05s +12 tools +2 subagents +1.23M tok +\$1.50 +thinking/u,
+    /├ \S A1 schema audit +Claude Opus 5\.5 +high +1m 05s +4 +1\.23M +\$1\.50 +web_search "pymc horseshoe"/u,
   );
-  assert.match(
-    screen,
-    /├ … A1 +anthropic\/claude-opus-5-5:high +schema audit +1m 05s +4 tools +1.23M tok +\$1.50 +web_search "pymc horseshoe"/u,
-  );
-  assert.match(screen, /└ ✓ A2 +anthropic\/claude-opus-5-5:high +docs research .*done/u);
-  assert.match(screen, /… B +openai-codex\/gpt-6-astra:xhigh/u);
-  assert.match(
-    screen,
-    /A · anthropic\/claude-fable-5-1:xhigh\n[\s\S]*read a59\.ts/u,
-    "the preview follows the selected agent",
-  );
+  assert.match(screen, /└ ✓ A2 docs research +Claude Opus 5\.5 +high .*done/u);
+  // Lanes: one per planner, side by side.
+  assert.match(screen, /── A · Claude Fable 5\.1 ─+ live ── │ ── B · GPT-6 Astra ─+ live ──/u);
+  assert.match(screen, /⋯ read a59\.ts +│ ⋯ grep b59/u);
 
-  view.handleInput("\u001b[B"); // select A1
+  view.handleInput("\u001b[B"); // select A1: it takes over A's lane
   screen = view.render(170).join("\n");
-  assert.match(screen, /A1 · anthropic\/claude-opus-5-5:high · schema audit\n[\s\S]*Scout is thinking hard\./u);
-  assert.match(screen, /⋯ web_search "pymc horseshoe"/u);
+  assert.match(screen, /── A1 schema audit · Claude Opus 5\.5 ─+.*│ ── B · GPT-6 Astra/u);
+  assert.match(screen, /Scout is thinking hard\./u);
+  assert.match(screen, /⏎ open A1's full trace/u);
 
   view.handleInput("\r"); // open A1's full trace
   screen = view.render(170).join("\n");
-  assert.match(screen, /A1 · anthropic\/claude-opus-5-5:high · schema audit/u);
-  assert.match(screen, /Task: Audit the schema module/u);
-  assert.match(screen, /Esc back to overview/u);
+  assert.match(screen, /A1 · schema audit {2}Claude Opus 5\.5 · effort high/u);
+  assert.match(screen, /Task +Audit the schema module/u);
+  assert.match(screen, /esc back to overview/u);
   view.handleInput("\t"); // next agent: A2
-  assert.match(
-    view.render(170).join("\n"),
-    /A2 · anthropic\/claude-opus-5-5:high · docs research[\s\S]*\(no activity yet\)/u,
-  );
+  assert.match(view.render(170).join("\n"), /A2 · docs research[\s\S]*\(thinking…\)/u);
   view.handleInput("\u001b"); // back
-  assert.doesNotMatch(view.render(170).join("\n"), /Esc back to overview/u);
+  assert.doesNotMatch(view.render(170).join("\n"), /esc back to overview/u);
 
-  view.handleInput("s"); // planners side by side
-  screen = view.render(170).join("\n");
-  assert.match(screen, /⋯ read a59\.ts +│ ⋯ grep b59/u);
+  view.handleInput("s"); // one lane: the selected agent only
+  assert.doesNotMatch(view.render(170).join("\n"), / │ ── B/u);
+  view.handleInput("s");
 
   view.handleInput("\u001b");
-  assert.match(view.render(170).join("\n"), /Cancel every planner\?/u);
+  assert.match(view.render(170).join("\n"), /Stop every planner and discard this run\?/u);
   view.handleInput("n");
   assert.deepEqual(events, []);
   view.handleInput("\u001b");
-  view.handleInput("\u001b");
+  view.handleInput("y");
   assert.deepEqual(events, ["cancel"]);
   live = false;
   view.handleInput("\u001b");
   assert.deepEqual(events, ["cancel", "close"]);
+});
+
+test("each lane scrolls on its own with the wheel or trackpad, and PgUp/End work on the selected lane", () => {
+  const panes = tracePanes();
+  const view = new TraceView(theme, {
+    title: "Planning",
+    getPanes: () => panes,
+    isLive: () => true,
+    rows: () => 40,
+    requestRender: () => undefined,
+    onCancel: () => undefined,
+    onClose: () => undefined,
+  });
+  let lines = view.render(170);
+  const laneRow = lines.findIndex((line) => line.includes("⋯ read a59.ts"));
+  // Wheel over the right lane scrolls only B.
+  view.handleMouse({ type: "wheel", button: "none", x: 120, y: laneRow, wheelDelta: -3 } as never);
+  view.handleMouse({ type: "wheel", button: "none", x: 120, y: laneRow, wheelDelta: -3 } as never);
+  lines = view.render(170);
+  let screen = lines.join("\n");
+  assert.match(screen, /── A · Claude Fable 5\.1 ─+ live ── │ ── B · GPT-6 Astra ─+ paused · 6 more ↓ ──/u);
+  assert.match(screen, /⋯ read a59\.ts +│ /u, "A still follows its end");
+  assert.doesNotMatch(screen, /grep b59/u);
+  // Keyboard scrolls the selected lane (A).
+  view.handleInput("\u001b[5~"); // PgUp
+  screen = view.render(170).join("\n");
+  assert.match(screen, /── A · Claude Fable 5\.1 ─+ paused · \d+ more ↓ ──/u);
+  assert.doesNotMatch(screen, /read a59\.ts/u);
+  view.handleInput("G"); // follow A again
+  screen = view.render(170).join("\n");
+  assert.match(screen, /read a59\.ts/u);
+  assert.match(screen, /GPT-6 Astra ─+ paused/u, "B stays where you left it");
+  view.handleMouse({ type: "wheel", button: "none", x: 120, y: laneRow, wheelDelta: 20 } as never);
+  assert.match(view.render(170).join("\n"), /GPT-6 Astra ─+ live/u, "scrolling to the end follows again");
+  // Double-clicking a lane opens that agent's full trace.
+  view.handleMouse({ type: "click", button: "left", x: 120, y: laneRow, clickCount: 2 } as never);
+  assert.match(view.render(170).join("\n"), /B {2}GPT-6 Astra · effort xhigh/u);
 });
 
 test("in a full trace the agent scrolls from the top and follows again with End", () => {
@@ -439,9 +509,35 @@ test("in a full trace the agent scrolls from the top and follows again with End"
   let screen = view.render(120).join("\n");
   assert.match(screen, /read a0\.ts/u);
   assert.doesNotMatch(screen, /read a59\.ts/u);
+  assert.match(screen, /lines 1–\d+ of 60/u);
   view.handleInput("\u001b[F"); // End
   screen = view.render(120).join("\n");
   assert.match(screen, /read a59\.ts/u);
+  assert.match(screen, /of 60 · following/u);
+});
+
+test("when the run ends while you read a trace, the monitor waits and offers the comparison", () => {
+  const panes = tracePanes();
+  const events: string[] = [];
+  let live = true;
+  const view = new TraceView(theme, {
+    title: "Planning",
+    getPanes: () => panes,
+    isLive: () => live,
+    rows: () => 30,
+    requestRender: () => undefined,
+    onCancel: () => events.push("cancel"),
+    onClose: () => events.push("close"),
+  });
+  assert.equal(view.isBusy(), false);
+  view.handleInput("\r");
+  assert.equal(view.isBusy(), true);
+  live = false;
+  view.markFinished();
+  view.handleInput("\u001b");
+  assert.match(view.render(160).join("\n"), /c compare plans/u);
+  view.handleInput("c");
+  assert.deepEqual(events, ["close"]);
 });
 
 class RpcChild extends EventEmitter {

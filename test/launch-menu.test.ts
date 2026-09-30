@@ -7,7 +7,7 @@ import { createRpcHarness, createTuiHarness } from "@narumitw/pi-tui-kit/testing
 import { test } from "vitest";
 import planMode from "../src/plan-mode.js";
 import { readPlanModeSettings } from "../src/settings.js";
-import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
+import { builtinTool, createCustomSelectorHarness, createMockContext, createMockPi, extensionTool } from "./support.js";
 
 const REQUIRED_PLAN_TOOLS = ["plan_mode_question", "plan_mode_complete"];
 const STARTUP_TOOLS = ["read", "write", "custom", ...REQUIRED_PLAN_TOOLS];
@@ -39,6 +39,39 @@ async function waitForOpenCount(tui: ReturnType<typeof createTuiHarness>, count:
     } else await new Promise<void>((resolve) => setTimeout(resolve, 5));
   }
   assert.equal(tui.openCount, count, "expected the launch menu to remain interactive");
+}
+
+/** Kit menus render in the TUI harness; the tools screen is a sheet, so it gets its own harness. */
+function withToolsSheet(tui: ReturnType<typeof createTuiHarness>, width = 100) {
+  let sheet: ReturnType<typeof createCustomSelectorHarness> | undefined;
+  let sheets = 0;
+  const custom = ((factory: unknown, options?: unknown) => {
+    if (options === undefined) return tui.custom(factory as never);
+    sheet = createCustomSelectorHarness(factory, width, undefined, 30);
+    sheets += 1;
+    return sheet.resultPromise;
+  }) as typeof tui.custom;
+  return {
+    custom,
+    async open(count = 1) {
+      const deadline = Date.now() + 2_000;
+      while (sheets < count && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 5));
+      assert.equal(sheets, count, "expected the tools screen to open");
+      assert.ok(sheet);
+      return sheet;
+    },
+  };
+}
+
+function latestState(mock: ReturnType<typeof launchFixture>) {
+  return mock.entries.at(-1)?.data as
+    | {
+        enabled?: boolean;
+        selectedToolNames?: string[];
+        workflowToolPolicy?: { allowedNames: string[] };
+        workflowToolChoice?: { jevPending?: boolean; selected?: string[] };
+      }
+    | undefined;
 }
 
 function launchFixture() {
@@ -253,66 +286,72 @@ test("the launch menu starts Plan mode only after explicit confirmation", async 
   assert.equal(context.statuses.get("plan-mode"), "plan active");
 });
 
-test("launch tool choices remain draft-only until Done starts Plan mode", async () => {
+test("launch tool choices open the tools tree and stay drafts until Start", async () => {
   const mock = launchFixture();
   const tui = createTuiHarness();
-  const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+  const tools = withToolsSheet(tui);
+  const context = createMockContext({ mode: "tui", hasUI: true, custom: tools.custom });
   await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, context.ctx);
 
   const running = mock.commands.get("plan")?.handler("", context.ctx) as Promise<unknown>;
   await waitForOpenCount(tui, 1, running);
   tui.press("tui.select.down");
   tui.press("tui.select.confirm");
-  await waitForOpenCount(tui, 2);
-  assert.match(tui.render().join("\n"), /Choose Plan policy allowlist/);
-  assert.equal(tui.isFocusable, true);
-  tui.setFocused(true);
-  assert.equal(tui.focused, true);
-
-  // read is selected, write is unavailable, custom is opt-in, then the pinned Done action.
-  tui.press("tui.select.down");
-  tui.press("tui.select.down");
-  tui.press("tui.select.confirm");
-  await settleWithin(tui.waitForPending(), "the staged tool toggle");
-  await waitForOpenCount(tui, 3, running);
-  assert.deepEqual(mock.rawPi.getActiveTools(), STARTUP_TOOLS);
+  const sheet = await tools.open();
+  let screen = sheet.render().join("\n");
+  assert.match(screen, /Start Plan mode +what Plan mode lets the model use/u);
+  assert.match(screen, /Jev picks from these when your first Plan message arrives/u);
+  // write is blocked by policy, so only read and the opt-in custom tool are offered.
+  assert.match(screen, /▾ \[-\] Other tools +1\/2[\s\S]*\[x\] read[\s\S]*\[ \] custom/u);
+  assert.doesNotMatch(screen, /\] write/u);
   assert.equal(mock.entries.length, 0);
-  tui.press("tui.select.down");
-  tui.press("tui.select.confirm");
+
+  sheet.handleInput("tui.select.down");
+  sheet.handleInput("tui.select.down"); // custom
+  sheet.handleInput(" ");
+  sheet.handleInput("\r"); // Enter asks first
+  screen = sheet.render().join("\n");
+  assert.match(screen, /Start Plan mode\? +2 of 2 tools/u);
+  assert.equal(mock.entries.length, 0);
+  sheet.handleInput("\r");
   await settleWithin(running, "launch menu completion");
 
   assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
   assert.equal(mock.sentUserMessages.length, 0);
+  assert.equal(context.statuses.get("plan-mode"), "plan active");
+  const state = latestState(mock);
+  assert.deepEqual(state?.selectedToolNames, ["read", "custom"]);
+  assert.deepEqual(state?.workflowToolPolicy?.allowedNames, ["read", "custom"]);
+  assert.equal(state?.workflowToolChoice?.jevPending, undefined, "your own choice is not replaced by Jev");
 });
 
 test("launch tool drafts and help navigation cancel without side effects", async () => {
   const mock = launchFixture();
   const tui = createTuiHarness();
-  const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+  const tools = withToolsSheet(tui);
+  const context = createMockContext({ mode: "tui", hasUI: true, custom: tools.custom });
   await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, context.ctx);
 
   const running = mock.commands.get("plan")?.handler("", context.ctx) as Promise<unknown>;
   await waitForOpenCount(tui, 1, running);
   tui.press("tui.select.down");
   tui.press("tui.select.confirm");
-  await waitForOpenCount(tui, 2);
-  tui.press("tui.select.down");
-  tui.press("tui.select.down");
-  tui.press("tui.select.confirm");
-  await settleWithin(tui.waitForPending(), "the cancelled staged tool toggle");
-  await waitForOpenCount(tui, 3, running);
-  tui.press("tui.select.cancel");
-  await waitForOpenCount(tui, 4, running);
+  const sheet = await tools.open();
+  sheet.handleInput("tui.select.down");
+  sheet.handleInput("tui.select.down");
+  sheet.handleInput(" ");
+  sheet.handleInput("tui.select.cancel");
+  await waitForOpenCount(tui, 2, running);
   assert.deepEqual(mock.rawPi.getActiveTools(), STARTUP_TOOLS);
   assert.equal(mock.entries.length, 0);
 
   tui.press("tui.select.down");
   tui.press("tui.select.down");
   tui.press("tui.select.confirm");
-  await waitForOpenCount(tui, 5, running);
+  await waitForOpenCount(tui, 3, running);
   assert.match(tui.render().join("\n"), /read-only exploration/i);
   tui.press("tui.select.cancel");
-  await waitForOpenCount(tui, 6, running);
+  await waitForOpenCount(tui, 4, running);
   tui.press("tui.select.cancel");
   await running;
 
@@ -355,7 +394,7 @@ test("RPC stages tool changes until the explicit start action", async () => {
   const rpc = createRpcHarness([
     { kind: "select", response: "Choose tools, then start…" },
     { kind: "select", response: "[ ] custom" },
-    { kind: "select", response: "Done — start with this policy" },
+    { kind: "select", response: "Start Plan mode" },
   ]);
   const context = createMockContext({
     mode: "rpc",
@@ -370,6 +409,7 @@ test("RPC stages tool changes until the explicit start action", async () => {
   rpc.assertConsumed();
   assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
   assert.equal(mock.sentUserMessages.length, 0);
+  assert.deepEqual(latestState(mock)?.selectedToolNames, ["read", "custom"]);
 });
 
 test("reopened launch picker uses live active tools registered after session start", async () => {
@@ -428,22 +468,18 @@ test("launch picker retains and sanitizes configured names pending registration"
   const dialog = rpc.dialogs[0];
   assert.ok(dialog);
   assert.match(dialog.title, /Pending registration: late_tool, x+…, start-with-tools, \+1 more/u);
-  assert.ok(
-    (dialog.options ?? []).some(
-      (option) => /late_tool.*Not registered yet/iu.test(option) && !option.includes("\u001b"),
-    ),
-  );
   assert.equal(JSON.stringify(dialog).includes("\u001b"), false);
   assert.equal(JSON.stringify(dialog).includes("x".repeat(200)), false);
   assert.match(JSON.stringify(dialog), /start-with-tools/u);
   assert.equal(mock.entries.length, 0);
 
   const tui = createTuiHarness({ width: 34, rows: 18 });
-  const tuiContext = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+  const tools = withToolsSheet(tui, 34);
+  const tuiContext = createMockContext({ mode: "tui", hasUI: true, custom: tools.custom });
   const running = mock.commands.get("plan")?.handler("tools", tuiContext.ctx) as Promise<unknown>;
-  await waitForOpenCount(tui, 1, running);
-  assert.ok(tui.render().every((line) => visibleWidth(line) <= 34));
-  tui.press("ctrl+c");
+  const sheet = await tools.open();
+  assert.ok(sheet.render().every((line) => visibleWidth(line) <= 34));
+  sheet.handleInput("\u0003");
   await running;
   tui.dispose();
   assert.equal(mock.entries.length, 0);
@@ -501,34 +537,39 @@ test("session replacement and shutdown discard staged launch tools", async () =>
   }
 });
 
-test("/plan tools reuses the pre-start draft and cancellation has no side effects", async () => {
+test("/plan tools opens the tools tree and cancellation has no side effects", async () => {
   for (const ending of ["cancel", "done"] as const) {
     const mock = launchFixture();
     const tui = createTuiHarness();
-    const context = createMockContext({ mode: "tui", hasUI: true, custom: tui.custom });
+    const tools = withToolsSheet(tui);
+    const context = createMockContext({ mode: "tui", hasUI: true, custom: tools.custom });
     const running = mock.commands.get("plan")?.handler("tools", context.ctx) as Promise<unknown>;
-    await waitForOpenCount(tui, 1, running);
-    assert.match(tui.render().join("\n"), /Choose Plan policy allowlist/);
+    const sheet = await tools.open();
+    assert.match(sheet.render().join("\n"), /Start Plan mode +what Plan mode lets the model use/u);
     assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
     assert.equal(mock.entries.length, 0);
 
-    if (ending === "cancel") tui.press("tui.select.cancel");
+    if (ending === "cancel") sheet.handleInput("tui.select.cancel");
     else {
-      // read, unavailable write, custom, then the pinned Done action.
-      for (let index = 0; index < 3; index += 1) tui.press("tui.select.down");
-      tui.press("tui.select.confirm");
+      sheet.handleInput("\r");
+      sheet.handleInput("\r");
     }
     await settleWithin(running, `${ending} /plan tools completion`);
 
     assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
     assert.equal(context.statuses.get("plan-mode"), ending === "done" ? "plan active" : undefined);
     assert.equal(mock.entries.length > 0, ending === "done");
+    if (ending === "done") {
+      // Untouched: the defaults apply and Jev may still narrow them at the first prompt.
+      assert.equal(latestState(mock)?.selectedToolNames, undefined);
+      assert.equal(latestState(mock)?.workflowToolChoice?.jevPending, true);
+    }
   }
 });
 
 test("/plan tools compatibility shortcut stages directly in RPC", async () => {
   const mock = launchFixture();
-  const rpc = createRpcHarness([{ kind: "select", response: "Done — start with this policy" }]);
+  const rpc = createRpcHarness([{ kind: "select", response: "Start Plan mode" }]);
   const context = createMockContext({
     mode: "rpc",
     hasUI: true,
@@ -539,15 +580,19 @@ test("/plan tools compatibility shortcut stages directly in RPC", async () => {
 
   await mock.commands.get("plan")?.handler("tools", context.ctx);
   rpc.assertConsumed();
-  assert.match(rpc.dialogs[0]?.title ?? "", /Choose Plan policy allowlist/);
+  assert.match(rpc.dialogs[0]?.title ?? "", /^Start Plan mode/u);
   assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
+  assert.equal(context.statuses.get("plan-mode"), "plan active");
 });
 
-test("active Plan mode locks Settings and /plan tools", async () => {
+test("active Plan mode locks Settings, and /plan tools changes the running workflow's tools", async () => {
   const mock = launchFixture();
+  const tui = createTuiHarness();
+  const tools = withToolsSheet(tui);
   const context = createMockContext({
     mode: "tui",
     hasUI: true,
+    custom: tools.custom,
     select: async (_title: string, options: string[]) => {
       assert.equal(options.includes("Configure Plan-mode tools"), false);
       assert.equal(options.includes("Settings…"), false);
@@ -555,13 +600,26 @@ test("active Plan mode locks Settings and /plan tools", async () => {
     },
   });
   await mock.commands.get("plan")?.handler("start", context.ctx);
-  const beforeEntries = mock.entries.length;
-  await mock.commands.get("plan")?.handler("", context.ctx);
-  await mock.commands.get("plan")?.handler("tools", context.ctx);
+  assert.deepEqual(latestState(mock)?.workflowToolPolicy?.allowedNames, ["read"]);
 
-  assert.match(context.notifications.at(-1)?.message ?? "", /before starting|locked/i);
+  const running = mock.commands.get("plan")?.handler("tools", context.ctx) as Promise<unknown>;
+  const sheet = await tools.open();
+  let screen = sheet.render().join("\n");
+  assert.match(screen, /Plan mode tools +what Plan mode lets the model use/u);
+  assert.match(screen, /Changes apply from the next tool call/u);
+  sheet.handleInput("tui.select.down");
+  sheet.handleInput("tui.select.down"); // custom
+  sheet.handleInput(" ");
+  sheet.handleInput("g");
+  screen = sheet.render().join("\n");
+  assert.match(screen, /▶ Apply/u);
+  sheet.handleInput("\r");
+  await settleWithin(running, "/plan tools while active");
+
   assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
-  assert.equal(mock.entries.length, beforeEntries);
+  assert.deepEqual(latestState(mock)?.workflowToolPolicy?.allowedNames, ["read", "custom"]);
+  assert.match(context.notifications.at(-1)?.message ?? "", /Plan-mode tools: Other tools/u);
+  assert.equal(context.statuses.get("plan-mode"), "plan active");
 });
 
 test("/plan tools rejects non-interactive modes before changing state", async () => {

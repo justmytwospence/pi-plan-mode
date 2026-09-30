@@ -67,6 +67,8 @@ An effective active tool named `bash` or `powershell` remains subject to its lim
 
 A selection accepted through **Choose tools, then start…** or `/plan tools` is stored in that Pi session and takes precedence over `defaultPlanTools` when the session resumes.
 The global setting remains the policy baseline for fresh sessions and sessions without an explicit selection.
+Unless you changed the selection in the tools tree, Jev (`jevToolSelection`, `jevThreshold`, `jevModel`) narrows the workflow's policy at its first prompt, in a `before_agent_start` handler and so before the first-context resolution above; it only chooses among the names, toolsets, MCP tools, and command grants you opted into.
+`/plan tools` during an active workflow replaces that workflow's policy (names, MCP allowlist, and grants) from the next tool call; it does not change `defaultPlanTools` or the stored session selection.
 Settings saves immediately, but saved policy names and thinking apply only when a later Plan workflow starts; they never mutate active schemas or a workflow already in progress.
 
 ### Plan reinjection

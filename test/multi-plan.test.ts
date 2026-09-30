@@ -384,7 +384,7 @@ function multiPlanHarness(
           const picked = await options.preselection?.pending;
           picked?.apply(false);
           calls.chooseTools?.push({ ...options, jevMessage: picked?.message });
-          return (extraDependencies.toolsResult as unknown) ?? { kind: "start", timeLimitMinutes: 45 };
+          return (extraDependencies.toolsResult as unknown) ?? { kind: "start", timeLimitMinutes: 45, touched: false };
         },
         runPlannersWithProgress: async (
           _ctx: unknown,
@@ -720,7 +720,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
     if (scenario === "jev") {
       assert.deepEqual(
         pickCalls[0]?.capabilities.map((capability) => capability.id),
-        ["shell", "toolset:web/web_search", "mcp:obsidian/search_notes", "mcp:obsidian/delete_note"],
+        ["toolset:web/web_search", "mcp:obsidian/search_notes", "mcp:obsidian/delete_note"],
       );
       assert.deepEqual(leaves, {
         shell: true,

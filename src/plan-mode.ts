@@ -144,6 +144,7 @@ import {
   type PlanModeState,
   type PlanModeWorkflowToolPolicy,
   restorePlanModeState,
+  type WorkflowToolChoice,
 } from "./state.js";
 import { createSubagentReporter, type SubagentMeta } from "./subagent-progress.js";
 import {
@@ -151,10 +152,21 @@ import {
   classifyPlanModeTool,
   findBlockedCommandSegment,
   findBlockedPowerShellCommandSegment,
+  isBuiltinTool,
   readCommand,
 } from "./tool-policy.js";
-import { compareTools, snapshotPlanModeSelectedNames, toolPolicyLabel } from "./tool-selection.js";
-import { applyJevPick, buildToolTree, leafCapabilities, type ToolNode, treeToSelection } from "./tool-tree.js";
+import { compareTools, snapshotPlanModeSelectedNames } from "./tool-selection.js";
+import {
+  applyJevPick,
+  buildSessionToolTree,
+  buildToolTree,
+  leafCapabilities,
+  leaves,
+  restoreTreeSelection,
+  sessionToolChoice,
+  type ToolNode,
+  treeToSelection,
+} from "./tool-tree.js";
 import type { ToolPreselection } from "./tool-tree-view.js";
 import type { TracePane } from "./trace-view.js";
 import { WorkflowMutex, type WorkflowMutexOwner } from "./workflow-mutex.js";
@@ -628,17 +640,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       }
       if (command === "tools") {
         if (savedPlanBlocksNewWorkflow(ctx, state.savedPlan !== undefined && !state.enabled)) return;
-        if (state.enabled) {
-          const message =
-            "Plan-mode tools are locked while Planning is active. Exit Plan mode and choose tools before starting again.";
-          if (!ctx.hasUI) throw new Error(message);
-          ctx.ui.notify(message, "warning");
-          return;
-        }
         if (!ctx.hasUI) {
           throw new Error("/plan tools requires TUI or RPC mode and is unavailable here.");
         }
-        await showLaunchMenu(ctx, "tools");
+        if (state.enabled && !workflowMutex.isOwner(workflowOwner)) {
+          ctx.ui.notify("Plan-mode tools belong to another workflow right now.", "warning");
+          return;
+        }
+        await chooseSessionTools(ctx, captureMenuLifecycle());
         return;
       }
       if (prompt) {
@@ -961,8 +970,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         block: true,
         reason: workflowDesiredToolNames().has(event.toolName)
           ? `Plan mode blocks tool '${event.toolName}' because it was not available when the active Plan workflow froze its tool policy. Exit Plan mode, then start again after the tool is active.`
-          : `Plan mode blocks tool '${event.toolName}' because it is not selected by the Plan policy. Exit Plan mode, then enable it with /plan tools or defaultPlanTools before starting again.`,
+          : `Plan mode blocks tool '${event.toolName}' because it is not selected by the Plan policy. The user can allow it for this plan with /plan tools, or for every plan with defaultPlanTools.`,
       };
+    }
+    const mcpAllow = state.workflowToolChoice?.mcpAllow;
+    if (event.toolName === "mcp" && mcpAllow && !isPlannerProcess()) {
+      const verdict = checkMcpCall(event.input, mcpAllow);
+      if (!verdict.allowed) return { block: true, reason: verdict.reason };
     }
     if (event.toolName === "bash") {
       const command = readCommand(event.input);
@@ -1015,25 +1029,48 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     return { messages: (state.enabled ? withGrantNote(messages) : messages) as typeof event.messages };
   });
 
-  /** Tell the main model which extra commands bash may run, right after the Plan-mode contract. */
+  /**
+   * Tell the main model which extra commands bash may run and which MCP tools it may call, right
+   * after the Plan-mode contract.
+   */
   function withGrantNote(messages: unknown[]) {
     const grants = mainSessionGrants();
-    if (grants.length === 0) return messages;
+    const mcpAllow = planModePolicyToolNames().includes("mcp") ? state.workflowToolChoice?.mcpAllow : undefined;
+    if (grants.length === 0 && !mcpAllow) return messages;
     const contract = latestModeContract(messages);
-    const note = {
-      role: "custom",
-      customType: "plan-mode-command-grants",
-      content: `Plan mode also lets bash run these commands, one per call (a quoted heredoc may feed it input): ${describeGrants(grants)}. Use them to inspect; the rules against changing anything still apply.`,
-      display: false,
-      timestamp: 0,
-    };
+    const notes = [
+      ...(grants.length > 0
+        ? [
+            {
+              role: "custom",
+              customType: "plan-mode-command-grants",
+              content: `Plan mode also lets bash run these commands, one per call (a quoted heredoc may feed it input): ${describeGrants(grants)}. Use them to inspect; the rules against changing anything still apply.`,
+              display: false,
+              timestamp: 0,
+            },
+          ]
+        : []),
+      ...(mcpAllow
+        ? [
+            {
+              role: "custom",
+              customType: "plan-mode-mcp-tools",
+              content: `Through the mcp tool, Plan mode lets you call only these MCP tools (server/tool; * means every tool on that server): ${mcpAllow.join(", ") || "none"}. Use mcp search or describe to see their arguments, and use them only to read.`,
+              display: false,
+              timestamp: 0,
+            },
+          ]
+        : []),
+    ];
     const at = contract ? contract.index + 1 : messages.length;
-    return [...messages.slice(0, at), note, ...messages.slice(at)];
+    return [...messages.slice(0, at), ...notes, ...messages.slice(at)];
   }
 
+  /** The command grants on in this session: the workflow's choice, else those settings turn on. */
   function mainSessionGrants() {
+    const chosen = state.enabled ? state.workflowToolChoice?.grants : undefined;
     return Object.entries(settings.commandGrants ?? {})
-      .filter(([, grant]) => grant.planMode)
+      .filter(([id, grant]) => (chosen ? chosen.includes(id) : grant.planMode))
       .map(([id, grant]) => resolveGrant(id, grant, expandHome));
   }
 
@@ -1099,6 +1136,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       persistState();
       updateUi(ctx);
     }
+  });
+
+  // After the handler above has restored this session's state for its first prompt.
+  pi.on("before_agent_start", async (event, ctx) => {
+    if (!state.enabled || !state.workflowToolChoice?.jevPending || isPlannerProcess()) return;
+    if (!workflowMutex.isOwner(workflowOwner)) return;
+    await pickWorkflowToolsWithJev(ctx, event.prompt);
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -1170,6 +1214,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   function enterPlanMode(
     ctx: ExtensionContext,
     candidate: Pick<PlanModeState, "selectedToolNames" | "selectedToolKeys"> = state,
+    toolChoice: WorkflowToolChoice = defaultWorkflowToolChoice(),
   ) {
     if (!state.enabled && !allowModeTransition(ctx, "start Plan mode")) return false;
     bindWorkflowSessionIfNeeded(ctx);
@@ -1201,6 +1246,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
         pendingImplementationRuntime: undefined,
         selectedToolNames: candidate.selectedToolNames,
         selectedToolKeys: candidate.selectedToolKeys,
+        workflowToolChoice: toolChoice,
       };
       beginWorkflowToolPolicy();
       applyPlanThinkingLevel();
@@ -1246,6 +1292,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       activeImplementation: undefined,
       pendingImplementationRuntime: undefined,
       workflowToolPolicy: undefined,
+      workflowToolChoice: undefined,
       manualThinkingLevel: undefined,
     };
     if (wasEnabled) {
@@ -1836,6 +1883,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       activeImplementation: undefined,
       pendingImplementationRuntime: undefined,
       workflowToolPolicy: undefined,
+      workflowToolChoice: undefined,
       manualThinkingLevel: undefined,
     };
     restoreThinkingLevel();
@@ -1992,6 +2040,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
             retention,
           },
       workflowToolPolicy: undefined,
+      workflowToolChoice: undefined,
       manualThinkingLevel: undefined,
     };
     if (wasEnabled) {
@@ -2122,34 +2171,34 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     });
   }
 
-  async function showLaunchMenu(ctx: ExtensionContext, initialScreen: "main" | "tools" = "main") {
+  async function showLaunchMenu(ctx: ExtensionContext) {
     const lifecycle = captureMenuLifecycle();
     if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
     const ui = await loadInteractiveUi();
     if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
-    const tools = selectableTools();
-    const activeToolNames = new Set(safeGetActiveTools());
-    const initialSelectedNames = snapshotPlanModeSelectedNames(tools, toolSelectionSnapshot());
-    const retainsInactiveSelection =
-      state.selectedToolNames !== undefined ||
-      state.selectedToolKeys !== undefined ||
-      settings.defaultPlanTools !== undefined;
-    const retainedInactiveNames = retainsInactiveSelection ? initialSelectedNames : new Set<string>();
-    const registeredNames = new Set(tools.map((tool) => tool.name));
-    const pendingNames = Array.from(retainedInactiveNames).filter((name) => !registeredNames.has(name));
     await ui.showPlanLaunchMenu(ctx, {
       statusText: planModeHelperToolsAvailable(safeGetActiveTools())
         ? "Status: Off — visible Plan helpers stay inactive until /plan starts."
         : "Status: Off — required Plan helpers are unavailable under the active tool policy.",
-      initialScreen,
-      getSelectedNames: () => snapshotPlanModeSelectedNames(tools, toolSelectionSnapshot()),
-      toolSummary: (selectedNames) => {
+      toolSummary: () => {
+        const tools = selectableTools();
+        const activeToolNames = new Set(safeGetActiveTools());
+        const selectedNames = snapshotPlanModeSelectedNames(tools, toolSelectionSnapshot());
         const allowed = tools
           .filter(
             (tool) => activeToolNames.has(tool.name) && selectedNames.has(tool.name) && canSelectToolInPlanMode(tool),
           )
           .map((tool) => tool.name);
-        const pending = pendingNames.filter((name) => selectedNames.has(name)).map(terminalToolName);
+        const retained =
+          state.selectedToolNames !== undefined ||
+          state.selectedToolKeys !== undefined ||
+          settings.defaultPlanTools !== undefined;
+        const registered = new Set(tools.map((tool) => tool.name));
+        const pending = retained
+          ? Array.from(selectedNames)
+              .filter((name) => !registered.has(name))
+              .map(terminalToolName)
+          : [];
         const visiblePending = pending.slice(0, 3);
         const pendingSuffix =
           pending.length > visiblePending.length ? `, +${pending.length - visiblePending.length} more` : "";
@@ -2158,44 +2207,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           ...(pending.length > 0 ? [`Pending registration: ${visiblePending.join(", ")}${pendingSuffix}.`] : []),
         ].join(" ");
       },
-      tools: [
-        ...tools.map((tool) => {
-          const selectable = canSelectToolInPlanMode(tool);
-          const active = activeToolNames.has(tool.name);
-          const retained = retainedInactiveNames.has(tool.name);
-          const policy = active
-            ? toolPolicyLabel(tool)
-            : retained
-              ? "not active yet; retained for first-request resolution"
-              : "not active in this Pi session";
-          const description = tool.description ?? "No description available";
-          return {
-            name: tool.name,
-            description: `${policy} · ${description}`,
-            searchText: [policy, description].join(" "),
-            disabled: !selectable || !active,
-            disabledReason: !active
-              ? retained
-                ? "Not active yet; retained and resolved before the first request"
-                : "Not active in Pi; Plan mode will not activate it"
-              : selectable
-                ? undefined
-                : "Blocked by Plan-mode policy",
-          };
-        }),
-        ...pendingNames.map((name) => {
-          const label = terminalToolName(name);
-          return {
-            name,
-            label,
-            description: "pending registration · Retained and resolved before the first Plan request",
-            searchText: `${label} pending registration retained first Plan request`,
-            disabled: true,
-            disabledReason:
-              "Not registered yet; Plan mode will not activate it and will resolve it before the first request",
-          };
-        }),
-      ],
       ...lifecycle,
       start: (signal) => {
         if (signal.aborted || !lifecycle.isCurrent()) return;
@@ -2203,15 +2214,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           ctx.ui.notify("Plan mode enabled. I will explore and plan, but not modify files.", "info");
         }
       },
-      startWithTools: (names, signal) => {
-        if (signal.aborted || !lifecycle.isCurrent()) return;
-        const selectedToolNames = Array.from(
-          new Set(names.filter((name) => activeToolNames.has(name) || retainedInactiveNames.has(name))),
-        );
-        if (enterPlanMode(ctx, { selectedToolNames, selectedToolKeys: undefined })) {
-          ctx.ui.notify("Plan mode enabled with the selected tools.", "info");
-        }
-      },
+      chooseTools: (signal) =>
+        chooseSessionTools(ctx, { signal, isCurrent: () => lifecycle.isCurrent() && !signal.aborted }),
       settings: (signal) => showSettings(ctx, signal, lifecycle.isCurrent),
     });
   }
@@ -2448,6 +2452,178 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       selectedToolKeys: state.selectedToolKeys,
       defaultPlanTools: settings.defaultPlanTools,
     };
+  }
+
+  /** Jev picks each workflow's tools at its first prompt, unless it is off or this is a planner. */
+  function defaultWorkflowToolChoice(): WorkflowToolChoice {
+    return settings.jevToolSelection === false || isPlannerProcess() ? {} : { jevPending: true };
+  }
+
+  /** Active tools the Plan policy can allow: what the tools screen shows. */
+  function sessionTreeTools() {
+    return activePlanPolicyTools()
+      .filter(canSelectToolInPlanMode)
+      .map((tool) => ({
+        name: tool.name,
+        ...(tool.description ? { description: tool.description } : {}),
+        builtin: isBuiltinTool(tool),
+      }));
+  }
+
+  /** The same tool tree planners get, for Plan mode in this session. */
+  function buildSessionTree(ctx: ExtensionContext, defaults: ReadonlySet<string>) {
+    const toolsets = settings.plannerToolsets ?? {};
+    const tools = sessionTreeTools();
+    const offersMcp =
+      tools.some((tool) => tool.name === "mcp") && Object.values(toolsets).some((toolset) => toolset.mcp);
+    return buildSessionToolTree({
+      tools,
+      defaults,
+      toolsets,
+      mcpCatalog: offersMcp ? (dependencies.readMcpCatalog ?? readMcpCatalog)(ctx.cwd, getAgentDir()) : [],
+      grants: settings.commandGrants ?? {},
+    });
+  }
+
+  /** Chosen names the tree cannot show because they are not registered or active yet; kept as chosen. */
+  function pendingPolicyNames(selected: ReadonlySet<string>) {
+    const shown = new Set(sessionTreeTools().map((tool) => tool.name));
+    return [...selected].filter((name) => !shown.has(name));
+  }
+
+  /** Make a tool tree the running workflow's policy: its tools, MCP tools, and command grants. */
+  function applyWorkflowToolChoice(ctx: ExtensionContext, roots: ToolNode[], extra: WorkflowToolChoice = {}) {
+    const choice = sessionToolChoice(roots);
+    const desiredNames = [...new Set([...choice.names, ...pendingPolicyNames(workflowDesiredToolNames())])];
+    const allowedNames = resolvePlanModePolicyToolNames(desiredNames);
+    state = {
+      ...state,
+      workflowToolPolicy: {
+        kind: "explicit",
+        desiredNames,
+        allowedNames,
+        resolved: state.workflowToolPolicy?.resolved ?? false,
+      },
+      workflowToolChoice: {
+        ...(choice.mcpAllow ? { mcpAllow: choice.mcpAllow } : {}),
+        grants: choice.grants,
+        selected: choice.selected,
+        ...extra,
+      },
+    };
+    workflowAllowedToolNames = allowedNames;
+    persistState();
+    updateUi(ctx);
+  }
+
+  /** At the first Plan prompt, Jev narrows the workflow's tools to what this task needs. */
+  async function pickWorkflowToolsWithJev(ctx: ExtensionContext, prompt: string) {
+    const generation = workflowGeneration;
+    const { jevPending: _pending, ...rest } = state.workflowToolChoice ?? {};
+    state = { ...state, workflowToolChoice: rest };
+    const roots = buildSessionTree(ctx, workflowDesiredToolNames());
+    const pick = await (dependencies.pickTools ?? pickToolsWithJev)({
+      task: prompt,
+      conversation: buildPlannerTranscript(ctx.sessionManager.getBranch()),
+      cwd: ctx.cwd,
+      capabilities: leafCapabilities(roots),
+      ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+      ...(settings.jevModel ? { model: settings.jevModel } : {}),
+    });
+    if (generation !== workflowGeneration || !state.enabled) return;
+    if (pick.kind !== "jev") {
+      persistState();
+      if (!/TYPESAFE_API_KEY|no tools/u.test(pick.reason)) {
+        ctx.ui.notify(`Jev could not pick tools (${safeTerminalText(pick.reason)}); the defaults apply.`, "info");
+      }
+      return;
+    }
+    applyJevPick(roots, pick);
+    applyWorkflowToolChoice(ctx, roots, { jevScores: pick.probabilities });
+    ctx.ui.notify(`Jev picked this plan's tools: ${describeTreeSelection(roots)}. /plan tools changes them.`, "info");
+  }
+
+  /** `Shell · Web research 2/3 · MCP servers 1/9` */
+  function describeTreeSelection(roots: readonly ToolNode[]) {
+    const parts = roots.flatMap((root) => {
+      const all = leaves([root]);
+      const picked = all.filter((leaf) => leaf.selected).length;
+      if (picked === 0) return [];
+      return [root.children && picked < all.length ? `${root.label} ${picked}/${all.length}` : root.label];
+    });
+    return parts.length > 0 ? parts.map(safeTerminalText).join(" · ") : "only the Plan helpers";
+  }
+
+  /**
+   * The tools screen for Plan mode itself, the same tree planners get. Before Plan mode starts it
+   * starts it; while it runs it changes what the workflow may use from the next tool call on.
+   */
+  async function chooseSessionTools(
+    ctx: ExtensionContext,
+    lifecycle: { signal: AbortSignal; isCurrent(): boolean },
+  ): Promise<boolean> {
+    const ui = await loadInteractiveUi();
+    if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return false;
+    const active = state.enabled;
+    const choice = active ? state.workflowToolChoice : undefined;
+    const defaults = active
+      ? workflowDesiredToolNames()
+      : snapshotPlanModeSelectedNames(selectableTools(), toolSelectionSnapshot());
+    const roots = buildSessionTree(ctx, defaults);
+    if (choice) restoreTreeSelection(roots, choice.selected, choice.jevScores);
+    const pending = active ? [] : pendingPolicyNames(defaults).map(terminalToolName);
+    const jevOn = settings.jevToolSelection !== false;
+    const notes = active
+      ? [
+          ...(choice?.jevPending && jevOn
+            ? ["Jev picks from these at your first Plan message unless you change them."]
+            : []),
+          ...(choice?.jevScores ? ["Jev's scores for this plan are shown next to each tool."] : []),
+          "Changes apply from the next tool call.",
+        ]
+      : [
+          ...(jevOn ? ["Jev picks from these when your first Plan message arrives, unless you change them here."] : []),
+          ...(pending.length > 0
+            ? [
+                `Pending registration: ${pending.slice(0, 3).join(", ")}${pending.length > 3 ? `, +${pending.length - 3} more` : ""}.`,
+              ]
+            : []),
+        ];
+    const result = await ui.chooseTools(ctx, {
+      title: active ? "Plan mode tools" : "Start Plan mode",
+      notes,
+      roots,
+      startLabel: active ? "Apply" : "Start Plan mode",
+      startHint: active ? "apply" : "start",
+      planMode: true,
+      ...lifecycle,
+    });
+    if (result.kind !== "start" || !lifecycle.isCurrent() || lifecycle.signal.aborted) return false;
+    if (active) {
+      if (!state.enabled) return false;
+      applyWorkflowToolChoice(ctx, roots, {
+        ...(choice?.jevScores ? { jevScores: choice.jevScores } : {}),
+        ...(choice?.jevPending && !result.touched ? { jevPending: true } : {}),
+      });
+      ctx.ui.notify(`Plan-mode tools: ${describeTreeSelection(roots)}.`, "info");
+      return true;
+    }
+    if (!result.touched) {
+      if (enterPlanMode(ctx))
+        ctx.ui.notify("Plan mode enabled. I will explore and plan, but not modify files.", "info");
+      return true;
+    }
+    const picked = sessionToolChoice(roots);
+    const selectedToolNames = [...new Set([...picked.names, ...pendingPolicyNames(defaults)])];
+    const toolChoice: WorkflowToolChoice = {
+      ...(picked.mcpAllow ? { mcpAllow: picked.mcpAllow } : {}),
+      grants: picked.grants,
+      selected: picked.selected,
+    };
+    if (enterPlanMode(ctx, { selectedToolNames, selectedToolKeys: undefined }, toolChoice)) {
+      ctx.ui.notify("Plan mode enabled with the selected tools.", "info");
+    }
+    return true;
   }
 
   function selectableTools() {
@@ -2865,7 +3041,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   }
 
   function formatToolSummary() {
-    const names = planModePolicyToolNames();
+    const mcpAllow = state.enabled ? state.workflowToolChoice?.mcpAllow : undefined;
+    const names = planModePolicyToolNames().map((name) =>
+      name === "mcp" && mcpAllow
+        ? `mcp (only ${mcpAllow.slice(0, 3).join(", ")}${mcpAllow.length > 3 ? `, +${mcpAllow.length - 3} more` : ""})`
+        : name,
+    );
     return `Plan policy allows: ${names.length > 0 ? names.join(", ") : "none"}. Model-visible tools stay unchanged.`;
   }
 

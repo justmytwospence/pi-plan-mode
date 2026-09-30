@@ -2,82 +2,35 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { defineMenu } from "@narumitw/pi-tui-kit";
 import { runMenuWithVimKeys } from "./menu-keys.js";
 
-export interface PlanLaunchTool {
-  name: string;
-  label?: string;
-  description: string;
-  searchText: string;
-  disabled: boolean;
-  disabledReason?: string;
-}
-
 interface PlanLaunchMenuOptions {
   statusText: string;
-  toolSummary(selectedNames: ReadonlySet<string>): string;
-  getSelectedNames(): ReadonlySet<string>;
-  tools: readonly PlanLaunchTool[];
+  /** What the Plan policy will allow, read each time the menu is shown. */
+  toolSummary(): string;
   signal: AbortSignal;
   isCurrent(): boolean;
-  initialScreen?: "main" | "tools";
   start(signal: AbortSignal): void;
-  startWithTools(toolNames: string[], signal: AbortSignal): void;
+  /** The tools screen; true when it started Plan mode. */
+  chooseTools(signal: AbortSignal): Promise<boolean>;
   settings(signal: AbortSignal): Promise<boolean>;
 }
 
 export async function showPlanLaunchMenu(ctx: ExtensionContext, options: PlanLaunchMenuOptions) {
-  type Screen = "main" | "tools" | "help";
-  type Action = "start" | "toggle-tool" | "start-with-tools" | "settings";
-  const selectedNames = new Set(options.getSelectedNames());
-  const toolItems = options.tools.map((tool, index) => ({
-    id: `plan-tool:${index}`,
-    tool,
-  }));
-  const toolsByItemId = new Map(toolItems.map(({ id, tool }) => [id, tool]));
-  let draftChanged = false;
+  type Screen = "main" | "help";
+  type Action = "start" | "choose-tools" | "settings";
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
-    start: options.initialScreen ?? "main",
+    start: "main",
     screens: {
       main: () => ({
         kind: "actions",
         title: "Plan mode",
-        lines: [options.statusText, options.toolSummary(selectedNames)],
+        lines: [options.statusText, options.toolSummary()],
         items: [
           { id: "start", label: "Start Plan mode", action: "start" },
-          { id: "tools", label: "Choose tools, then start…", to: "tools" },
+          { id: "tools", label: "Choose tools, then start…", action: "choose-tools" },
           { id: "settings", label: "Settings…", action: "settings" },
           { id: "help", label: "How Plan mode works", to: "help" },
         ],
         hint: "close",
-      }),
-      tools: () => ({
-        kind: "multiSelect",
-        title: "Choose Plan policy allowlist",
-        lines: [
-          "Policy changes apply only when you start Plan mode; first use may also reveal Plan helpers.",
-          options.toolSummary(selectedNames),
-          "Active tools can be chosen now; retained names resolve before the first request.",
-          "Plan mode never activates tools, and non-built-ins run at user risk.",
-        ],
-        enableSearch: true,
-        viewportSize: 10,
-        items: toolItems.map(({ id, tool }) => ({
-          id,
-          label: tool.label ?? tool.name,
-          description: tool.description,
-          searchText: tool.searchText,
-          selected: selectedNames.has(tool.name),
-          disabled: tool.disabled,
-          disabledReason: tool.disabledReason,
-        })),
-        action: "toggle-tool",
-        actions: [
-          {
-            id: "start-with-tools",
-            label: "Done — start with this policy",
-            action: "start-with-tools",
-          },
-        ],
-        hint: "back",
       }),
       help: () => ({
         kind: "detail",
@@ -96,30 +49,17 @@ export async function showPlanLaunchMenu(ctx: ExtensionContext, options: PlanLau
         options.start(signal);
         return { kind: "close" };
       },
-      "toggle-tool": async ({ itemId, selected, signal }) => {
+      "choose-tools": async ({ signal }) => {
         if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
-        const tool = itemId ? toolsByItemId.get(itemId) : undefined;
-        if (!tool || tool.disabled) return { kind: "rejected" };
-        if (selected) selectedNames.add(tool.name);
-        else selectedNames.delete(tool.name);
-        draftChanged = true;
-        return { kind: "stay" };
-      },
-      "start-with-tools": async ({ signal }) => {
-        if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
-        options.startWithTools(Array.from(selectedNames), signal);
-        return { kind: "close" };
+        const started = await options.chooseTools(signal);
+        if (signal.aborted || !options.isCurrent()) return started ? { kind: "close" } : { kind: "rejected" };
+        return started ? { kind: "close" } : { kind: "stay" };
       },
       settings: async ({ signal }) => {
         if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
         const close = await options.settings(signal);
         if (signal.aborted || !options.isCurrent()) return { kind: "rejected" };
-        if (close) return { kind: "close" };
-        if (!draftChanged) {
-          selectedNames.clear();
-          for (const name of options.getSelectedNames()) selectedNames.add(name);
-        }
-        return { kind: "stay" };
+        return close ? { kind: "close" } : { kind: "stay" };
       },
     },
   });

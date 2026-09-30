@@ -50,6 +50,23 @@ export interface PlanModeWorkflowToolPolicy {
   resolved: boolean;
 }
 
+/**
+ * What this Plan workflow may use beyond the tool names in its policy: which MCP tools the `mcp`
+ * tool may call, which command grants are on, and whether Jev still picks tools at the first prompt.
+ */
+export interface WorkflowToolChoice {
+  /** MCP tools (`server/tool` or `server/*`); undefined allows every MCP tool. */
+  mcpAllow?: string[];
+  /** Command grants that are on; undefined uses the grants settings turn on for Plan mode. */
+  grants?: string[];
+  /** Selected tool-tree leaves, to reopen the tools screen as it was. */
+  selected?: string[];
+  /** Jev's scores by tool-tree leaf. */
+  jevScores?: Record<string, number>;
+  /** Jev picks tools when the first Plan prompt arrives (you have not chosen them yourself). */
+  jevPending?: boolean;
+}
+
 export interface PlanModeState {
   enabled: boolean;
   latestPlan?: string;
@@ -63,6 +80,7 @@ export interface PlanModeState {
   selectedToolNames?: string[];
   selectedToolKeys?: string[];
   workflowToolPolicy?: PlanModeWorkflowToolPolicy;
+  workflowToolChoice?: WorkflowToolChoice;
   previousThinkingLevel?: PlanModeFixedThinkingLevel;
   appliedThinkingLevel?: PlanModeFixedThinkingLevel;
   manualThinkingLevel?: PlanModeFixedThinkingLevel;
@@ -103,6 +121,7 @@ export function restorePlanModeState(entries: unknown[], stateEntryType: string)
     ? undefined
     : normalizePendingImplementationRuntime(entry.data.pendingImplementationRuntime);
   const latestPlanModel = enabled && persistedPlan ? normalizeModel(entry.data.latestPlanModel) : undefined;
+  const workflowToolChoice = enabled ? normalizeWorkflowToolChoice(entry.data.workflowToolChoice) : undefined;
   return {
     enabled,
     latestPlan,
@@ -117,6 +136,7 @@ export function restorePlanModeState(entries: unknown[], stateEntryType: string)
     selectedToolNames: stringArray(entry.data.selectedToolNames),
     selectedToolKeys: stringArray(entry.data.selectedToolKeys),
     workflowToolPolicy: enabled ? normalizeWorkflowToolPolicy(entry.data.workflowToolPolicy) : undefined,
+    ...(workflowToolChoice ? { workflowToolChoice } : {}),
     previousThinkingLevel: enabled ? fixedThinkingLevel(entry.data.previousThinkingLevel) : undefined,
     appliedThinkingLevel: enabled ? fixedThinkingLevel(entry.data.appliedThinkingLevel) : undefined,
     manualThinkingLevel: enabled ? fixedThinkingLevel(entry.data.manualThinkingLevel) : undefined,
@@ -140,6 +160,27 @@ function normalizeWorkflowToolPolicy(value: unknown): PlanModeWorkflowToolPolicy
   const desiredNames = stringArray(value.desiredNames);
   if (!desiredNames) return denied;
   return { kind, desiredNames, allowedNames, resolved: value.resolved };
+}
+
+function normalizeWorkflowToolChoice(value: unknown): WorkflowToolChoice | undefined {
+  if (!isRecord(value)) return undefined;
+  const mcpAllow = stringArray(value.mcpAllow);
+  const grants = stringArray(value.grants);
+  const selected = stringArray(value.selected);
+  const jevScores = isRecord(value.jevScores)
+    ? Object.fromEntries(
+        Object.entries(value.jevScores).filter(
+          (entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]),
+        ),
+      )
+    : undefined;
+  return {
+    ...(mcpAllow ? { mcpAllow } : {}),
+    ...(grants ? { grants } : {}),
+    ...(selected ? { selected } : {}),
+    ...(jevScores ? { jevScores } : {}),
+    ...(value.jevPending === true ? { jevPending: true } : {}),
+  };
 }
 
 function normalizeSavedPlan(value: unknown): SavedPlan | undefined {

@@ -16,6 +16,8 @@ export interface ToolNode {
   jev?: number;
   /** Shown instead of the description when the row is highlighted. */
   detail?: string;
+  /** Leaves only: Jev never scores or changes this one. */
+  jevExempt?: boolean;
 }
 
 export type GroupState = "all" | "some" | "none";
@@ -42,14 +44,21 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   const grants = Object.entries(input.grants ?? {});
   const roots: ToolNode[] =
     grants.length === 0
-      ? [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true }]
+      ? [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true, jevExempt: true }]
       : [
           {
             id: "shell-group",
             label: "Shell",
             description: "Commands planners may run with bash (a granted command also turns on the read-only ones)",
             children: [
-              { id: "shell", label: "Read-only commands", description: SHELL_DESCRIPTION, selected: true },
+              {
+                id: "shell",
+                label: "Read-only commands",
+                description: SHELL_DESCRIPTION,
+                selected: true,
+                // Read-only shell is how planners inspect a repository; Jev decides about everything else.
+                jevExempt: true,
+              },
               ...grants.map(([id, grant]) => ({
                 id: `grant:${id}`,
                 label: grant.label,
@@ -70,26 +79,7 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   }
   for (const [id, toolset] of Object.entries(input.toolsets)) {
     if (toolset.mcp) {
-      const servers = input.mcpCatalog.map<ToolNode>((server) =>
-        server.known
-          ? {
-              id: `mcp:${server.name}`,
-              label: server.name,
-              description: `MCP server ${server.name}`,
-              children: server.tools.map((tool) => ({
-                id: `mcp:${server.name}/${tool.name}`,
-                label: stripServerPrefix(tool.name, server.name),
-                description: `${server.name}: ${oneLine(tool.description) || tool.name}`,
-                selected: toolset.enabled,
-              })),
-            }
-          : {
-              id: `mcp:${server.name}`,
-              label: `${server.name} (tools not cached yet; allows the whole server)`,
-              description: `MCP server ${server.name}; its tools are unknown until it has been connected once.`,
-              selected: toolset.enabled,
-            },
-      );
+      const servers = mcpServerNodes(input.mcpCatalog, toolset.enabled);
       if (servers.length > 0) {
         roots.push({
           id: `toolset:${id}`,
@@ -115,6 +105,180 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   return roots;
 }
 
+function mcpServerNodes(catalog: readonly McpServerCatalog[], selected: boolean): ToolNode[] {
+  return catalog.map<ToolNode>((server) =>
+    server.known
+      ? {
+          id: `mcp:${server.name}`,
+          label: server.name,
+          description: `MCP server ${server.name}`,
+          children: server.tools.map((tool) => ({
+            id: `mcp:${server.name}/${tool.name}`,
+            label: stripServerPrefix(tool.name, server.name),
+            description: `${server.name}: ${oneLine(tool.description) || tool.name}`,
+            selected,
+          })),
+        }
+      : {
+          id: `mcp:${server.name}`,
+          label: `${server.name} (tools not cached yet; allows the whole server)`,
+          description: `MCP server ${server.name}; its tools are unknown until it has been connected once.`,
+          selected,
+        },
+  );
+}
+
+/** A Pi tool Plan mode may allow in this session. */
+export interface SessionTool {
+  name: string;
+  description?: string;
+  builtin: boolean;
+}
+
+export interface BuildSessionToolTreeInput {
+  /** Active tools the Plan policy can allow, in display order. */
+  tools: readonly SessionTool[];
+  /** Tools the Plan policy selects when nothing else picks (settings or your last choice). */
+  defaults: ReadonlySet<string>;
+  toolsets: Readonly<Record<string, PlannerToolset>>;
+  mcpCatalog: readonly McpServerCatalog[];
+  grants?: Readonly<Record<string, CommandGrant>>;
+}
+
+/**
+ * The tool tree for Plan mode in this session, laid out like the planners' tree: Shell (with its
+ * command grants), each planner toolset whose tools are active here, the MCP servers when the `mcp`
+ * tool is active, then every other tool. Leaves are `tool:<name>`, `grant:<id>`, or MCP tools.
+ * Jev only scores what you already opted into beyond the built-ins (your extension tools, toolsets,
+ * MCP tools, and grants): it can narrow the policy but never widens it to a tool you did not choose,
+ * and never takes away the built-in tools Plan mode inspects the repository with.
+ */
+export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode[] {
+  const available = new Map(input.tools.map((tool) => [tool.name, tool]));
+  const covered = new Set<string>();
+  const roots: ToolNode[] = [];
+  const toolLeaf = (name: string, label = name, description?: string): ToolNode => {
+    covered.add(name);
+    const tool = available.get(name);
+    return {
+      id: `tool:${name}`,
+      label,
+      description: description ?? (oneLine(tool?.description ?? "") || name),
+      selected: input.defaults.has(name),
+      // Built-ins (files and the read-only shell) are how Plan mode inspects the repository; Jev
+      // decides about extension tools, MCP tools, and grants.
+      ...(tool?.builtin ? { jevExempt: true } : {}),
+    };
+  };
+  if (available.has("bash")) {
+    const grants = Object.entries(input.grants ?? {});
+    const shell = toolLeaf("bash", grants.length > 0 ? "Read-only commands" : "Shell", SHELL_DESCRIPTION);
+    roots.push(
+      grants.length === 0
+        ? shell
+        : {
+            id: "shell-group",
+            label: "Shell",
+            description: "Commands Plan mode may run with bash",
+            children: [
+              shell,
+              ...grants.map(([id, grant]) => ({
+                id: `grant:${id}`,
+                label: grant.label,
+                description: grant.description ?? `Run ${grant.commands.join(", ")}`,
+                detail: `${grant.description ?? grant.label} Allows: ${grant.commands.join(", ")}.`,
+                selected: grant.planMode === true,
+              })),
+            ],
+          },
+    );
+  }
+  for (const [id, toolset] of Object.entries(input.toolsets)) {
+    if (toolset.mcp) {
+      if (!available.has("mcp") || covered.has("mcp")) continue;
+      const servers = mcpServerNodes(input.mcpCatalog, input.defaults.has("mcp"));
+      if (servers.length === 0) continue;
+      covered.add("mcp");
+      roots.push({
+        id: `toolset:${id}`,
+        label: toolset.label,
+        description: toolset.description ?? id,
+        children: servers,
+      });
+      continue;
+    }
+    const tools = toolset.tools.filter((tool) => available.has(tool) && !covered.has(tool));
+    if (tools.length === 0) continue;
+    roots.push({
+      id: `toolset:${id}`,
+      label: toolset.label,
+      description: toolset.description ?? toolset.label,
+      children: tools.map((tool) => toolLeaf(tool, tool, toolset.toolDescriptions?.[tool])),
+    });
+  }
+  const others = input.tools
+    .filter((tool) => !covered.has(tool.name))
+    .map((tool) => {
+      const leaf = toolLeaf(tool.name);
+      // An extension tool you have not opted into stays yours to enable.
+      return !tool.builtin && !input.defaults.has(tool.name) ? { ...leaf, jevExempt: true } : leaf;
+    });
+  if (others.length > 0) {
+    roots.push({
+      id: "other-tools",
+      label: "Other tools",
+      description: "Pi tools outside the planner toolsets. Extension tools run at your own risk.",
+      children: others,
+    });
+  }
+  return roots;
+}
+
+/** What a session tool tree allows. */
+export interface SessionToolChoice {
+  /** Pi tools the Plan policy allows. */
+  names: string[];
+  /** MCP tools the `mcp` tool may call; undefined when every listed tool is selected. */
+  mcpAllow?: string[];
+  /** Command grants that are on. */
+  grants: string[];
+  /** Selected leaf ids, to reopen the tree as it was. */
+  selected: string[];
+}
+
+export function sessionToolChoice(nodes: readonly ToolNode[]): SessionToolChoice {
+  const all = leaves(nodes);
+  const names = all.filter((leaf) => leaf.selected && leaf.id.startsWith("tool:")).map((leaf) => leaf.id.slice(5));
+  const mcpLeaves = all.filter((leaf) => leaf.id.startsWith("mcp:"));
+  const selection = treeToSelection(nodes);
+  const everyMcp = mcpLeaves.every((leaf) => leaf.selected);
+  if (selection.mcp.length > 0) names.push("mcp");
+  // A granted command runs through bash, so it turns on the read-only commands too.
+  if ((selection.grants ?? []).length > 0 && all.some((leaf) => leaf.id === "tool:bash") && !names.includes("bash")) {
+    names.push("bash");
+  }
+  return {
+    names,
+    ...(selection.mcp.length > 0 && !everyMcp ? { mcpAllow: selection.mcp } : {}),
+    grants: selection.grants ?? [],
+    selected: all.filter((leaf) => leaf.selected).map((leaf) => leaf.id),
+  };
+}
+
+/** Restore a saved selection (and Jev's scores) onto a freshly built tree. */
+export function restoreTreeSelection(
+  nodes: readonly ToolNode[],
+  selected: readonly string[] | undefined,
+  scores: Readonly<Record<string, number>> | undefined,
+) {
+  const chosen = selected ? new Set(selected) : undefined;
+  for (const leaf of leaves(nodes)) {
+    if (chosen) leaf.selected = chosen.has(leaf.id);
+    const score = scores?.[leaf.id];
+    if (score !== undefined) leaf.jev = score;
+  }
+}
+
 export function leaves(nodes: readonly ToolNode[]): ToolNode[] {
   return nodes.flatMap((node) => (node.children ? leaves(node.children) : [node]));
 }
@@ -136,21 +300,22 @@ export function toggle(node: ToolNode) {
 }
 
 export function leafCapabilities(nodes: readonly ToolNode[]): ToolCapability[] {
-  return leaves(nodes).map((leaf) => ({
-    id: leaf.id,
-    label: leaf.label,
-    description: leaf.description,
-    fallbackSelected: leaf.selected === true,
-  }));
+  return leaves(nodes)
+    .filter((leaf) => !leaf.jevExempt)
+    .map((leaf) => ({
+      id: leaf.id,
+      label: leaf.label,
+      description: leaf.description,
+      fallbackSelected: leaf.selected === true,
+    }));
 }
 
-/** Use Jev's picks as the defaults and keep its probabilities for display. */
 /** Show Jev's scores and, unless the user already chose, take its selection. */
 export function applyJevPick(nodes: readonly ToolNode[], pick: JevToolPick, keepSelection = false) {
   if (pick.kind !== "jev") return;
   for (const leaf of leaves(nodes)) {
     const probability = pick.probabilities[leaf.id];
-    if (probability === undefined) continue;
+    if (probability === undefined || leaf.jevExempt) continue;
     leaf.jev = probability;
     if (!keepSelection) leaf.selected = pick.selected[leaf.id] === true;
   }

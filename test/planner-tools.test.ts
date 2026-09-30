@@ -215,7 +215,7 @@ test("the tool tree view starts on the first tool, toggles and expands rows, and
   assert.deepEqual(results, []);
   view.handleInput("\r");
   view.handleInput("\r"); // confirm
-  assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 60 }]);
+  assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 60, touched: true }]);
   assert.deepEqual(treeToSelection(roots).mcp, ["obsidian/*"]);
   view.handleInput("\u001b");
   assert.deepEqual(results.at(-1), { kind: "back" });
@@ -241,7 +241,7 @@ test("Enter on the Start row starts at once, and any other key after Enter keeps
   assert.deepEqual(results, []);
   view.handleInput("g"); // top: the Start row
   view.handleInput("\r");
-  assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 45 }]);
+  assert.deepEqual(results, [{ kind: "start", timeLimitMinutes: 45, touched: false }]);
 });
 
 test("Jev's picks arrive after the tools screen opens, and never override your own changes", async () => {

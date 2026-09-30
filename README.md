@@ -125,8 +125,8 @@ Planners and scouts start with no extensions besides this one. `plannerToolsets`
 and tools: an ordinary toolset (for example web research through `pi-web-access`) lists its `tools`, with optional
 `toolDescriptions`; a toolset with `"mcp": true` (loading `pi-mcp-adapter`) expands into every configured MCP server
 and its cached tools. Scouts inherit toolsets with `"scouts": true` (the default), including the MCP allowlist, which
-this extension enforces inside them too. For the main `/plan` session, list tools in `defaultPlanTools` or choose
-them per run with `/plan tools`.
+this extension enforces inside them too. Plan mode itself uses the same tree for the tools already active in your
+session; see [Plan mode's own tools](#plan-modes-own-tools).
 
 ### Command grants
 
@@ -157,16 +157,38 @@ things, such as the marimo-pair skill, which runs Python in a live notebook kern
 - In `/plan multi`, grants appear under **Shell** in the tools tree, where Jev scores them like any tool (the
   `description` is what Jev reads); `enabled` is the default without Jev. A selected grant turns on bash, loads its
   `skills` into planners (which otherwise run without skills), and is described in the planner prompt.
-- `planMode: true` also allows the grant in the main Plan mode session, and the model is told about it.
+- In Plan mode itself the grant appears under **Shell** in the same tree; `planMode: true` turns it on by default
+  there, and the model is told about the grants that are on.
 - The granted code can do anything its tool can; granting it is your call. Everything else stays read-only.
 
-When `TYPESAFE_API_KEY` is set, every tool in the tree is preselected by [Jev](https://docs.typesafe.ai), TypeSafe's
+When `TYPESAFE_API_KEY` is set, every tool in the tree except the read-only Shell is preselected by [Jev](https://docs.typesafe.ai), TypeSafe's
 fast System One model: one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
 tokens) asks whether planners writing a plan for this task would materially benefit from it. Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
 can still change any of them. Without a key, with `jevToolSelection: false`, or when the request fails or times out
 (4 s), the picker says why and falls back to each tool's `enabled` default. A toolset's `description` is what Jev
-reads, so describe what it gives planners. For the main `/plan` session, list the same tools
-in `defaultPlanTools` or choose them per run with `/plan tools`.
+reads, so describe what it gives planners.
+
+### Plan mode's own tools
+
+Plan mode in your own session (`/plan`, `/plan <prompt>`, `/plan start`, or the toggle shortcut) uses the same tools
+tree as the planners, built from the tools active in the session: **Shell** with its command grants, each
+`plannerToolsets` toolset whose tools are active here, the MCP servers when the `mcp` tool is active and an
+`"mcp": true` toolset is configured, and **Other tools**. It starts from `defaultPlanTools` (or your last choice),
+and grants from `planMode`.
+
+- **Jev picks at the first prompt.** Plan mode starts before you describe the task, so Jev scores the tree when your
+  first Plan message arrives (with `/plan <prompt>`, that prompt) and narrows the policy to what the task needs:
+  for example only Context7's docs tools instead of every MCP server. A short note says what it picked. Jev only
+  scores what you opted into beyond the built-ins (extension tools in your defaults, toolsets, MCP tools, and
+  grants). It never enables a tool you did not choose, and never takes away the built-in `read`, `bash`, `grep`,
+  `find`, and `ls` that Plan mode inspects the repository with (planners' read-only Shell is kept the same way).
+- **Choose them yourself.** "Choose tools, then start…" in the `/plan` menu and `/plan tools` open the tree. Change
+  anything and Jev leaves your choice alone; start without changes and Jev still picks at the first prompt.
+- **Change them mid-plan.** `/plan tools` while Plan mode is on opens the tree with the current selection and Jev's
+  scores; Apply takes effect from the next tool call. Tools stay visible to the model either way (the policy blocks
+  calls rather than changing tool schemas), so this does not disturb the prompt cache.
+- **MCP per tool.** When only some MCP tools are selected, Plan mode blocks `mcp` calls to the others, and the model
+  is told which ones it may call.
 
 ## 🛠️ Implement with a chosen model, effort, and context
 
@@ -247,7 +269,7 @@ sequenceDiagram
 | `/plan` | Start or manage planning, review a plan, or implement it with a chosen model, effort, and context. |
 | `/plan start` | Enter Plan mode without sending a model message. |
 | `/plan <prompt>` | Start planning with a prompt, or send a follow-up while already active. |
-| `/plan tools` | Choose a session-specific tool policy, then start; cancellation changes nothing. |
+| `/plan tools` | Open the tools tree: before Plan mode, choose tools and start; while it runs, change this plan's tools. |
 | `/plan show` | Display the stored plan without starting a model turn. |
 | `/plan finalize` | Ask the active planner to finish or ask one remaining material question. |
 | `/plan multi [task]` | Plan with several models in parallel, then use one plan or synthesize several. |
@@ -283,7 +305,7 @@ The optional native `powershell` tool must be active when an automatic Plan poli
 Built-in `edit` and `write`, `update_plan`, tools still inactive at the first request, and deselected tools are blocked at execution time even though active schemas remain visible.
 Extension and custom tools are denied by default because Pi tools do not expose standardized mutability metadata; explicitly allow a custom-tool name before starting only when you accept the risk.
 For example, you can opt into `firecrawl_scrape`, `firecrawl_search`, or `lsp_diagnostics` when you want to use the effective active tool during planning.
-An active selectable tool omitted from the Plan policy reports that it needs explicit selection through `/plan tools` or `defaultPlanTools` before the next workflow.
+An active selectable tool omitted from the Plan policy reports that you can allow it with `/plan tools` (for this plan) or `defaultPlanTools` (for every plan).
 Registered but inactive, unregistered, metadata-free, and built-in blocked tools report their distinct fail-closed reasons instead of suggesting that every denial is a missing selection.
 A tool admitted before later deactivation can be reactivated and reused in the current workflow without restarting.
 After they become visible, the Plan-only helpers remain visible in Normal mode, but their handlers and the `tool_call` policy reject calls unless Plan mode owns the active workflow.

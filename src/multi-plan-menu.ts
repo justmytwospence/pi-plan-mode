@@ -490,10 +490,15 @@ export interface ChooseToolsOptions extends Lifecycle {
   notes: readonly string[];
   roots: ToolNode[];
   startLabel: string;
-  timeLimitMinutes: number;
-  timeLimitChoices: readonly number[];
+  /** Planners' time limit; Plan mode itself has none. */
+  timeLimitMinutes?: number;
+  timeLimitChoices?: readonly number[];
   /** Jev's picks, arriving after the screen opens (TUI) or awaited first (other modes). */
   preselection?: ToolPreselection;
+  /** For Plan mode itself rather than planners: no step bar, no way back to the models. */
+  planMode?: boolean;
+  /** The Enter hint, e.g. "apply". */
+  startHint?: string;
 }
 
 /**
@@ -512,15 +517,28 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
         pending = false;
         clearInterval(ticker);
       });
+      // A closed session or a newer workflow closes the screen without starting anything.
+      const abort = () => done({ kind: "cancel" });
+      options.signal.addEventListener("abort", abort, { once: true });
+      if (options.signal.aborted) abort();
       const view = new ToolTreeView(theme, {
         title: options.title,
         ...(options.task ? { task: options.task } : {}),
         notes: options.notes,
         roots: options.roots,
         startLabel: options.startLabel,
-        timeLimitMinutes: options.timeLimitMinutes,
-        timeLimitChoices: options.timeLimitChoices,
+        ...(options.timeLimitMinutes !== undefined ? { timeLimitMinutes: options.timeLimitMinutes } : {}),
+        ...(options.timeLimitChoices ? { timeLimitChoices: options.timeLimitChoices } : {}),
         ...(options.preselection ? { preselection: options.preselection } : {}),
+        ...(options.planMode
+          ? {
+              purpose: "what Plan mode lets the model use",
+              steps: false,
+              backLabel: "cancel",
+              startHint: options.startHint ?? "start",
+              grantee: { prefix: "Plan mode allows", none: "Plan mode allows only its own helpers." },
+            }
+          : {}),
         rows: () => terminalRows(tui),
         requestRender: () => tui.requestRender(),
         onDone: done,
@@ -530,7 +548,10 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
         handleInput: (data: string) => view.handleInput(data),
         handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
         invalidate: () => view.invalidate(),
-        dispose: () => clearInterval(ticker),
+        dispose: () => {
+          clearInterval(ticker);
+          options.signal.removeEventListener("abort", abort);
+        },
       };
     }, SHEET);
     return result ?? { kind: "cancel" };
@@ -547,25 +568,26 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
   }
   const flat = leaves(options.roots);
   let outcome: ToolTreeResult = { kind: "cancel" };
+  let touched = false;
   const menu = defineMenu<undefined, "tools", "toggle" | "start" | "back", ExtensionContext>({
     start: "tools",
     screens: {
       tools: () => ({
         kind: "multiSelect",
-        title: `${options.title} · 2/2 tools`,
+        title: options.planMode ? options.title : `${options.title} · 2/2 tools`,
         lines: [...(options.task ? [`Task: ${options.task}`] : []), ...notes],
         enableSearch: true,
         viewportSize: 14,
         items: flat.map((leaf) => ({
           id: leaf.id,
-          label: safeText(leaf.id.replace(/^(?:toolset|mcp):/u, "")),
+          label: safeText(leaf.id.replace(/^(?:toolset|mcp|tool|grant):/u, "")),
           ...(leaf.jev !== undefined ? { description: `Jev ${Math.round(leaf.jev * 100)}%` } : {}),
           selected: leaf.selected === true,
         })),
         action: "toggle",
         actions: [
           { id: "start", label: options.startLabel, action: "start" },
-          { id: "back", label: "Back to models", action: "back" },
+          ...(options.planMode ? [] : [{ id: "back", label: "Back to models", action: "back" as const }]),
         ],
         hint: "close",
       }),
@@ -575,10 +597,11 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
         const leaf = flat.find((candidate) => candidate.id === itemId);
         if (!leaf) return { kind: "rejected" };
         leaf.selected = selected === true;
+        touched = true;
         return { kind: "stay" };
       },
       start: async () => {
-        outcome = { kind: "start", timeLimitMinutes: options.timeLimitMinutes };
+        outcome = { kind: "start", timeLimitMinutes: options.timeLimitMinutes ?? 0, touched };
         return { kind: "close" };
       },
       back: async () => {

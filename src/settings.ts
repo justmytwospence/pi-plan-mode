@@ -119,7 +119,7 @@ export interface PlanModeSettings {
   plannerToolsets?: Record<string, PlannerToolset>;
   /** Commands Plan mode's read-only bash policy lets through when granted (e.g. marimo-pair's scripts). */
   commandGrants?: Record<string, CommandGrant>;
-  /** Let Jev preselect planner tools from the task (default true; needs TYPESAFE_API_KEY). */
+  /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs TYPESAFE_API_KEY). */
   jevToolSelection?: boolean;
   /** Jev probability at or above which a tool is preselected (default 0.5). */
   jevThreshold?: number;

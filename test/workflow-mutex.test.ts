@@ -271,7 +271,7 @@ test("busy menu, selected-tool, shortcut, and active-implementation starts stay 
     let launchOptions:
       | {
           start(signal: AbortSignal): void;
-          startWithTools(names: string[], signal: AbortSignal): void;
+          chooseTools(signal: AbortSignal): Promise<boolean>;
         }
       | undefined;
     planMode(mock.pi, {
@@ -281,13 +281,15 @@ test("busy menu, selected-tool, shortcut, and active-implementation starts stay 
           showPlanLaunchMenu: async (_ctx: unknown, options: typeof launchOptions) => {
             launchOptions = options;
           },
+          // Choose tools yourself, then start.
+          chooseTools: async () => ({ kind: "start", timeLimitMinutes: 0, touched: true }),
         }) as never,
     });
     const context = createMockContext({ mode, hasUI: true, sessionManager });
     await mock.commands.get("plan")?.handler("", context.ctx);
     assert.ok(launchOptions);
     launchOptions.start(new AbortController().signal);
-    launchOptions.startWithTools(["read"], new AbortController().signal);
+    await launchOptions.chooseTools(new AbortController().signal);
     assert.deepEqual(mock.rawPi.getActiveTools(), ["read", "write", ...PLAN_HELPERS]);
     assert.equal(mock.entries.length, 0);
     assert.equal(context.notifications.length, 2);

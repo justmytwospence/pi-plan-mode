@@ -169,10 +169,10 @@ test("an active Settings save changes the next export without changing active st
       mode: "tui",
       hasUI: true,
       select: async (_title: string, options: string[]) => {
-        if (options.includes("Settings")) {
+        if (options.includes("Settings…")) {
           if (openedSettings) return undefined;
           openedSettings = true;
-          return "Settings";
+          return "Settings…";
         }
         if (changedExport) return undefined;
         changedExport = true;

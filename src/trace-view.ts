@@ -163,8 +163,8 @@ export class TraceView implements Component {
       const page = Math.max(1, this.fullHeight - 2);
       if (this.finished && !live && is("c")) return this.options.onClose();
       if (!pane || is("escape", "q", "left", "h")) this.focused = undefined;
-      else if (is("tab", "shift+tab")) {
-        const next = (index + (is("tab") ? 1 : -1) + rows.length) % rows.length;
+      else if (is("tab", "shift+tab", "n", "p", "ctrl+n", "ctrl+p")) {
+        const next = (index + (is("tab", "n", "ctrl+n") ? 1 : -1) + rows.length) % rows.length;
         this.select(next, rows);
         this.focused = rows[next]?.pane.id;
       } else if (is("up", "k")) this.scrollPane(pane, -1, this.fullHeight);
@@ -183,8 +183,8 @@ export class TraceView implements Component {
       if (live) this.confirmingCancel = true;
       else this.options.onClose();
     } else if (this.finished && !live && is("c")) this.options.onClose();
-    else if (is("up", "k")) this.select(this.selected - 1, rows);
-    else if (is("down", "j")) this.select(this.selected + 1, rows);
+    else if (is("up", "k", "p", "ctrl+p")) this.select(this.selected - 1, rows);
+    else if (is("down", "j", "n", "ctrl+n")) this.select(this.selected + 1, rows);
     else if (is("tab", "shift+tab")) {
       // Jump between planners.
       const planners = rows.map((row, index) => ({ row, index })).filter(({ row }) => row.depth === 0);

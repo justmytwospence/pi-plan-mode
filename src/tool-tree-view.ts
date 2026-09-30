@@ -137,8 +137,8 @@ export class ToolTreeView implements Component {
     if (is("enter")) {
       if (row?.kind === "start") return this.start();
       this.confirming = true;
-    } else if (is("up", "k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
-    else if (is("down", "j")) this.cursor = (this.cursor + 1) % rows.length;
+    } else if (is("up", "k", "ctrl+p")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
+    else if (is("down", "j", "ctrl+n")) this.cursor = (this.cursor + 1) % rows.length;
     else if (is("pageUp")) this.cursor = Math.max(0, this.cursor - 10);
     else if (is("pageDown")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
     else if (is("home", "g")) this.cursor = 0;

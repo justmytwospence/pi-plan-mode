@@ -619,7 +619,7 @@ test("active-plan menu actions work in TUI and RPC without hidden route changes"
     const context = createMockContext({
       mode: scenario.mode,
       select: async (_title: string, options: string[]) => {
-        assert.ok(options.includes("Settings"));
+        assert.ok(options.includes("Settings…"));
         return options.find((option) => option.startsWith(scenario.selection));
       },
     });

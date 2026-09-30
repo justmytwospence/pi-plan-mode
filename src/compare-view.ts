@@ -98,15 +98,16 @@ export class CompareView implements Component {
       else if (is("pageDown", "ctrl+d", "space")) this.scrollPlan(candidate, page, this.readerHeight);
       else if (is("home", "g")) this.scroll.toTop(candidate.id);
       else if (is("end", "shift+g")) this.scroll.follow(candidate.id);
-      else if (is("tab", "shift+tab")) this.cursor = (this.cursor + (is("tab") ? 1 : -1) + count) % count;
+      else if (is("tab", "shift+tab", "n", "p", "ctrl+n", "ctrl+p"))
+        this.cursor = (this.cursor + (is("tab", "n", "ctrl+n") ? 1 : -1) + count) % count;
       else return;
       this.options.requestRender();
       return;
     }
     const half = Math.max(1, Math.floor(this.previewHeight / 2));
     if (is("escape", "q", "ctrl+c")) return this.options.onDone({ kind: "close" });
-    if (is("up", "k")) this.cursor = Math.max(0, this.cursor - 1);
-    else if (is("down", "j")) this.cursor = Math.min(count - 1, this.cursor + 1);
+    if (is("up", "k", "p", "ctrl+p")) this.cursor = Math.max(0, this.cursor - 1);
+    else if (is("down", "j", "n", "ctrl+n")) this.cursor = Math.min(count - 1, this.cursor + 1);
     else if (candidate && is("enter")) return this.use(candidate);
     else if (candidate && is("right", "l", "o")) {
       if (isReady(candidate)) {

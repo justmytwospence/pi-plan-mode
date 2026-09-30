@@ -189,6 +189,13 @@ model, so the map applies to the plan's author rather than whatever model the se
 Run `/plan` to open the state-aware menu, then start Plan mode and ask the agent to inspect and design the change.
 Run `/plan <prompt>` when the first planning request is already known.
 
+Menus take vim-style keys: `j`/`n` and `k`/`p` move, `h` goes back, and `l` opens a submenu (an item that
+leads to another screen, such as `Export plan…` or `Settings…`; it never runs an action, so `l` on
+`Discard plan and exit` does nothing). In lists with a search box, letters search, so use `ctrl+n`/`ctrl+p`
+there; those work in every menu. The multi-model screens already use `hjkl`; `n`/`p` move there too, and step to
+the next or previous plan or agent when reading one full screen. The Tools screen keeps `n` for "select none"
+and uses `ctrl+n`/`ctrl+p`.
+
 ## 🗺️ How it works
 
 Plan mode keeps exploration and implementation on opposite sides of an explicit review boundary:

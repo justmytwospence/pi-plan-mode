@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
+import { defineMenu } from "@narumitw/pi-tui-kit";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 import {
   createImplementationFlow,
   type ImplementAction,
@@ -52,7 +53,7 @@ export async function showSavedPlanMenu(ctx: ExtensionContext, options: SavedPla
             to: "implement",
           },
           { id: "export", label: "Export plan…", to: "export" },
-          { id: "settings", label: "Settings", action: "settings" },
+          { id: "settings", label: "Settings…", action: "settings" },
           { id: "clear", label: "Clear saved plan", action: "clear" },
         ],
         hint: "close",
@@ -79,7 +80,7 @@ export async function showSavedPlanMenu(ctx: ExtensionContext, options: SavedPla
       },
     },
   });
-  await runMenu(ctx, menu, {
+  await runMenuWithVimKeys(ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,

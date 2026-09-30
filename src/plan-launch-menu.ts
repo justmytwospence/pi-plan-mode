@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
+import { defineMenu } from "@narumitw/pi-tui-kit";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 
 export interface PlanLaunchTool {
   name: string;
@@ -43,7 +44,7 @@ export async function showPlanLaunchMenu(ctx: ExtensionContext, options: PlanLau
         items: [
           { id: "start", label: "Start Plan mode", action: "start" },
           { id: "tools", label: "Choose tools, then start…", to: "tools" },
-          { id: "settings", label: "Settings", action: "settings" },
+          { id: "settings", label: "Settings…", action: "settings" },
           { id: "help", label: "How Plan mode works", to: "help" },
         ],
         hint: "close",
@@ -122,7 +123,7 @@ export async function showPlanLaunchMenu(ctx: ExtensionContext, options: PlanLau
       },
     },
   });
-  await runMenu(ctx, menu, {
+  await runMenuWithVimKeys(ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,

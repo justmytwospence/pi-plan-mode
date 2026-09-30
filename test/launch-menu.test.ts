@@ -343,7 +343,7 @@ test("inactive bare /plan adapts the launch menu to RPC", async () => {
   assert.deepEqual(rpc.dialogs[0]?.options, [
     "Start Plan mode",
     "Choose tools, then start…",
-    "Settings",
+    "Settings…",
     "How Plan mode works",
   ]);
   assert.deepEqual(mock.rawPi.getActiveTools(), STABLE_TOOLS);
@@ -550,7 +550,7 @@ test("active Plan mode locks Settings and /plan tools", async () => {
     hasUI: true,
     select: async (_title: string, options: string[]) => {
       assert.equal(options.includes("Configure Plan-mode tools"), false);
-      assert.equal(options.includes("Settings"), false);
+      assert.equal(options.includes("Settings…"), false);
       return undefined;
     },
   });

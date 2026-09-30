@@ -1,5 +1,5 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineMenu, runMenu, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
+import { defineMenu, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
 import {
   type AvailableImplementationModel,
   findAvailableImplementationModel,
@@ -9,6 +9,7 @@ import {
   sameModel,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 import { type PlanExportDestinationProvider, planExportInputScreen } from "./plan-export-screen.js";
 import { IMPLEMENTATION_THINKING_LEVELS, type PlanModeFixedThinkingLevel } from "./settings.js";
 import type { ImplementationRuntimeSelection } from "./state.js";
@@ -169,7 +170,7 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
       },
     },
   });
-  await runMenu(ctx, menu, {
+  await runMenuWithVimKeys(ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,
@@ -248,7 +249,7 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
       },
     },
   });
-  await runMenu(ctx, menu, {
+  await runMenuWithVimKeys(ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,

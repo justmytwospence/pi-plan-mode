@@ -87,7 +87,7 @@ export class ModelPickerView implements Component {
       if (is("escape")) {
         this.filter = "";
         this.filtering = false;
-      } else if (is("enter", "down", "up")) this.filtering = false;
+      } else if (is("enter", "down", "up", "ctrl+n", "ctrl+p")) this.filtering = false;
       else if (is("backspace")) this.filter = this.filter.slice(0, -1);
       else if (data.length === 1 && data >= " " && data !== "\u007f") this.filter += data;
       else return;
@@ -103,8 +103,8 @@ export class ModelPickerView implements Component {
         this.cursor = 0;
       } else return this.options.onDone({ kind: "cancel" });
     } else if (is("ctrl+c")) return this.options.onDone({ kind: "cancel" });
-    else if (is("up", "k")) this.cursor = Math.max(0, this.cursor - 1);
-    else if (is("down", "j")) this.cursor = Math.min(rows.length - 1, this.cursor + 1);
+    else if (is("up", "k", "p", "ctrl+p")) this.cursor = Math.max(0, this.cursor - 1);
+    else if (is("down", "j", "n", "ctrl+n")) this.cursor = Math.min(rows.length - 1, this.cursor + 1);
     else if (is("pageUp")) this.cursor = Math.max(0, this.cursor - 10);
     else if (is("pageDown")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
     else if (is("home", "g")) this.cursor = 0;

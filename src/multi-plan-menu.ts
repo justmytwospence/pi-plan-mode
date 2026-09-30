@@ -1,6 +1,6 @@
 import { type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Markdown, type TuiMouseEvent } from "@earendil-works/pi-tui";
-import { defineMenu, runMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
+import { defineMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
 import { CompareView } from "./compare-view.js";
 import {
   type AvailableImplementationModel,
@@ -11,6 +11,7 @@ import {
   sameModel,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 import { modelCatalog } from "./model-catalog.js";
 import { type ModelPickerRow, ModelPickerView } from "./model-picker-view.js";
 import { alignColumns, type CandidateSet, candidateSummary, type PlanCandidate, statsCells } from "./multi-plan.js";
@@ -154,7 +155,11 @@ export async function choosePlanners(
       },
     },
   });
-  await runMenu(ctx, menu, { getState: () => undefined, signal: options.signal, isCurrent: options.isCurrent });
+  await runMenuWithVimKeys(ctx, menu, {
+    getState: () => undefined,
+    signal: options.signal,
+    isCurrent: options.isCurrent,
+  });
   return outcome;
 }
 
@@ -582,7 +587,11 @@ export async function chooseTools(ctx: ExtensionContext, options: ChooseToolsOpt
       },
     },
   });
-  await runMenu(ctx, menu, { getState: () => undefined, signal: options.signal, isCurrent: options.isCurrent });
+  await runMenuWithVimKeys(ctx, menu, {
+    getState: () => undefined,
+    signal: options.signal,
+    isCurrent: options.isCurrent,
+  });
   return outcome;
 }
 
@@ -765,7 +774,11 @@ export async function showCandidateComparison(
       },
     },
   });
-  await runMenu(ctx, menu, { getState: () => undefined, signal: lifecycle.signal, isCurrent: lifecycle.isCurrent });
+  await runMenuWithVimKeys(ctx, menu, {
+    getState: () => undefined,
+    signal: lifecycle.signal,
+    isCurrent: lifecycle.isCurrent,
+  });
   return outcome;
 }
 

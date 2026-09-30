@@ -1,5 +1,6 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { defineMenu, runMenu } from "@narumitw/pi-tui-kit";
+import { defineMenu } from "@narumitw/pi-tui-kit";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 import { type PlanExportDestinationProvider, planExportInputScreen } from "./plan-export-screen.js";
 
 interface ActiveImplementationMenuOptions {
@@ -27,7 +28,7 @@ export async function showActiveImplementationMenu(ctx: ExtensionContext, option
         items: [
           { id: "show", label: "Show active implementation plan", action: "show" },
           { id: "export", label: "Export plan…", to: "export" },
-          { id: "settings", label: "Settings", action: "settings" },
+          { id: "settings", label: "Settings…", action: "settings" },
           { id: "start-new", label: "Start a new plan", action: "start-new" },
           { id: "clear", label: "Clear active implementation plan", action: "clear" },
         ],
@@ -57,7 +58,7 @@ export async function showActiveImplementationMenu(ctx: ExtensionContext, option
       },
     },
   });
-  await runMenu(ctx, menu, {
+  await runMenuWithVimKeys(ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,

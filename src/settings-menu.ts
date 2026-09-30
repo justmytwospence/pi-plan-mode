@@ -1,5 +1,5 @@
 import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { defineMenu, type RunMenuResult, runMenu, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
+import { defineMenu, type RunMenuResult, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
 import { PLAN_MODE_COMPLETE_TOOL_NAME } from "./completion-tool.js";
 import {
   type AvailableImplementationModel,
@@ -13,6 +13,7 @@ import {
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
 import { retentionLabel } from "./implementation-retention.js";
+import { runMenuWithVimKeys } from "./menu-keys.js";
 import { planExportDestination } from "./plan-export.js";
 import { PLAN_MODE_QUESTION_TOOL_NAME } from "./question-tool.js";
 import {
@@ -590,7 +591,7 @@ export async function showPlanModeSettings(
     },
   });
 
-  return runMenu(ctx, menu, {
+  return runMenuWithVimKeys(ctx, menu, {
     getState: loadState,
     signal: options.signal,
     isCurrent: options.isCurrent,

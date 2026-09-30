@@ -363,10 +363,10 @@ test("changing Settings does not retroactively change an active implementation",
     const context = createMockContext({
       hasUI: true,
       select: async (_title: string, options: string[]) => {
-        if (options.includes("Settings")) {
+        if (options.includes("Settings…")) {
           if (openedSettings) return undefined;
           openedSettings = true;
-          return "Settings";
+          return "Settings…";
         }
         if (changedSetting) return undefined;
         changedSetting = true;

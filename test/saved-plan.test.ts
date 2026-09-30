@@ -224,7 +224,7 @@ test("saved Plan management can show, implement, clear, or cancel", async () => 
         assert.match(title, /Plan reinjection: Off; use conversation history only/i);
         assert.deepEqual(
           options.filter((option) => option !== "Close"),
-          ["Show saved plan", "Implement…", "Export plan…", "Settings", "Clear saved plan"],
+          ["Show saved plan", "Implement…", "Export plan…", "Settings…", "Clear saved plan"],
         );
         return scenario.selection === "Implement here" ? "Implement…" : scenario.selection;
       },

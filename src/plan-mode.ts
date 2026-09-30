@@ -176,6 +176,11 @@ const TIME_LIMIT_CHOICES = [15, 30, 45, 60, 90, 120, 180] as const;
 // Planner subprocesses load this same extension with `--extension` so they plan under Plan mode.
 const EXTENSION_ENTRY_PATH = fileURLToPath(new URL("./index.ts", import.meta.url));
 const PROPOSED_PLAN_MESSAGE_TYPE = "proposed-plan";
+/**
+ * The completed plan, shown in the transcript above the ready menu. Display only: the model already
+ * has the plan from its plan_mode_complete call, so this never reaches its context.
+ */
+const PLAN_DISPLAY_MESSAGE_TYPE = "plan-mode-plan-display";
 const RECOVERED_RUNTIME_ADMISSION_INPUT_MESSAGE_TYPE = "plan-mode-recovered-input";
 const BLOCKED_MUTATING_TOOLS = new Set(["edit", "write", "update_plan"]);
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
@@ -183,6 +188,9 @@ interface ReadyPresentationIntent {
   nonce: number;
   plan: string;
   source: PlanCompletionSource;
+  /** Show the plan in the transcript before the ready menu (it came from plan_mode_complete). */
+  display?: boolean;
+  model?: ImplementationModelOverride;
 }
 interface DeferredFreshImplementation {
   ctx: ExtensionContext;
@@ -386,7 +394,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       const parsed = normalizePlanModeCompletion(params);
       if (!parsed.ok) throw new Error(parsed.error);
 
-      acceptCompletedPlan(parsed.plan, PLAN_MODE_COMPLETE_TOOL_NAME, ctx);
+      acceptCompletedPlan(parsed.plan, PLAN_MODE_COMPLETE_TOOL_NAME, ctx, undefined, { display: true });
       return planModeCompleted(parsed.plan);
     },
   });
@@ -453,6 +461,14 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       ];
       box.addChild(new Text(theme.fg("dim", parts.join(" · ")), 0, 1));
     }
+    return box;
+  });
+  pi.registerMessageRenderer(PLAN_DISPLAY_MESSAGE_TYPE, (message, _options, theme) => {
+    const details = message.details as { model?: unknown } | undefined;
+    const model = typeof details?.model === "string" ? ` · ${safeTerminalText(details.model)}` : "";
+    const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
+    box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(`Proposed plan${model}`)), 0, 0));
+    box.addChild(new Markdown(String(message.content ?? ""), 0, 1, getMarkdownTheme()));
     return box;
   });
   pi.registerMessageRenderer(SELECTED_PLAN_MESSAGE_TYPE, (message, options, theme) => {
@@ -1016,7 +1032,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     // Your side conversations with planners stay out of the main model's context; a merge
     // passes them on explicitly.
     const withoutPlannerTalk = event.messages.filter(
-      (message) => !(message.role === "custom" && message.customType === PLANNER_TALK_MESSAGE_TYPE),
+      (message) =>
+        !(
+          message.role === "custom" &&
+          (message.customType === PLANNER_TALK_MESSAGE_TYPE || message.customType === PLAN_DISPLAY_MESSAGE_TYPE)
+        ),
     );
     const result = implementationRetention.transformContext(withoutPlannerTalk, state);
     if (result.clearActiveImplementationId) {
@@ -1198,6 +1218,19 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           { triggerTurn: false },
         );
       }
+      // Tool results can be collapsed (by Pi or a renderer extension such as pi-cc-extensions), so
+      // show the plan itself right above the menu that asks what to do with it.
+      if (intent.display && ctx.hasUI && !isPlannerProcess()) {
+        pi.sendMessage(
+          {
+            customType: PLAN_DISPLAY_MESSAGE_TYPE,
+            content: intent.plan,
+            display: true,
+            details: intent.model ? { model: `${intent.model.provider}/${intent.model.modelId}` } : {},
+          },
+          { triggerTurn: false },
+        );
+      }
       // Planner subprocesses (RPC, unattended) hand the plan back instead of opening menus.
       if (ctx.hasUI && !isPlannerProcess() && completedPlanIsCurrent(intent)) {
         await whileBlocked(pi.events, "Plan ready", () => planActions.showReady(latestCommandContext ?? ctx));
@@ -1349,6 +1382,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     source: PlanCompletionSource,
     ctx: ExtensionContext,
     authorModel?: ImplementationModelOverride,
+    options: { display?: boolean } = {},
   ) {
     const normalized = normalizePlanModeCompletion({ plan });
     if (!normalized.ok) {
@@ -1379,6 +1413,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       nonce: ++nextReadyPresentationNonce,
       plan: normalized.plan,
       source,
+      ...(options.display ? { display: true } : {}),
+      ...(latestPlanModel ? { model: latestPlanModel } : {}),
     };
     persistState();
     updateUi(ctx);

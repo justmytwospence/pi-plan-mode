@@ -121,7 +121,7 @@ test("stale Plan settings callbacks do not reload interactive UI", async () => {
   assert.equal(interactiveLoads, 1);
 });
 
-test("plan_mode_complete result renders the plan as Markdown", () => {
+test("plan_mode_complete result renders the plan as Markdown when expanded, one line when collapsed", () => {
   initTheme("dark");
   const mock = createMockPi({ activeTools: ["read", "bash"] });
   planMode(mock.pi);
@@ -130,8 +130,8 @@ test("plan_mode_complete result renders the plan as Markdown", () => {
 
   const renderResult = tool?.renderResult as (result: unknown, options: unknown) => { render(width: number): string[] };
   const ansiPattern = new RegExp(`${String.fromCharCode(27)}\\[[0-9;]*m`, "g");
-  const renderMarkdown = (result: unknown) =>
-    renderResult(result, { expanded: false, isPartial: false })
+  const renderMarkdown = (result: unknown, expanded = true) =>
+    renderResult(result, { expanded, isPartial: false })
       .render(80)
       .map((line) => line.replace(ansiPattern, ""))
       .join("\n");
@@ -146,6 +146,7 @@ test("plan_mode_complete result renders the plan as Markdown", () => {
   const fallback = renderMarkdown({ content: [], details: result.details });
   assert.match(fallback, /Proposed Plan/);
   assert.match(fallback, /const x = 1;/);
+  assert.equal(renderMarkdown(result, false).trim(), "Proposed plan: Title (7 lines; expand to read it here)");
 });
 
 test("completePlanArguments suggests management tokens only", () => {
@@ -1072,8 +1073,23 @@ test("plan completion dispatches the ready menu once after agent_settled", async
   await mock.events.get("agent_settled")?.[0]?.({}, context.ctx);
   await mock.events.get("agent_settled")?.[0]?.({}, context.ctx);
   assert.equal(selectCalls, 1);
-  assert.equal(mock.sentMessages.length, 1, "only the hidden Plan contract is published");
+  // The hidden Plan contract, then the plan itself shown once above the ready menu.
+  assert.equal(mock.sentMessages.length, 2);
+  const shown = mock.sentMessages.at(-1)?.message as { customType?: string; content?: string; display?: boolean };
+  assert.equal(shown.customType, "plan-mode-plan-display");
+  assert.equal(shown.content, "# Ready");
+  assert.equal(shown.display, true);
   assert.equal(context.statuses.get("plan-mode"), "plan ready");
+
+  // It is for you to read; the model already has the plan from its own tool call.
+  const contextResult = (await mock.events.get("context")?.[0]?.(
+    { messages: [{ role: "custom", ...shown, timestamp: 0 }] },
+    context.ctx,
+  )) as { messages: Array<{ customType?: string }> };
+  assert.equal(
+    contextResult.messages.some((message) => message.customType === "plan-mode-plan-display"),
+    false,
+  );
 });
 
 test("legacy plan completion is presented once only after settlement", async () => {

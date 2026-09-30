@@ -1,5 +1,5 @@
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Markdown } from "@earendil-works/pi-tui";
+import { Markdown, Text } from "@earendil-works/pi-tui";
 
 export const PLAN_MODE_COMPLETE_TOOL_NAME = "plan_mode_complete";
 export const PLAN_MODE_COMPLETE_VERSION = 1;
@@ -79,8 +79,20 @@ export function planModeCompletionMarkdown(result: PlanModeCompletionRenderResul
   return plan ? `**Proposed Plan**\n\n${plan}` : "";
 }
 
-export function renderPlanModeCompletion(result: PlanModeCompletionRenderResult) {
-  return new Markdown(planModeCompletionMarkdown(result), 0, 0, getMarkdownTheme());
+/**
+ * Expanded, the plan as Markdown. Collapsed, one line: Plan mode shows the plan itself in the
+ * transcript right above the ready menu, so the tool result does not repeat all of it.
+ */
+export function renderPlanModeCompletion(
+  result: PlanModeCompletionRenderResult,
+  options: { expanded?: boolean } = { expanded: true },
+) {
+  const markdown = planModeCompletionMarkdown(result);
+  if (options.expanded !== false) return new Markdown(markdown, 0, 0, getMarkdownTheme());
+  const plan = planFromCompletionDetails(result.details) ?? markdown;
+  const title = /^#+\s+(.+)$/mu.exec(plan)?.[1]?.trim();
+  const lines = plan.split("\n").length;
+  return new Text(`Proposed plan${title ? `: ${title}` : ""} (${lines} lines; expand to read it here)`, 0, 0);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

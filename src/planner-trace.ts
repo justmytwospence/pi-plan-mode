@@ -107,18 +107,19 @@ export function describeToolArgs(toolName: string, args: unknown): string {
       .filter(Boolean);
     return `${toolName} ×${args.tasks.length}${labels.length ? `: ${labels.join(", ")}` : ""}`;
   }
-  if (toolName === "mcp") {
-    const target =
-      typeof args.tool === "string"
-        ? `call ${args.tool}`
-        : typeof args.search === "string"
-          ? `search "${args.search}"`
-          : typeof args.describe === "string"
-            ? `describe ${args.describe}`
-            : typeof args.server === "string"
-              ? `list ${args.server}`
-              : "status";
-    return `mcp ${target}`;
+  if (toolName === "codemode" && typeof args.code === "string") {
+    // Name the tools the script calls (`tools.x(...)` or `tools["x"](...)`), not its source.
+    const called = [
+      ...new Set(
+        Array.from(
+          args.code.matchAll(/\btools\s*(?:\.\s*([A-Za-z_$][\w$]*)|\[\s*["'`]([^"'`]+)["'`]\s*\])/gu),
+          (match) => match[1] ?? match[2] ?? "",
+        ).filter(Boolean),
+      ),
+    ];
+    if (called.length === 0) return toolName;
+    const shown = called.slice(0, 4).join(", ");
+    return `${toolName} ${shown}${called.length > 4 ? `, +${called.length - 4} more` : ""}`;
   }
   const detail =
     typeof args.path === "string"

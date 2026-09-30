@@ -50,7 +50,18 @@ import {
   implementationRetentionPreview,
 } from "./implementation-retention.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
-import { checkMcpCall, readMcpCatalog } from "./mcp-tools.js";
+import {
+  buildMcpCatalog,
+  checkMcpResourceCall,
+  checkMcpTool,
+  isMcpToolName,
+  MCP_GATEWAY_TOOL,
+  MCP_RESOURCE_TOOLS,
+  type McpGuardVerdict,
+  type McpServerCatalog,
+  mcpToolIdentity,
+  readConfiguredMcpServers,
+} from "./mcp-tools.js";
 import {
   invalidPlanMessage,
   latestAssistantStopReason,
@@ -83,6 +94,7 @@ import {
   latestCandidateSet,
   MULTI_TASK_MESSAGE_TYPE,
   mcpAllowFromEnv,
+  mcpToolsNote,
   PLANNER_TALK_MESSAGE_TYPE,
   type PlanCandidate,
   resolvePlannerAccess,
@@ -237,8 +249,8 @@ interface PlanModeDependencies {
   pickTools?: typeof pickToolsWithJev;
   /** Test seam: replaces planner subprocesses (first runs and later turns in talk mode). */
   runPlanner?: typeof runPlanner;
-  /** Test seam: replaces reading the MCP servers and cached tools. */
-  readMcpCatalog?: typeof readMcpCatalog;
+  /** Test seam: replaces reading the MCP servers and their tools. */
+  readMcpCatalog?: (cwd: string) => McpServerCatalog[];
 }
 
 // Keep session state, persistence, tool, thinking, and mutex commits in this one closure so an
@@ -400,12 +412,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   });
 
   // Planners and their scouts may only call the MCP tools chosen for the run (see mcp-tools.ts).
+  // They are started with `--tools` naming exactly those; this also covers the resource tools.
   const mcpAllow = mcpAllowFromEnv();
   if (mcpAllow) {
     pi.on("tool_call", (event) => {
-      if (event.toolName !== "mcp") return;
-      const verdict = checkMcpCall(event.input, mcpAllow);
-      return verdict.allowed ? undefined : { block: true, reason: verdict.reason };
+      const verdict = checkMcpToolCall(event.toolName, event.input, mcpAllow);
+      return verdict && !verdict.allowed ? { block: true, reason: verdict.reason } : undefined;
     });
   }
 
@@ -956,6 +968,22 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     }
     if (requiredHelper) return;
 
+    // MCP tools are never active: codemode scripts call them, and those calls pass through here.
+    const mcpVerdict = checkMcpToolCall(
+      event.toolName,
+      event.input,
+      isPlannerProcess() ? mcpAllowFromEnv() : state.workflowToolChoice?.mcpAllow,
+    );
+    if (mcpVerdict) {
+      if (!planModePolicyToolNames().includes(MCP_GATEWAY_TOOL)) {
+        return {
+          block: true,
+          reason: `Plan mode blocks MCP tool '${event.toolName}' because MCP servers are not selected for this plan. The user can allow them with /plan tools.`,
+        };
+      }
+      return mcpVerdict.allowed ? undefined : { block: true, reason: mcpVerdict.reason };
+    }
+
     const calledTool = toolByName(event.toolName);
     const activeToolNames = new Set(safeGetActiveTools());
     if (!calledTool) {
@@ -988,11 +1016,6 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
           ? `Plan mode blocks tool '${event.toolName}' because it was not available when the active Plan workflow froze its tool policy. Exit Plan mode, then start again after the tool is active.`
           : `Plan mode blocks tool '${event.toolName}' because it is not selected by the Plan policy. The user can allow it for this plan with /plan tools, or for every plan with defaultPlanTools.`,
       };
-    }
-    const mcpAllow = state.workflowToolChoice?.mcpAllow;
-    if (event.toolName === "mcp" && mcpAllow && !isPlannerProcess()) {
-      const verdict = checkMcpCall(event.input, mcpAllow);
-      if (!verdict.allowed) return { block: true, reason: verdict.reason };
     }
     if (event.toolName === "bash") {
       const command = readCommand(event.input);
@@ -1055,7 +1078,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
    */
   function withGrantNote(messages: unknown[]) {
     const grants = mainSessionGrants();
-    const mcpAllow = planModePolicyToolNames().includes("mcp") ? state.workflowToolChoice?.mcpAllow : undefined;
+    const mcpAllow = planModePolicyToolNames().includes(MCP_GATEWAY_TOOL)
+      ? state.workflowToolChoice?.mcpAllow
+      : undefined;
     if (grants.length === 0 && !mcpAllow) return messages;
     const contract = latestModeContract(messages);
     const notes = [
@@ -1075,7 +1100,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
             {
               role: "custom",
               customType: "plan-mode-mcp-tools",
-              content: `Through the mcp tool, Plan mode lets you call only these MCP tools (server/tool; * means every tool on that server): ${mcpAllow.join(", ") || "none"}. Use mcp search or describe to see their arguments, and use them only to read.`,
+              content: mcpToolsNote(mcpAllow, "Plan mode lets you call only these MCP tools"),
               display: false,
               timestamp: 0,
             },
@@ -1475,11 +1500,10 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     );
     const toolsets = settings.plannerToolsets ?? {};
     const scoutTargets = [...new Set(Object.values(settings.scoutModelMap ?? {}).map(formatModelSpec))];
+    const catalog = Object.values(toolsets).some((toolset) => toolset.mcp) ? mcpCatalog(ctx.cwd) : [];
     const roots = buildToolTree({
       toolsets,
-      mcpCatalog: Object.values(toolsets).some((toolset) => toolset.mcp)
-        ? (dependencies.readMcpCatalog ?? readMcpCatalog)(ctx.cwd, getAgentDir())
-        : [],
+      mcpCatalog: catalog,
       scoutTargets,
       grants: settings.commandGrants ?? {},
     });
@@ -1558,7 +1582,13 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       timeLimitMinutes = tools.timeLimitMinutes;
       break;
     }
-    const access = resolvePlannerAccess(treeToSelection(roots), toolsets, expandHome, settings.commandGrants ?? {});
+    const access = resolvePlannerAccess(
+      treeToSelection(roots),
+      toolsets,
+      expandHome,
+      settings.commandGrants ?? {},
+      catalog,
+    );
 
     let runLifecycle = lifecycle;
     if (!state.enabled) {
@@ -1588,7 +1618,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const timeoutMs = timeLimitMinutes * 60 * 1000;
     const plannerSpecs = specs;
     const ids = plannerSpecs.map((_spec, index) => candidateId(index + offset));
-    const researchTools = [...access.tools, ...(access.mcpAllow ? [] : [])];
+    const researchTools = access.tools;
     const run = await ui.runPlannersWithProgress(ctx, {
       specs: plannerSpecs,
       ids,
@@ -2511,12 +2541,12 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const toolsets = settings.plannerToolsets ?? {};
     const tools = sessionTreeTools();
     const offersMcp =
-      tools.some((tool) => tool.name === "mcp") && Object.values(toolsets).some((toolset) => toolset.mcp);
+      tools.some((tool) => tool.name === MCP_GATEWAY_TOOL) && Object.values(toolsets).some((toolset) => toolset.mcp);
     return buildSessionToolTree({
       tools,
       defaults,
       toolsets,
-      mcpCatalog: offersMcp ? (dependencies.readMcpCatalog ?? readMcpCatalog)(ctx.cwd, getAgentDir()) : [],
+      mcpCatalog: offersMcp ? mcpCatalog(ctx.cwd) : [],
       grants: settings.commandGrants ?? {},
     });
   }
@@ -3079,8 +3109,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   function formatToolSummary() {
     const mcpAllow = state.enabled ? state.workflowToolChoice?.mcpAllow : undefined;
     const names = planModePolicyToolNames().map((name) =>
-      name === "mcp" && mcpAllow
-        ? `mcp (only ${mcpAllow.slice(0, 3).join(", ")}${mcpAllow.length > 3 ? `, +${mcpAllow.length - 3} more` : ""})`
+      name === MCP_GATEWAY_TOOL && mcpAllow
+        ? `${name} (MCP only ${mcpAllow.slice(0, 3).join(", ")}${mcpAllow.length > 3 ? `, +${mcpAllow.length - 3} more` : ""})`
         : name,
     );
     return `Plan policy allows: ${names.length > 0 ? names.join(", ") : "none"}. Model-visible tools stay unchanged.`;
@@ -3088,6 +3118,29 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   function toolByName(toolName: string) {
     return safeGetAllTools().find((candidate) => candidate.name === toolName);
+  }
+
+  /** Connected MCP servers with their tools, and configured ones that have not connected. */
+  function mcpCatalog(cwd: string): McpServerCatalog[] {
+    if (dependencies.readMcpCatalog) return dependencies.readMcpCatalog(cwd);
+    return buildMcpCatalog(safeGetAllTools(), readConfiguredMcpServers(cwd, getAgentDir()));
+  }
+
+  /** The allowlist verdict for an MCP tool or MCP resource call; undefined for other tools. */
+  function checkMcpToolCall(
+    toolName: string,
+    input: unknown,
+    allow: readonly string[] | undefined,
+  ): McpGuardVerdict | undefined {
+    const tool = toolByName(toolName);
+    if (MCP_RESOURCE_TOOLS.has(toolName) && tool?.sourceInfo.path === "builtin:mcp") {
+      return checkMcpResourceCall(input, allow);
+    }
+    const identity = mcpToolIdentity(tool);
+    if (identity) return checkMcpTool(identity, allow);
+    return isMcpToolName(toolName) && !tool
+      ? { allowed: false, reason: `MCP tool '${toolName}' is not registered.` }
+      : undefined;
   }
 
   function terminalToolName(value: string) {

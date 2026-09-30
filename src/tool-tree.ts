@@ -1,6 +1,6 @@
 import type { CommandGrant } from "./command-grants.js";
 import type { JevToolPick, ToolCapability } from "./jev-tool-picker.js";
-import type { McpServerCatalog } from "./mcp-tools.js";
+import { MCP_GATEWAY_TOOL, type McpServerCatalog } from "./mcp-tools.js";
 import type { PlannerToolset, ToolSelection } from "./multi-plan.js";
 
 /** A row in the planner tool tree: a leaf tool, or a group whose state follows its children. */
@@ -38,7 +38,7 @@ export interface BuildToolTreeInput {
 
 /**
  * Shell and Subagents are leaves; each ordinary toolset groups its tools; an MCP toolset groups
- * servers, and each server groups its cached tools (or is itself a leaf when no tools are cached).
+ * servers, and each server groups its tools (or is itself a leaf while it is not connected).
  */
 export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   const grants = Object.entries(input.grants ?? {});
@@ -115,14 +115,14 @@ function mcpServerNodes(catalog: readonly McpServerCatalog[], selected: boolean)
           children: server.tools.map((tool) => ({
             id: `mcp:${server.name}/${tool.name}`,
             label: stripServerPrefix(tool.name, server.name),
-            description: `${server.name}: ${oneLine(tool.description) || tool.name}`,
+            description: `${server.name}: ${oneLine(tool.description) || tool.name}${tool.readOnly ? " (read-only)" : ""}`,
             selected,
           })),
         }
       : {
           id: `mcp:${server.name}`,
-          label: `${server.name} (tools not cached yet; allows the whole server)`,
-          description: `MCP server ${server.name}; its tools are unknown until it has been connected once.`,
+          label: `${server.name} (not connected; allows the whole server)`,
+          description: `MCP server ${server.name}; its tools are unknown until it connects (see /mcp).`,
           selected,
         },
   );
@@ -147,7 +147,7 @@ export interface BuildSessionToolTreeInput {
 
 /**
  * The tool tree for Plan mode in this session, laid out like the planners' tree: Shell (with its
- * command grants), each planner toolset whose tools are active here, the MCP servers when the `mcp`
+ * command grants), each planner toolset whose tools are active here, the MCP servers when the `codemode`
  * tool is active, then every other tool. Leaves are `tool:<name>`, `grant:<id>`, or MCP tools.
  * Jev only scores what you already opted into beyond the built-ins (your extension tools, toolsets,
  * MCP tools, and grants): it can narrow the policy but never widens it to a tool you did not choose,
@@ -195,10 +195,10 @@ export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode
   }
   for (const [id, toolset] of Object.entries(input.toolsets)) {
     if (toolset.mcp) {
-      if (!available.has("mcp") || covered.has("mcp")) continue;
-      const servers = mcpServerNodes(input.mcpCatalog, input.defaults.has("mcp"));
+      if (!available.has(MCP_GATEWAY_TOOL) || covered.has(MCP_GATEWAY_TOOL)) continue;
+      const servers = mcpServerNodes(input.mcpCatalog, input.defaults.has(MCP_GATEWAY_TOOL));
       if (servers.length === 0) continue;
-      covered.add("mcp");
+      covered.add(MCP_GATEWAY_TOOL);
       roots.push({
         id: `toolset:${id}`,
         label: toolset.label,
@@ -238,7 +238,7 @@ export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode
 export interface SessionToolChoice {
   /** Pi tools the Plan policy allows. */
   names: string[];
-  /** MCP tools the `mcp` tool may call; undefined when every listed tool is selected. */
+  /** MCP tools codemode scripts may call; undefined when every listed tool is selected. */
   mcpAllow?: string[];
   /** Command grants that are on. */
   grants: string[];
@@ -252,7 +252,7 @@ export function sessionToolChoice(nodes: readonly ToolNode[]): SessionToolChoice
   const mcpLeaves = all.filter((leaf) => leaf.id.startsWith("mcp:"));
   const selection = treeToSelection(nodes);
   const everyMcp = mcpLeaves.every((leaf) => leaf.selected);
-  if (selection.mcp.length > 0) names.push("mcp");
+  if (selection.mcp.length > 0) names.push(MCP_GATEWAY_TOOL);
   // A granted command runs through bash, so it turns on the read-only commands too.
   if ((selection.grants ?? []).length > 0 && all.some((leaf) => leaf.id === "tool:bash") && !names.includes("bash")) {
     names.push("bash");
@@ -331,7 +331,7 @@ export function treeToSelection(nodes: readonly ToolNode[]): ToolSelection {
     else if (node.id.startsWith("mcp:")) {
       const server = node.id.slice("mcp:".length);
       if (!node.children) {
-        // A server whose tools are not cached is a single leaf that allows the whole server.
+        // A server that has not connected is a single leaf that allows the whole server.
         if (node.selected) selection.mcp.push(`${server}/*`);
         return;
       }

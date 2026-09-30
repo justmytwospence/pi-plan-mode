@@ -51,8 +51,8 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    `←`/`→` sets its effort (from the levels the model supports), `/` filters, and Enter goes on to the tools. The
    configured `planners` start picked. The line under the list shows the highlighted model's id, context window,
    and price.
-2. **Tools**: a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools (from
-   pi-mcp-adapter's config and metadata cache). Tab opens or closes a server or toolset (on a tool: closes its
+2. **Tools**: a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools (from pi's
+   built-in MCP support; servers that have not connected are listed without tools). Tab opens or closes a server or toolset (on a tool: closes its
    group). `→` also opens one (again: steps into it), `←` closes it or goes up to it, and Space selects or clears a tool or a whole group; `[-]` marks a partly selected group.
    Enter starts planning from anywhere: it asks first (a second Enter starts, Esc keeps editing), except on the
    **Start** row. Click a label to open a group,
@@ -62,8 +62,9 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    to submit its best plan, and one that stops without a plan is nudged once to submit it.
    Each planner runs as `pi --mode rpc --no-session --no-extensions --extension <this package> …` in the project
    directory, in Plan mode with the same read-only policy, and cannot ask you questions (it records assumptions).
-   Planners and their subagents can only call the selected MCP tools; anything else is blocked with a list of
-   what is allowed.
+   Planners and their subagents can only call the selected MCP tools: they are started with `--tools` naming
+   exactly those (so no other MCP tool is registered in them), and any other call is blocked with a list of what
+   is allowed. A server that has not connected in your session contributes no tools to planners.
 3. **Planning** (full screen): the top lists every planner and, indented under it, every subagent it has fanned
    out, with model, effort, time, tool calls, tokens, cost, and what it is doing now; a planner's totals include its
    subagents, and the title line totals the run. Below, one lane per planner shows a live trace; selecting a
@@ -123,8 +124,9 @@ return to the planner and count toward the planner's cost. The tool exists only 
 
 Planners and scouts start with no extensions besides this one. `plannerToolsets` defines named bundles of extensions
 and tools: an ordinary toolset (for example web research through `pi-web-access`) lists its `tools`, with optional
-`toolDescriptions`; a toolset with `"mcp": true` (loading `pi-mcp-adapter`) expands into every configured MCP server
-and its cached tools. Scouts inherit toolsets with `"scouts": true` (the default), including the MCP allowlist, which
+`toolDescriptions`; a toolset with `"mcp": true` expands into every MCP server and its tools. It loads pi's built-in
+`builtin:mcp` and `builtin:codemode` extensions and names `codemode` as its tool: MCP tools are called from codemode
+scripts. Scouts inherit toolsets with `"scouts": true` (the default), including the MCP allowlist, which
 this extension enforces inside them too. Plan mode itself uses the same tree for the tools already active in your
 session; see [Plan mode's own tools](#plan-modes-own-tools).
 
@@ -172,7 +174,7 @@ reads, so describe what it gives planners.
 
 Plan mode in your own session (`/plan`, `/plan <prompt>`, `/plan start`, or the toggle shortcut) uses the same tools
 tree as the planners, built from the tools active in the session: **Shell** with its command grants, each
-`plannerToolsets` toolset whose tools are active here, the MCP servers when the `mcp` tool is active and an
+`plannerToolsets` toolset whose tools are active here, the MCP servers when the `codemode` tool is active and an
 `"mcp": true` toolset is configured, and **Other tools**. It starts from `defaultPlanTools` (or your last choice),
 and grants from `planMode`.
 
@@ -187,8 +189,9 @@ and grants from `planMode`.
 - **Change them mid-plan.** `/plan tools` while Plan mode is on opens the tree with the current selection and Jev's
   scores; Apply takes effect from the next tool call. Tools stay visible to the model either way (the policy blocks
   calls rather than changing tool schemas), so this does not disturb the prompt cache.
-- **MCP per tool.** When only some MCP tools are selected, Plan mode blocks `mcp` calls to the others, and the model
-  is told which ones it may call.
+- **MCP per tool.** Pi's built-in MCP support registers each MCP tool as `mcp__<server>__<tool>`, callable from
+  `codemode` scripts. Plan mode admits them only while `codemode` is selected, blocks calls to MCP tools that are
+  not selected (codemode's nested calls pass through the same check), and tells the model which ones it may call.
 
 ## 🛠️ Implement with a chosen model, effort, and context
 
@@ -571,11 +574,11 @@ New settings in this fork:
       "label": "MCP servers",
       "description": "Connected services: Context7 docs, Obsidian notes, Figma designs, a Chrome browser.",
       "mcp": true,
-      "extensions": ["~/.pi/agent/npm/node_modules/pi-mcp-adapter"],
-      "tools": ["mcp"]
+      "extensions": ["builtin:mcp", "builtin:codemode"],
+      "tools": ["codemode"]
     }
   },
-  "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "mcp"],
+  "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "codemode"],
   "jevToolSelection": true,
   "jevThreshold": 0.5,
   "jevModel": "jev-latest",

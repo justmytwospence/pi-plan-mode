@@ -1,57 +1,165 @@
 import { readFileSync } from "node:fs";
-import { homedir } from "node:os";
 import { join } from "node:path";
+import type { ToolInfo } from "@earendil-works/pi-coding-agent";
 
-/** One MCP server and the tools its cached metadata lists. */
+/**
+ * Pi's built-in MCP support registers every MCP tool as `mcp__<server>__<tool>` with `codemode`
+ * exposure: the model never sees them directly and calls them from `codemode` scripts. So
+ * `codemode` is the gateway Plan mode offers MCP servers through, and the MCP tools themselves are
+ * gated one by one in `tool_call` (codemode's nested calls pass through it too).
+ */
+export const MCP_GATEWAY_TOOL = "codemode";
+
+/** Extensions a planner or scout started with `--no-extensions` needs for MCP tools. */
+export const MCP_BUILTIN_EXTENSIONS = ["builtin:mcp", "builtin:codemode"] as const;
+
+/** One MCP server and the tools it offers in this session. */
 export interface McpServerCatalog {
+  /** Server name as used in allowlists (`server/tool`): letters, digits, and `_`. */
   name: string;
-  /** Tools from the adapter's metadata cache; empty when the server was never connected. */
-  tools: Array<{ name: string; description: string }>;
-  /** False when no cached tool metadata exists yet. */
+  tools: Array<{
+    /** Tool name as used in allowlists: the Pi tool name without its `mcp__<server>__` prefix. */
+    name: string;
+    /** The Pi tool name (`mcp__<server>__<tool>`). */
+    toolName: string;
+    description: string;
+    /** The server declares the tool read-only (MCP `readOnlyHint`). */
+    readOnly?: boolean;
+  }>;
+  /** False when the server is configured but has not connected in this session. */
   known: boolean;
 }
 
+/** An allowlist server name: what Pi's MCP tool names use for the server. */
+export function mcpServerId(name: string) {
+  return name.replace(/[^A-Za-z0-9_]/gu, "_");
+}
+
+type McpToolLike = Pick<ToolInfo, "name"> & Partial<Pick<ToolInfo, "namespace" | "exposure">>;
+
+/** The server and allowlist tool name of a Pi tool, or undefined when it is not an MCP tool. */
+export function mcpToolIdentity(tool: McpToolLike | undefined): { server: string; tool: string } | undefined {
+  const namespace = tool?.namespace?.name;
+  if (!tool || !namespace?.startsWith("mcp__")) return undefined;
+  const prefix = `${namespace}__`;
+  return {
+    server: mcpServerId(namespace.slice("mcp__".length)),
+    tool: tool.name.startsWith(prefix) ? tool.name.slice(prefix.length) : tool.name,
+  };
+}
+
 /**
- * Read the MCP servers pi-mcp-adapter would load for `cwd` (its config files, in precedence order,
- * minus disabled servers) and their tools from the adapter's metadata cache. Never throws.
+ * The MCP servers Plan mode can offer: every connected server's tools (from Pi's tool registry),
+ * plus configured servers that have not connected yet, which are listed without tools.
  */
-export function readMcpCatalog(cwd: string, agentDir: string, home = homedir()): McpServerCatalog[] {
-  const sources = [
-    join(home, ".config", "mcp", "mcp.json"),
-    join(home, ".agents", "mcp.json"),
-    join(home, ".agents", "mcp", "mcp.json"),
-    join(agentDir, "mcp.json"),
-    join(cwd, ".mcp.json"),
-    join(cwd, ".pi", "mcp.json"),
-  ];
-  const servers = new Map<string, { disabled: boolean }>();
-  for (const source of sources) {
+export function buildMcpCatalog(tools: readonly McpToolLike[], configured: readonly string[] = []): McpServerCatalog[] {
+  const servers = new Map<string, McpServerCatalog>();
+  for (const name of configured) {
+    const id = mcpServerId(name);
+    if (!servers.has(id)) servers.set(id, { name: id, tools: [], known: false });
+  }
+  for (const tool of tools) {
+    if (tool.exposure === "hidden") continue;
+    const identity = mcpToolIdentity(tool);
+    if (!identity) continue;
+    const server = servers.get(identity.server) ?? { name: identity.server, tools: [], known: true };
+    server.known = true;
+    const info = tool as Partial<ToolInfo>;
+    server.tools.push({
+      name: identity.tool,
+      toolName: tool.name,
+      description: typeof info.description === "string" ? info.description : "",
+      ...(info.annotations?.readOnlyHint === true ? { readOnly: true } : {}),
+    });
+    servers.set(identity.server, server);
+  }
+  return [...servers.values()];
+}
+
+/**
+ * Enabled servers from Pi's `mcp.json` files: the user file, then the project file (which Pi reads
+ * only for trusted projects; an untrusted project's servers are listed but never connect). Never
+ * throws.
+ */
+export function readConfiguredMcpServers(cwd: string, agentDir: string): string[] {
+  const enabled = new Map<string, boolean>();
+  for (const source of [join(agentDir, "mcp.json"), join(cwd, ".pi", "mcp.json")]) {
     const config = readJson(source);
     const entries = isRecord(config) && isRecord(config.mcpServers) ? config.mcpServers : undefined;
     if (!entries) continue;
     for (const [name, definition] of Object.entries(entries)) {
-      const previous = servers.get(name);
-      const disabled =
-        isRecord(definition) && typeof definition.disabled === "boolean" ? definition.disabled : undefined;
-      servers.set(name, { disabled: disabled ?? previous?.disabled ?? false });
+      enabled.set(name, !(isRecord(definition) && definition.enabled === false));
     }
   }
-  const cache = readJson(join(agentDir, "mcp-cache.json"));
-  const cached = isRecord(cache) && isRecord(cache.servers) ? cache.servers : {};
-  return [...servers]
-    .filter(([, server]) => !server.disabled)
-    .map(([name]) => {
-      const entry = cached[name];
-      const tools =
-        isRecord(entry) && Array.isArray(entry.tools)
-          ? entry.tools.flatMap((tool) =>
-              isRecord(tool) && typeof tool.name === "string"
-                ? [{ name: tool.name, description: typeof tool.description === "string" ? tool.description : "" }]
-                : [],
-            )
-          : [];
-      return { name, tools, known: tools.length > 0 };
-    });
+  return [...enabled].filter(([, on]) => on).map(([name]) => name);
+}
+
+/**
+ * The Pi tool names an allowlist (`server/tool` or `server/*`) selects from the catalog. Planners
+ * and scouts are started with `--tools` naming exactly these, so no other MCP tool is registered in
+ * them at all. Servers whose tools are unknown contribute nothing.
+ */
+export function mcpToolNames(catalog: readonly McpServerCatalog[], allow: readonly string[]): string[] {
+  return catalog.flatMap((server) =>
+    server.tools
+      .filter((tool) => allowsMcpTool(allow, { server: server.name, tool: tool.name }))
+      .map((tool) => tool.toolName),
+  );
+}
+
+export function isMcpToolName(name: string) {
+  return name.startsWith("mcp__");
+}
+
+function allowsMcpTool(allow: readonly string[], identity: { server: string; tool: string }) {
+  return allow.some((entry) => {
+    const slash = entry.indexOf("/");
+    if (slash <= 0) return false;
+    const server = mcpServerId(entry.slice(0, slash));
+    const tool = entry.slice(slash + 1);
+    return server === identity.server && (tool === "*" || tool === identity.tool);
+  });
+}
+
+// --- Guard -------------------------------------------------------------------------------------
+
+export type McpGuardVerdict = { allowed: true } | { allowed: false; reason: string };
+
+/**
+ * Decide whether a call to an MCP tool stays within the allowlist (`server/tool` or `server/*`).
+ * Undefined allows every MCP tool.
+ */
+export function checkMcpTool(
+  identity: { server: string; tool: string },
+  allow: readonly string[] | undefined,
+): McpGuardVerdict {
+  if (!allow || allowsMcpTool(allow, identity)) return { allowed: true };
+  const listed = allow.length > 0 ? allow.join(", ") : "none";
+  return {
+    allowed: false,
+    reason: `MCP tool "${identity.server}/${identity.tool}" was not selected for this plan. Allowed MCP tools: ${listed}.`,
+  };
+}
+
+/**
+ * The MCP resource tools reach whichever server their `server` argument names; allow them for
+ * servers the allowlist selects anything from. Listing every server at once needs no allowlist.
+ */
+export const MCP_RESOURCE_TOOLS = new Set(["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"]);
+
+export function checkMcpResourceCall(input: unknown, allow: readonly string[] | undefined): McpGuardVerdict {
+  if (!allow) return { allowed: true };
+  const server = isRecord(input) && typeof input.server === "string" ? mcpServerId(input.server) : undefined;
+  const servers = new Set(allow.map((entry) => mcpServerId(entry.slice(0, Math.max(0, entry.indexOf("/"))))));
+  if (server !== undefined && servers.has(server)) return { allowed: true };
+  return {
+    allowed: false,
+    reason:
+      server === undefined
+        ? "Name the MCP server whose resources you want; this plan may only use these MCP servers: " +
+          ([...servers].filter(Boolean).join(", ") || "none")
+        : `MCP server "${server}" was not selected for this plan.`,
+  };
 }
 
 function readJson(path: string): unknown {
@@ -60,78 +168,6 @@ function readJson(path: string): unknown {
   } catch {
     return undefined;
   }
-}
-
-// --- Guard -------------------------------------------------------------------------------------
-
-const BLOCKED_ACTIONS = new Set(["install", "auth-start", "auth-complete"]);
-
-function sanitizeServer(name: string, keepDash: boolean) {
-  const valid = keepDash ? /^[A-Za-z0-9_-]$/u : /^[A-Za-z0-9]$/u;
-  return Array.from(name, (char) => (valid.test(char) ? char : `_${char.codePointAt(0)?.toString(16)}_`)).join("");
-}
-
-/** Every prefix pi-mcp-adapter may put before a server's tool names, across its prefix modes. */
-export function serverPrefixes(server: string): string[] {
-  const short = server.replace(/-?mcp$/iu, "");
-  return [
-    ...new Set(
-      [
-        sanitizeServer(server, true),
-        sanitizeServer(server, false),
-        server.replace(/[^A-Za-z0-9_]/gu, "_"),
-        sanitizeServer(short, true) || "mcp",
-        sanitizeServer(short, false) || "mcp",
-        `mcp__${sanitizeServer(server, true)}`,
-        `mcp__${sanitizeServer(server, false)}`,
-      ].filter(Boolean),
-    ),
-  ];
-}
-
-/** Names under which `mcp({ tool })` may address a server's tool. */
-export function toolNameCandidates(server: string, tool: string): Set<string> {
-  const variants = [tool, tool.replace(/\./gu, "_"), tool.replace(/[.-]/gu, "_")];
-  const names = new Set<string>(variants);
-  for (const prefix of serverPrefixes(server)) {
-    for (const variant of variants) names.add(variant.startsWith(`${prefix}_`) ? variant : `${prefix}_${variant}`);
-  }
-  return names;
-}
-
-export type McpGuardVerdict = { allowed: true } | { allowed: false; reason: string };
-
-/**
- * Decide whether an `mcp` gateway call stays within the allowlist (`server/tool` or `server/*`).
- * Searching, describing, listing, connecting, and status stay allowed so planners can discover
- * what they may call; installing servers and starting authentication never are.
- */
-export function checkMcpCall(input: unknown, allow: readonly string[]): McpGuardVerdict {
-  if (!isRecord(input)) return { allowed: true };
-  if (typeof input.action === "string" && BLOCKED_ACTIONS.has(input.action)) {
-    return { allowed: false, reason: `mcp action "${input.action}" is not available while planning.` };
-  }
-  if (typeof input.tool !== "string") return { allowed: true };
-  const called = input.tool;
-  const server = typeof input.server === "string" ? input.server : undefined;
-  for (const entry of allow) {
-    const slash = entry.indexOf("/");
-    if (slash <= 0) continue;
-    const allowedServer = entry.slice(0, slash);
-    const allowedTool = entry.slice(slash + 1);
-    if (server !== undefined && server !== allowedServer) continue;
-    if (allowedTool === "*") {
-      if (server === allowedServer) return { allowed: true };
-      if (serverPrefixes(allowedServer).some((prefix) => called.startsWith(`${prefix}_`))) return { allowed: true };
-      continue;
-    }
-    if (toolNameCandidates(allowedServer, allowedTool).has(called)) return { allowed: true };
-  }
-  const listed = allow.length > 0 ? allow.join(", ") : "none";
-  return {
-    allowed: false,
-    reason: `MCP tool "${called}" was not selected for this planning run. Allowed MCP tools: ${listed}.`,
-  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

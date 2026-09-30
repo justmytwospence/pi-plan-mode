@@ -11,11 +11,15 @@ const CATALOG: McpServerCatalog[] = [
     name: "context7",
     known: true,
     tools: [
-      { name: "query-docs", description: "Query library docs" },
-      { name: "resolve-library-id", description: "Find a library" },
+      { name: "query-docs", toolName: "mcp__context7__query-docs", description: "Query library docs" },
+      { name: "resolve-library-id", toolName: "mcp__context7__resolve-library-id", description: "Find a library" },
     ],
   },
-  { name: "obsidian", known: true, tools: [{ name: "delete_note", description: "Delete a note" }] },
+  {
+    name: "obsidian",
+    known: true,
+    tools: [{ name: "delete_note", toolName: "mcp__obsidian__delete_note", description: "Delete a note" }],
+  },
 ];
 
 const TOOLSETS = {
@@ -26,7 +30,7 @@ const TOOLSETS = {
     enabled: true,
     scouts: false,
   },
-  mcp: { label: "MCP servers", mcp: true, extensions: [], tools: ["mcp"], enabled: false, scouts: false },
+  mcp: { label: "MCP servers", mcp: true, extensions: [], tools: ["codemode"], enabled: false, scouts: false },
 };
 
 const GRANTS = {
@@ -46,14 +50,14 @@ const SESSION_TOOLS = [
   { name: "grep", builtin: true },
   { name: "web_search", builtin: false },
   { name: "fetch_content", builtin: false },
-  { name: "mcp", builtin: false },
+  { name: "codemode", builtin: false },
   { name: "custom", builtin: false },
 ];
 
 test("the session tool tree mirrors the planners' tree and Jev only scores what you opted into", () => {
   const roots = buildSessionToolTree({
     tools: SESSION_TOOLS,
-    defaults: new Set(["read", "bash", "grep", "web_search", "mcp"]),
+    defaults: new Set(["read", "bash", "grep", "web_search", "codemode"]),
     toolsets: TOOLSETS,
     mcpCatalog: CATALOG,
     grants: GRANTS,
@@ -104,18 +108,27 @@ test("the session tool tree mirrors the planners' tree and Jev only scores what 
   assert.deepEqual(choice.mcpAllow, ["context7/query-docs"]);
   assert.deepEqual(choice.grants, ["nb"]);
   // A granted command runs through bash, so bash comes back on.
-  assert.deepEqual(choice.names.sort(), ["bash", "grep", "mcp", "read", "web_search"]);
+  assert.deepEqual(choice.names.sort(), ["bash", "codemode", "grep", "read", "web_search"]);
 });
 
 function fixture(options: { jev?: boolean; pickSelected?: Record<string, boolean> } = {}) {
   const mock = createMockPi({
-    activeTools: ["read", "bash", "web_search", "fetch_content", "mcp"],
+    activeTools: ["read", "bash", "web_search", "fetch_content", "codemode"],
     allTools: [
       builtinTool("read"),
       builtinTool("bash"),
       extensionTool("web_search"),
       extensionTool("fetch_content"),
-      extensionTool("mcp"),
+      // Pi's built-in extensions report their tools as built-in; Plan mode treats them as opt-in.
+      { name: "codemode", sourceInfo: { source: "builtin", scope: "temporary", path: "builtin:codemode" } },
+      ...["mcp__context7__query-docs", "mcp__context7__resolve-library-id", "mcp__obsidian__delete_note"].map(
+        (name) => ({
+          name,
+          exposure: "codemode",
+          namespace: { name: name.split("__").slice(0, 2).join("__") },
+          sourceInfo: { source: "builtin", scope: "temporary", path: "builtin:mcp" },
+        }),
+      ),
     ],
   });
   const pickCalls: PickToolsInput[] = [];
@@ -124,7 +137,7 @@ function fixture(options: { jev?: boolean; pickSelected?: Record<string, boolean
       kind: "loaded" as const,
       settings: {
         thinkingLevel: "inherit" as const,
-        defaultPlanTools: ["read", "bash", "web_search", "fetch_content", "mcp"],
+        defaultPlanTools: ["read", "bash", "web_search", "fetch_content", "codemode"],
         plannerToolsets: TOOLSETS,
         commandGrants: GRANTS,
         ...(options.jev === false ? { jevToolSelection: false } : {}),
@@ -180,8 +193,8 @@ test("Jev picks Plan mode's tools at the first prompt, once, and the MCP guard f
   assert.equal(state()?.workflowToolChoice?.jevPending, true);
   assert.deepEqual([...(state()?.workflowToolPolicy?.allowedNames ?? [])].sort(), [
     "bash",
+    "codemode",
     "fetch_content",
-    "mcp",
     "read",
     "web_search",
   ]);
@@ -189,7 +202,7 @@ test("Jev picks Plan mode's tools at the first prompt, once, and the MCP guard f
   await firstPrompt("Upgrade the docs to the new React API");
   assert.equal(pickCalls.length, 1);
   assert.equal(pickCalls[0]?.task, "Upgrade the docs to the new React API");
-  assert.deepEqual([...(state()?.workflowToolPolicy?.allowedNames ?? [])].sort(), ["bash", "mcp", "read"]);
+  assert.deepEqual([...(state()?.workflowToolPolicy?.allowedNames ?? [])].sort(), ["bash", "codemode", "read"]);
   assert.deepEqual(state()?.workflowToolChoice?.mcpAllow, ["context7/query-docs"]);
   assert.equal(state()?.workflowToolChoice?.jevPending, undefined);
   assert.equal(state()?.workflowToolChoice?.jevScores?.["mcp:context7/query-docs"], 0.9);
@@ -201,8 +214,9 @@ test("Jev picks Plan mode's tools at the first prompt, once, and the MCP guard f
   await firstPrompt("A follow-up");
   assert.equal(pickCalls.length, 1, "Jev picks once per workflow");
 
-  assert.equal(await toolCall("mcp", { tool: "context7_query-docs" }), undefined);
-  const blocked = await toolCall("mcp", { tool: "obsidian_delete_note" });
+  // Codemode scripts call MCP tools, which are never active; the allowlist gates each call.
+  assert.equal(await toolCall("mcp__context7__query-docs", {}), undefined);
+  const blocked = await toolCall("mcp__obsidian__delete_note", {});
   assert.equal(blocked?.block, true);
   assert.match(blocked?.reason ?? "", /context7\/query-docs/u);
   assert.equal((await toolCall("web_search", { query: "x" }))?.block, true);
@@ -224,7 +238,7 @@ test("/plan <prompt> uses Jev too; turning it off keeps the defaults", async () 
     assert.equal(pickCalls.length, jev ? 1 : 0);
     assert.deepEqual(
       [...(state()?.workflowToolPolicy?.allowedNames ?? [])].sort(),
-      jev ? ["bash", "mcp", "read"] : ["bash", "fetch_content", "mcp", "read", "web_search"],
+      jev ? ["bash", "codemode", "read"] : ["bash", "codemode", "fetch_content", "read", "web_search"],
     );
   }
 });

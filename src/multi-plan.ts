@@ -1,5 +1,6 @@
 import { type CommandGrant, describeGrants, type ResolvedGrant, resolveGrant } from "./command-grants.js";
 import { formatModelSpec, type ImplementationModelOverride, type ModelSpec } from "./implementation-models.js";
+import { isMcpToolName, MCP_GATEWAY_TOOL, type McpServerCatalog, mcpToolNames } from "./mcp-tools.js";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
 /** Comma-separated extra tools a planner may use; Plan mode admits them inside planners. */
@@ -8,7 +9,7 @@ export const EXTRA_TOOLS_ENV = "PI_PLAN_MODE_EXTRA_TOOLS";
 export const SCOUT_EXTENSIONS_ENV = "PI_PLAN_MODE_SCOUT_EXTENSIONS";
 /** Comma-separated extra tools a planner passes on to its scouts. */
 export const SCOUT_TOOLS_ENV = "PI_PLAN_MODE_SCOUT_TOOLS";
-/** JSON array of MCP tools (`server/tool` or `server/*`) this process may call through `mcp`. */
+/** JSON array of MCP tools (`server/tool` or `server/*`) this process may call from codemode. */
 export const MCP_ALLOW_ENV = "PI_PLAN_MODE_MCP_ALLOW";
 /** JSON array of MCP tools a planner passes on to its scouts. */
 export const SCOUT_MCP_ALLOW_ENV = "PI_PLAN_MODE_SCOUT_MCP_ALLOW";
@@ -58,7 +59,10 @@ export interface PlannerToolset {
   tools: string[];
   /** Per-tool descriptions for the picker and Jev. */
   toolDescriptions?: Record<string, string>;
-  /** Expand into the configured MCP servers and their tools instead of listing `tools`. */
+  /**
+   * Expand into the MCP servers and their tools instead of listing `tools`, which name the gateway
+   * (`codemode`). The chosen MCP tools join `tools`, so `--tools` registers exactly those.
+   */
   mcp?: boolean;
   /** Selected by default when Jev is unavailable. */
   enabled: boolean;
@@ -82,10 +86,10 @@ export interface ToolSelection {
 export interface PlannerAccess {
   shell: boolean;
   subagents: boolean;
-  /** Extensions loaded into planners, and the tools they enable. */
+  /** Extensions loaded into planners, and the tools they enable (including chosen MCP tools). */
   extensions: string[];
   tools: string[];
-  /** MCP tools planners may call through `mcp`; undefined when MCP is not offered. */
+  /** MCP tools planners may call from codemode; undefined when MCP is not offered. */
   mcpAllow?: string[];
   /** Extensions, tools, and MCP tools passed on to scouts. */
   scoutExtensions: string[];
@@ -109,6 +113,7 @@ export function resolvePlannerAccess(
   toolsets: Readonly<Record<string, PlannerToolset>>,
   resolvePath: (path: string) => string = (path) => path,
   commandGrants: Readonly<Record<string, CommandGrant>> = {},
+  mcpCatalog: readonly McpServerCatalog[] = [],
 ): PlannerAccess {
   const grants = (selection.grants ?? []).flatMap((id) => {
     const grant = commandGrants[id];
@@ -123,7 +128,7 @@ export function resolvePlannerAccess(
   for (const [id, toolset] of Object.entries(toolsets)) {
     const chosen = toolset.mcp
       ? selection.mcp.length > 0
-        ? toolset.tools
+        ? [...toolset.tools, ...mcpToolNames(mcpCatalog, selection.mcp)]
         : []
       : (selection.toolsetTools[id] ?? []).filter((tool) => toolset.tools.includes(tool));
     if (chosen.length === 0) continue;
@@ -372,15 +377,26 @@ export function buildPlannerTranscript(entries: readonly unknown[], maxChars = M
   return `${truncate(first, maxChars / 4)}\n\n[… earlier conversation omitted …]\n\n${transcript.slice(-tailBudget)}`;
 }
 
+/** Tells a model which MCP tools it may call from codemode scripts, and how to find them. */
+export function mcpToolsNote(mcpAllow: readonly string[], lead: string) {
+  return `From codemode scripts ${lead} (server/tool; * means every tool on that server): ${mcpAllow.join(", ") || "none"}. They are named mcp__<server>__<tool>; the codemode description lists them, and scripts find the rest with searchTools() and describeTool(). MCP tools reach external services and some can change things; use them only to read.`;
+}
+
+/** The tools to name in prose: the chosen MCP tools are described by the MCP note instead. */
+export function describedTools(tools: readonly string[]) {
+  return tools.filter((tool) => !isMcpToolName(tool));
+}
+
 export function formatPlannerPrompt(
   task: string,
   transcript: string,
   plannerCount: number,
   scoutLabel?: string,
-  researchTools: readonly string[] = [],
+  allResearchTools: readonly string[] = [],
   mcpAllow?: readonly string[],
   grants: readonly ResolvedGrant[] = [],
 ) {
+  const researchTools = describedTools(allResearchTools);
   const others =
     plannerCount > 1 ? `${plannerCount - 1} other model${plannerCount > 2 ? "s are" : " is"}` : "Other models may be";
   return [
@@ -391,10 +407,8 @@ export function formatPlannerPrompt(
           `Research beyond the repository whenever outside knowledge matters (library and API docs, versions, known issues, prior art, notes) with ${researchTools.join(", ")}.`,
         ]
       : []),
-    ...(researchTools.includes("mcp")
-      ? [
-          `Through the mcp tool you may call only these MCP tools (server/tool; * means every tool on that server): ${(mcpAllow ?? []).join(", ") || "none"}. Use mcp search or describe to see their arguments. MCP tools reach external services and some can change things; use them only to read.`,
-        ]
+    ...(researchTools.includes(MCP_GATEWAY_TOOL) && mcpAllow
+      ? [mcpToolsNote(mcpAllow, "you may call only these MCP tools")]
       : []),
     ...(grants.length > 0
       ? [

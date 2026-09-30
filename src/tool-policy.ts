@@ -113,8 +113,18 @@ const READ_ONLY_COMMANDS = new Set([
   "eza",
 ]);
 
-export function isBuiltinTool(tool: ToolInfo) {
-  return tool.sourceInfo.source === "builtin";
+/** Tools of pi's built-in extensions whose source path matches their own name. */
+const BUILTIN_EXTENSION_TOOLS = new Set(["codemode", "tool_search"]);
+
+/**
+ * Pi's core tools. Tools that pi's built-in extensions register (`codemode`, `tool_search`, MCP
+ * tools from `builtin:mcp`) also report `source: "builtin"`, but Plan mode treats them like any
+ * extension tool: opt-in, with MCP tools gated per server and tool.
+ */
+export function isBuiltinTool(tool: Pick<ToolInfo, "name" | "sourceInfo">) {
+  if (tool.sourceInfo.source !== "builtin" || BUILTIN_EXTENSION_TOOLS.has(tool.name)) return false;
+  const path = (tool.sourceInfo as { path?: unknown }).path;
+  return typeof path !== "string" || !path.startsWith("builtin:") || path === `builtin:${tool.name}`;
 }
 
 export function classifyPlanModeTool(tool: ToolInfo): PlanModeToolPolicy {

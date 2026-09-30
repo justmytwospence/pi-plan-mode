@@ -264,8 +264,20 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
       enabled: true,
       scouts: true,
     },
-    mcp: { label: "MCP", extensions: ["~/mcp-adapter"], tools: ["mcp"], mcp: true, enabled: true, scouts: false },
+    mcp: {
+      label: "MCP",
+      extensions: ["builtin:mcp", "builtin:codemode"],
+      tools: ["codemode"],
+      mcp: true,
+      enabled: true,
+      scouts: false,
+    },
   };
+  const tool = (server: string, name: string) => ({ name, toolName: `mcp__${server}__${name}`, description: "" });
+  const catalog = [
+    { name: "context7", known: true, tools: [tool("context7", "query-docs"), tool("context7", "resolve-library-id")] },
+    { name: "obsidian", known: true, tools: [tool("obsidian", "search_notes"), tool("obsidian", "delete_note")] },
+  ];
   const access = resolvePlannerAccess(
     {
       shell: false,
@@ -275,12 +287,15 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
     },
     toolsets,
     (path) => path.replace("~", "/home"),
+    {},
+    catalog,
   );
+  const mcpTools = ["mcp__context7__query-docs", "mcp__context7__resolve-library-id", "mcp__obsidian__search_notes"];
   assert.deepEqual(access, {
     shell: false,
     subagents: true,
-    extensions: ["/home/web-access", "/home/mcp-adapter"],
-    tools: ["web_search", "fetch_content", "mcp"],
+    extensions: ["/home/web-access", "builtin:mcp", "builtin:codemode"],
+    tools: ["web_search", "fetch_content", "codemode", ...mcpTools],
     mcpAllow: ["context7/*", "obsidian/search_notes"],
     scoutExtensions: ["/home/web-access"],
     scoutTools: ["web_search", "fetch_content"],
@@ -298,23 +313,26 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
     access,
   };
   const args = plannerArgs(base);
-  assert.deepEqual(args.slice(args.indexOf("--no-extensions"), args.indexOf("--no-extensions") + 7), [
+  assert.deepEqual(args.slice(args.indexOf("--no-extensions"), args.indexOf("--no-extensions") + 9), [
     "--no-extensions",
     "--extension",
     "/e",
     "--extension",
     "/home/web-access",
     "--extension",
-    "/home/mcp-adapter",
+    "builtin:mcp",
+    "--extension",
+    "builtin:codemode",
   ]);
+  // Naming the chosen MCP tools in --tools is what registers them in the planner; no others exist.
   assert.equal(
     args[args.indexOf("--tools") + 1],
-    "read,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,mcp,plan_subagents",
+    `read,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,codemode,${mcpTools.join(",")},plan_subagents`,
   );
   const noSubagents = plannerArgs({ ...base, access: { ...access, shell: true, subagents: false } });
   assert.equal(
     noSubagents[noSubagents.indexOf("--tools") + 1],
-    "read,bash,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,mcp",
+    `read,bash,grep,find,ls,plan_mode_question,plan_mode_complete,web_search,fetch_content,codemode,${mcpTools.join(",")}`,
   );
 
   const { spawnProcess, calls } = fakeSpawn((child) => child.exit(0));
@@ -328,24 +346,29 @@ test("toolsets chosen at run start reach planners, their scouts, and the prompts
     spawnProcess,
     piCommand: { command: "pi", args: [] },
   });
-  assert.equal(calls[0]?.env.PI_PLAN_MODE_EXTRA_TOOLS, "web_search,fetch_content,mcp");
+  assert.equal(
+    calls[0]?.env.PI_PLAN_MODE_EXTRA_TOOLS,
+    ["web_search", "fetch_content", "codemode", ...mcpTools].join(","),
+  );
   assert.equal(calls[0]?.env.PI_PLAN_MODE_SCOUT_EXTENSIONS, '["/home/web-access"]');
   assert.equal(calls[0]?.env.PI_PLAN_MODE_SCOUT_TOOLS, "web_search,fetch_content");
   assert.equal(calls[0]?.env[SCOUT_MODEL_ENV], "anthropic/claude-opus-5-5");
 
   const scout = scoutArgs({ provider: "p", modelId: "m" }, "Find docs", {
     extensions: ["/web-access"],
-    tools: ["web_search", "mcp"],
+    tools: ["web_search", "codemode", "mcp__context7__query-docs"],
+    mcpAllow: ["context7/query-docs"],
   });
-  assert.equal(scout[scout.indexOf("--tools") + 1], "read,grep,find,ls,web_search,mcp");
+  assert.equal(scout[scout.indexOf("--tools") + 1], "read,grep,find,ls,web_search,codemode,mcp__context7__query-docs");
   assert.equal(scout[scout.indexOf("--no-extensions") + 2], "/web-access");
+  assert.match(scout.at(-1) ?? "", /research beyond the repository with web_search, codemode\. You cannot/u);
   assert.match(
     scout.at(-1) ?? "",
-    /research beyond the repository with web_search, mcp\. MCP tools reach external services/u,
+    /From codemode scripts you may call these MCP tools [^\n]*: context7\/query-docs\./u,
   );
-  const prompt = formatPlannerPrompt("t", "", 2, undefined, ["web_search", "mcp"]);
-  assert.match(prompt, /Research beyond the repository[^\n]*web_search, mcp/u);
-  assert.match(prompt, /MCP tools reach external services[^\n]*only to read/u);
+  const prompt = formatPlannerPrompt("t", "", 2, undefined, ["web_search", "codemode", ...mcpTools], ["context7/*"]);
+  assert.match(prompt, /Research beyond the repository[^\n]*web_search, codemode\./u);
+  assert.match(prompt, /only these MCP tools [^\n]*: context7\/\*\.[^\n]*only to read/u);
   assert.deepEqual(
     normalizePlanModeSettings({
       plannerToolsets: {

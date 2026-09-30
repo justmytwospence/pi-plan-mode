@@ -51,8 +51,8 @@ export interface PlanModeWorkflowToolPolicy {
 }
 
 /**
- * What this Plan workflow may use beyond the tool names in its policy: which MCP tools the `mcp`
- * tool may call, which command grants are on, and whether Jev still picks tools at the first prompt.
+ * What this Plan workflow may use beyond the tool names in its policy: which MCP tools codemode
+ * scripts may call, which command grants are on, and whether Jev still picks tools at the first prompt.
  */
 export interface WorkflowToolChoice {
   /** MCP tools (`server/tool` or `server/*`); undefined allows every MCP tool. */

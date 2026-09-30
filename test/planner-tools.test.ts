@@ -5,7 +5,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "vitest";
-import { checkMcpCall, readMcpCatalog } from "../src/mcp-tools.js";
+import {
+  buildMcpCatalog,
+  checkMcpResourceCall,
+  checkMcpTool,
+  mcpToolIdentity,
+  mcpToolNames,
+  readConfiguredMcpServers,
+} from "../src/mcp-tools.js";
 import { MCP_ALLOW_ENV } from "../src/multi-plan.js";
 import planMode from "../src/plan-mode.js";
 import { NUDGE_MESSAGE, runPlanner, WRAP_UP_MESSAGE } from "../src/planner-process.js";
@@ -22,7 +29,7 @@ import {
 } from "../src/tool-tree.js";
 import { ToolTreeView } from "../src/tool-tree-view.js";
 import { TraceView } from "../src/trace-view.js";
-import { createMockContext, createMockPi } from "./support.js";
+import { builtinTool, createMockContext, createMockPi } from "./support.js";
 
 const theme = {
   fg: (_color: string, text: string) => text,
@@ -32,59 +39,76 @@ const theme = {
   inverse: (text: string) => `[${text}]`,
 } as never;
 
-test("the MCP guard allows only selected tools, by prefixed or original name, and never auth or installs", () => {
+test("MCP tools are identified by their namespace, and the guard allows only selected ones", () => {
+  const tool = (name: string, namespace: string) => ({ name, namespace: { name: namespace } });
+  assert.deepEqual(mcpToolIdentity(tool("mcp__context7__query-docs", "mcp__context7")), {
+    server: "context7",
+    tool: "query-docs",
+  });
+  // Pi 0.99.0 keeps `-` in namespaces; later versions replace it with `_`. Allowlists use `_`.
+  assert.deepEqual(mcpToolIdentity(tool("mcp__chrome-devtools__click", "mcp__chrome-devtools")), {
+    server: "chrome_devtools",
+    tool: "click",
+  });
+  assert.equal(mcpToolIdentity({ name: "mcp__fake__x" }), undefined);
+  assert.equal(mcpToolIdentity({ name: "read" }), undefined);
+
   const allow = ["context7/query-docs", "chrome-devtools/*"];
-  assert.deepEqual(checkMcpCall({ tool: "context7_query-docs", args: {} }, allow), { allowed: true });
-  assert.deepEqual(checkMcpCall({ tool: "query-docs", server: "context7" }, allow), { allowed: true });
-  assert.deepEqual(checkMcpCall({ tool: "query-docs" }, allow), { allowed: true });
-  assert.deepEqual(checkMcpCall({ tool: "chrome-devtools_take_screenshot" }, allow), { allowed: true });
-  assert.deepEqual(checkMcpCall({ tool: "chrome_devtools_take_screenshot" }, allow), { allowed: true });
-  assert.deepEqual(checkMcpCall({ tool: "anything", server: "chrome-devtools" }, allow), { allowed: true });
-  for (const input of [{ search: "notes" }, { describe: "context7_query-docs" }, { server: "obsidian" }, {}]) {
-    assert.deepEqual(checkMcpCall(input, allow), { allowed: true }, JSON.stringify(input));
-  }
-  const blocked = checkMcpCall({ tool: "context7_resolve-library-id" }, allow);
+  assert.deepEqual(checkMcpTool({ server: "context7", tool: "query-docs" }, allow), { allowed: true });
+  assert.deepEqual(checkMcpTool({ server: "chrome_devtools", tool: "click" }, allow), { allowed: true });
+  assert.deepEqual(checkMcpTool({ server: "obsidian", tool: "delete_note" }, undefined), { allowed: true });
+  const blocked = checkMcpTool({ server: "context7", tool: "resolve-library-id" }, allow);
   assert.equal(blocked.allowed, false);
-  assert.match(blocked.allowed ? "" : blocked.reason, /not selected for this planning run.*context7\/query-docs/u);
-  assert.equal(checkMcpCall({ tool: "obsidian_obsidian__delete_note" }, allow).allowed, false);
-  assert.equal(checkMcpCall({ tool: "query-docs", server: "obsidian" }, allow).allowed, false);
-  assert.equal(checkMcpCall({ action: "auth-start", server: "figma" }, allow).allowed, false);
-  assert.equal(checkMcpCall({ action: "install", url: "https://x" }, allow).allowed, false);
-  assert.equal(checkMcpCall({ tool: "context7_query-docs" }, []).allowed, false);
+  assert.match(blocked.allowed ? "" : blocked.reason, /not selected for this plan.*context7\/query-docs/u);
+  assert.equal(checkMcpTool({ server: "context7", tool: "query-docs" }, []).allowed, false);
+
+  assert.deepEqual(checkMcpResourceCall({ server: "context7" }, allow), { allowed: true });
+  assert.equal(checkMcpResourceCall({ server: "obsidian" }, allow).allowed, false);
+  assert.equal(checkMcpResourceCall({}, allow).allowed, false);
+  assert.deepEqual(checkMcpResourceCall({}, undefined), { allowed: true });
 });
 
-test("the MCP catalog follows the adapter's config precedence, drops disabled servers, and reads cached tools", async () => {
+test("the MCP catalog lists connected servers' tools and configured servers that have not connected", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-mcp-"));
   try {
-    const home = join(root, "home");
     const agent = join(root, "agent");
     const cwd = join(root, "project");
-    await mkdir(join(home, ".config", "mcp"), { recursive: true });
     await mkdir(join(cwd, ".pi"), { recursive: true });
     await mkdir(agent, { recursive: true });
     await writeFile(
-      join(home, ".config", "mcp", "mcp.json"),
+      join(agent, "mcp.json"),
       JSON.stringify({ mcpServers: { context7: { url: "x" }, obsidian: { url: "y" }, figma: { url: "z" } } }),
     );
-    await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { obsidian: { disabled: true } } }));
-    await writeFile(join(cwd, ".mcp.json"), JSON.stringify({ mcpServers: { local: { command: "x" } } }));
-    await writeFile(
-      join(agent, "mcp-cache.json"),
-      JSON.stringify({
-        version: 1,
-        servers: {
-          context7: { tools: [{ name: "query-docs", description: "Query docs" }] },
-          obsidian: { tools: [{ name: "search_notes" }] },
-          stale: { tools: [{ name: "gone" }] },
-        },
-      }),
-    );
-    assert.deepEqual(readMcpCatalog(cwd, agent, home), [
-      { name: "context7", tools: [{ name: "query-docs", description: "Query docs" }], known: true },
+    await writeFile(join(cwd, ".pi", "mcp.json"), JSON.stringify({ mcpServers: { obsidian: { enabled: false } } }));
+    const configured = readConfiguredMcpServers(cwd, agent);
+    assert.deepEqual(configured, ["context7", "figma"]);
+    assert.deepEqual(readConfiguredMcpServers(join(root, "nowhere"), join(root, "none")), []);
+
+    const tools = [
+      { name: "read", exposure: "direct" as const },
+      {
+        name: "mcp__context7__query-docs",
+        description: "Query docs",
+        namespace: { name: "mcp__context7" },
+        exposure: "codemode" as const,
+        annotations: { readOnlyHint: true },
+      },
+      { name: "mcp__context7__gone", namespace: { name: "mcp__context7" }, exposure: "hidden" as const },
+      { name: "mcp__local__run", namespace: { name: "mcp__local" }, exposure: "codemode" as const },
+    ];
+    const catalog = buildMcpCatalog(tools, configured);
+    assert.deepEqual(catalog, [
+      {
+        name: "context7",
+        tools: [
+          { name: "query-docs", toolName: "mcp__context7__query-docs", description: "Query docs", readOnly: true },
+        ],
+        known: true,
+      },
       { name: "figma", tools: [], known: false },
-      { name: "local", tools: [], known: false },
+      { name: "local", tools: [{ name: "run", toolName: "mcp__local__run", description: "" }], known: true },
     ]);
-    assert.deepEqual(readMcpCatalog(join(root, "nowhere"), join(root, "none"), join(root, "nobody")), []);
+    assert.deepEqual(mcpToolNames(catalog, ["context7/*", "local/nope", "figma/*"]), ["mcp__context7__query-docs"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -100,15 +124,15 @@ function sampleTree() {
         enabled: true,
         scouts: true,
       },
-      mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], mcp: true, enabled: false, scouts: true },
+      mcp: { label: "MCP servers", extensions: [], tools: ["codemode"], mcp: true, enabled: false, scouts: true },
     },
     mcpCatalog: [
       {
         name: "obsidian",
         known: true,
         tools: [
-          { name: "search_notes", description: "Search notes" },
-          { name: "delete_note", description: "Delete a note" },
+          { name: "search_notes", toolName: "mcp__obsidian__search_notes", description: "Search notes" },
+          { name: "delete_note", toolName: "mcp__obsidian__delete_note", description: "Delete a note" },
         ],
       },
       { name: "figma", known: false, tools: [] },
@@ -361,13 +385,15 @@ test("traces record streamed text, thinking, tool calls with results, and notes"
   trace.apply({
     type: "tool_execution_start",
     toolCallId: "t2",
-    toolName: "mcp",
-    args: { tool: "context7_query-docs" },
+    toolName: "codemode",
+    args: {
+      code: 'const a = await tools.mcp__context7__query_docs({ query: "x" });\nconst b = await tools["mcp__context7__query-docs"]({});\nawait tools.read({ path: "a" });',
+    },
   });
   trace.apply({
     type: "tool_execution_end",
     toolCallId: "t2",
-    toolName: "mcp",
+    toolName: "codemode",
     isError: true,
     result: { content: [{ type: "text", text: "not selected" }] },
   });
@@ -379,8 +405,8 @@ test("traces record streamed text, thinking, tool calls with results, and notes"
     {
       kind: "tool",
       id: "t2",
-      name: "mcp",
-      summary: "mcp call context7_query-docs",
+      name: "codemode",
+      summary: "codemode mcp__context7__query_docs, mcp__context7__query-docs, read",
       status: "error",
       result: "not selected",
     },
@@ -733,26 +759,46 @@ test("at the soft deadline an RPC planner is steered to wrap up, and its late pl
   assert.ok(run.traces.at(-1)?.entries.some((entry) => entry.kind === "note" && /Soft deadline/u.test(entry.text)));
 });
 
-test("the MCP allowlist env makes Plan mode block unselected mcp calls in planners and scouts", async () => {
+test("the MCP allowlist env makes Plan mode block unselected MCP tools in planners and scouts", async () => {
   const previous = process.env[MCP_ALLOW_ENV];
   process.env[MCP_ALLOW_ENV] = JSON.stringify(["context7/query-docs"]);
   try {
-    const mock = createMockPi({ activeTools: ["read", "mcp"] });
+    const mcpTool = (name: string, server: string) => ({
+      name,
+      namespace: { name: `mcp__${server}` },
+      exposure: "codemode",
+      sourceInfo: { source: "builtin", scope: "temporary", path: "builtin:mcp" },
+    });
+    const mock = createMockPi({
+      activeTools: ["read", "codemode"],
+      allTools: [
+        builtinTool("read"),
+        { name: "codemode", sourceInfo: { source: "builtin", scope: "temporary", path: "builtin:codemode" } },
+        mcpTool("mcp__context7__query-docs", "context7"),
+        mcpTool("mcp__obsidian__delete_note", "obsidian"),
+        { name: "read_mcp_resource", sourceInfo: { source: "builtin", scope: "temporary", path: "builtin:mcp" } },
+      ],
+    });
     planMode(mock.pi, { readSettings: async () => ({ kind: "missing" as const }) });
     const context = createMockContext({ mode: "json", hasUI: false });
     await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, context.ctx);
     const handlers = mock.events.get("tool_call") ?? [];
     const verdicts = [];
-    for (const input of [{ tool: "context7_query-docs" }, { tool: "obsidian_obsidian__delete_note" }]) {
+    for (const [toolName, input] of [
+      ["mcp__context7__query-docs", {}],
+      ["mcp__obsidian__delete_note", {}],
+      ["mcp__unknown__x", {}],
+      ["read_mcp_resource", { server: "context7", uri: "x" }],
+      ["read_mcp_resource", { server: "obsidian", uri: "x" }],
+    ] as const) {
       let verdict: unknown;
       for (const handler of handlers) {
-        verdict = await handler({ toolName: "mcp", input }, context.ctx);
+        verdict = await handler({ toolName, input }, context.ctx);
         if (verdict) break;
       }
-      verdicts.push(verdict);
+      verdicts.push((verdict as { block?: boolean } | undefined)?.block === true);
     }
-    assert.equal(verdicts[0], undefined);
-    assert.equal((verdicts[1] as { block?: boolean }).block, true);
+    assert.deepEqual(verdicts, [false, true, true, false, true]);
   } finally {
     if (previous === undefined) delete process.env[MCP_ALLOW_ENV];
     else process.env[MCP_ALLOW_ENV] = previous;

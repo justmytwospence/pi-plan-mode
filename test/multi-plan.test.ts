@@ -613,12 +613,16 @@ test("/plan multi picks models, then tools from a tree of toolsets and MCP serve
           enabled: true,
           scouts: true,
         },
-        mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], mcp: true, enabled: false, scouts: false },
+        mcp: { label: "MCP servers", extensions: [], tools: ["codemode"], mcp: true, enabled: false, scouts: false },
       },
     },
     {
       readMcpCatalog: () => [
-        { name: "context7", known: true, tools: [{ name: "query-docs", description: "Query docs" }] },
+        {
+          name: "context7",
+          known: true,
+          tools: [{ name: "query-docs", toolName: "mcp__context7__query-docs", description: "Query docs" }],
+        },
         { name: "figma", known: false, tools: [] },
       ],
     },
@@ -667,15 +671,15 @@ test("/plan multi picks models, then tools from a tree of toolsets and MCP serve
 test("Jev's per-tool picks become the tree defaults, and a fallback keeps the settings defaults", async () => {
   const toolsets = {
     web: { label: "Web research", extensions: [], tools: ["web_search"], enabled: true, scouts: true },
-    mcp: { label: "MCP servers", extensions: [], tools: ["mcp"], mcp: true, enabled: false, scouts: false },
+    mcp: { label: "MCP servers", extensions: [], tools: ["codemode"], mcp: true, enabled: false, scouts: false },
   };
   const catalog = () => [
     {
       name: "obsidian",
       known: true,
       tools: [
-        { name: "search_notes", description: "Search notes" },
-        { name: "delete_note", description: "Delete a note" },
+        { name: "search_notes", toolName: "mcp__obsidian__search_notes", description: "Search notes" },
+        { name: "delete_note", toolName: "mcp__obsidian__delete_note", description: "Delete a note" },
       ],
     },
   ];

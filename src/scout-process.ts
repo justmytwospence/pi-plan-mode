@@ -1,8 +1,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
+import { MCP_GATEWAY_TOOL } from "./mcp-tools.js";
 import {
+  describedTools,
   EXTRA_TOOLS_ENV,
   MCP_ALLOW_ENV,
+  mcpToolsNote,
   PLANNER_ENV,
   SCOUT_EXTENSIONS_ENV,
   SCOUT_MCP_ALLOW_ENV,
@@ -109,12 +112,16 @@ export function normalizeScoutTasks(params: unknown): { ok: true; tasks: ScoutTa
   return { ok: true, tasks };
 }
 
-export function scoutPrompt(task: string, extraTools: readonly string[] = []) {
+export function scoutPrompt(task: string, allExtraTools: readonly string[] = [], mcpAllow?: readonly string[]) {
+  const extraTools = describedTools(allExtraTools);
   return [
     "You are a read-only scout working for a planner. Investigate the codebase to answer the task below, then reply with a concise, factual report: what you found, with file paths, line references, and source URLs, and anything you could not determine.",
     extraTools.length > 0
-      ? `You can read and search files, and research beyond the repository with ${extraTools.join(", ")}.${extraTools.includes("mcp") ? " MCP tools reach external services; use them only to read." : ""} You cannot run commands or edit files. Do not propose an implementation plan unless the task asks for options.`
+      ? `You can read and search files, and research beyond the repository with ${extraTools.join(", ")}. You cannot run commands or edit files. Do not propose an implementation plan unless the task asks for options.`
       : "You can only read and search files. Do not propose an implementation plan unless the task asks for options.",
+    ...(extraTools.includes(MCP_GATEWAY_TOOL) && mcpAllow
+      ? [mcpToolsNote(mcpAllow, "you may call these MCP tools")]
+      : []),
     "",
     "## Task",
     "",
@@ -125,7 +132,12 @@ export function scoutPrompt(task: string, extraTools: readonly string[] = []) {
 export function scoutArgs(
   spec: ModelSpec,
   task: string,
-  extras: { extensions?: readonly string[]; tools?: readonly string[]; guardExtensionPath?: string } = {},
+  extras: {
+    extensions?: readonly string[];
+    tools?: readonly string[];
+    guardExtensionPath?: string;
+    mcpAllow?: readonly string[];
+  } = {},
 ) {
   return [
     "--mode",
@@ -143,7 +155,7 @@ export function scoutArgs(
     "--no-prompt-templates",
     "--no-themes",
     "--",
-    scoutPrompt(task, extras.tools),
+    scoutPrompt(task, extras.tools, extras.mcpAllow),
   ];
 }
 
@@ -236,6 +248,7 @@ export function runScout(options: RunScoutOptions): Promise<ScoutResult> {
           ...scoutArgs(options.spec, options.task.task, {
             ...(options.extensions ? { extensions: options.extensions } : {}),
             ...(options.tools ? { tools: options.tools } : {}),
+            ...(options.mcpAllow ? { mcpAllow: options.mcpAllow } : {}),
             ...(options.mcpAllow && options.guardExtensionPath
               ? { guardExtensionPath: options.guardExtensionPath }
               : {}),

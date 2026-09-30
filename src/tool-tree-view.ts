@@ -48,7 +48,7 @@ export interface ToolTreeViewOptions {
 type Row = { kind: "start" } | { kind: "time" } | { kind: "node"; node: ToolNode; depth: number };
 
 /**
- * Step 2: which tools planners may use. Groups (toolsets, MCP servers) open with Enter or →, Space
+ * Step 2: which tools planners may use. Groups (toolsets, MCP servers) open and close with Tab (or → and ←), Space
  * selects or clears a tool or a whole group, and a partial mark shows a group where only some
  * tools are selected. The highlighted row is described at the bottom.
  */
@@ -154,25 +154,37 @@ export class ToolTreeView implements Component {
     } else if (row?.kind === "time" && is("right", "l", "space")) this.stepTime(1);
     else if (row?.kind === "time" && is("left", "h")) this.stepTime(-1);
     else if (row?.kind === "node" && is("space", "x")) this.change(row.node);
-    else if (row?.kind === "node" && is("right", "l")) {
+    else if (row?.kind === "node" && is("tab")) {
+      // Open or close a group; on a tool, close the group it is in and move up to it.
+      if (row.node.children) this.toggleExpanded(row.node.id);
+      else {
+        const parent = this.parentIndex(rows, this.cursor);
+        const group = parent === undefined ? undefined : rows[parent];
+        if (parent === undefined || group?.kind !== "node") return;
+        this.expanded.delete(group.node.id);
+        this.cursor = parent;
+      }
+    } else if (row?.kind === "node" && is("right", "l")) {
       // Open a group; on an open group, step into its first tool.
       if (!row.node.children) return;
       if (this.expanded.has(row.node.id)) this.cursor = Math.min(rows.length - 1, this.cursor + 1);
       else this.expanded.add(row.node.id);
     } else if (row?.kind === "node" && is("left", "h")) {
       if (row.node.children && this.expanded.has(row.node.id)) this.expanded.delete(row.node.id);
-      else {
-        // Jump to the parent group.
-        for (let index = this.cursor - 1; index >= 0; index -= 1) {
-          const candidate = rows[index];
-          if (candidate?.kind === "node" && candidate.depth < row.depth) {
-            this.cursor = index;
-            break;
-          }
-        }
-      }
+      else this.cursor = this.parentIndex(rows, this.cursor) ?? this.cursor;
     } else if (!this.confirming && !dismissed) return;
     this.options.requestRender();
+  }
+
+  /** The row of the group that contains the node at `index`, if it is inside one. */
+  private parentIndex(rows: Row[], index: number) {
+    const row = rows[index];
+    if (row?.kind !== "node") return undefined;
+    for (let candidate = index - 1; candidate >= 0; candidate -= 1) {
+      const above = rows[candidate];
+      if (above?.kind === "node" && above.depth < row.depth) return candidate;
+    }
+    return undefined;
   }
 
   private start() {
@@ -349,9 +361,9 @@ export class ToolTreeView implements Component {
       start,
       { key: "space", label: `${all ? "clear" : "select"}${isGroup ? " all" : ""}` },
       ...(isGroup && node
-        ? [this.expanded.has(node.id) ? { key: "←", label: "close" } : { key: "→", label: "open" }]
+        ? [{ key: "tab", label: this.expanded.has(node.id) ? "close" : "open" }]
         : row?.kind === "node" && row.depth > 0
-          ? [{ key: "←", label: "up to group" }]
+          ? [{ key: "tab", label: "close group" }]
           : []),
       ...common,
     ];

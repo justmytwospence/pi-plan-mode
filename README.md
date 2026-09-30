@@ -52,8 +52,8 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    configured `planners` start picked. The line under the list shows the highlighted model's id, context window,
    and price.
 2. **Tools**: a tree of Shell, Subagents, each toolset's tools, and every MCP server with its tools (from
-   pi-mcp-adapter's config and metadata cache). `→` opens a server or toolset (again: steps into it), `←` closes it
-   or goes up to it, and Space selects or clears a tool or a whole group; `[-]` marks a partly selected group.
+   pi-mcp-adapter's config and metadata cache). Tab opens or closes a server or toolset (on a tool: closes its
+   group). `→` also opens one (again: steps into it), `←` closes it or goes up to it, and Space selects or clears a tool or a whole group; `[-]` marks a partly selected group.
    Enter starts planning from anywhere: it asks first (a second Enter starts, Esc keeps editing), except on the
    **Start** row. Click a label to open a group,
    click a checkbox to toggle. The highlighted row is described at the bottom. Jev picks tools while the screen is

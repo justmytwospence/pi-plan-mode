@@ -200,7 +200,7 @@ test("the tool tree view starts on the first tool, toggles and expands rows, and
   for (let index = 0; index < 7; index += 1) view.handleInput("\u001b[B"); // to obsidian
   screen = view.render(120).join("\n");
   assert.match(screen, /› +▸ \[ \] obsidian/u);
-  assert.match(screen, /⏎ start planning +space select all +→ open/u, "hints follow the highlighted row");
+  assert.match(screen, /⏎ start planning +space select all +tab open/u, "hints follow the highlighted row");
   view.handleInput("\u001b[C"); // open obsidian
   view.handleInput(" "); // select all of obsidian
   screen = view.render(120).join("\n");
@@ -312,6 +312,37 @@ test("→ and ← open and close servers, Space selects them, and the mouse does
   assert.deepEqual(view.handleMouse({ type: "wheel", button: "none", x: 0, y: 0, wheelDelta: 1 } as never), {
     handled: true,
   });
+});
+
+test("Tab opens and closes a group, and on a tool closes its group and moves up to it", () => {
+  const view = new ToolTreeView(theme, {
+    title: "tools",
+    notes: [],
+    roots: sampleTree(),
+    startLabel: "Start",
+    timeLimitMinutes: 45,
+    timeLimitChoices: [45],
+    rows: () => 40,
+    requestRender: () => undefined,
+    onDone: () => undefined,
+  });
+  const screen = () => view.render(120).join("\n");
+  for (let index = 0; index < 6; index += 1) view.handleInput("\u001b[B"); // obsidian
+  view.handleInput("\t");
+  assert.match(screen(), /› +▾ \[ \] obsidian[\s\S]*search_notes/u);
+  assert.match(screen(), /tab close/u);
+  view.handleInput("\t");
+  assert.match(screen(), /› +▸ \[ \] obsidian/u);
+  assert.doesNotMatch(screen(), /search_notes/u);
+  view.handleInput("\t");
+  view.handleInput("\u001b[B"); // search_notes
+  assert.match(screen(), /tab close group/u);
+  view.handleInput("\t");
+  assert.match(screen(), /› +▸ \[ \] obsidian/u);
+  assert.doesNotMatch(screen(), /search_notes/u);
+  view.handleInput("g"); // Start row: Tab does nothing
+  view.handleInput("\t");
+  assert.match(screen(), /› +▶ Start/u);
 });
 
 test("traces record streamed text, thinking, tool calls with results, and notes", () => {

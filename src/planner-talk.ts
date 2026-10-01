@@ -19,6 +19,7 @@ import {
   type PlanCandidate,
 } from "./multi-plan.js";
 import { type PlannerProgress, type PlannerRunOptions, type PlannerTurnResult, runPlanner } from "./planner-process.js";
+import type { ProviderExtensions } from "./provider-extensions.js";
 import type { SubagentView } from "./subagent-progress.js";
 import type { TracePane } from "./trace-view.js";
 import { labeledRule, spinner } from "./ui-kit.js";
@@ -42,6 +43,8 @@ export interface PlannerTalkDeps {
   pi: Pick<ExtensionAPI, "sendMessage" | "appendEntry">;
   extensionPath: string;
   loadUserExtensions(): boolean;
+  /** Extensions planners and scouts load for their model's provider. */
+  providerExtensions?(): ProviderExtensions;
   timeoutMs(): number;
   /** The newest candidate set in the current branch. */
   latestSet(ctx: ExtensionContext): CandidateSet | undefined;
@@ -235,6 +238,7 @@ export class PlannerTalk {
       timeoutMs: this.deps.timeoutMs(),
       extensionPath: this.deps.extensionPath,
       loadUserExtensions: this.deps.loadUserExtensions(),
+      ...(this.deps.providerExtensions ? { providerExtensions: this.deps.providerExtensions() } : {}),
       ...(candidate.launch?.scoutSpec ? { scoutSpec: candidate.launch.scoutSpec } : {}),
       ...(candidate.launch ? { access: candidate.launch.access } : {}),
       session: candidate.session,

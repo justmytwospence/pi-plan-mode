@@ -902,3 +902,56 @@ test("planners keep their sessions; talk mode sends your messages to one, and a 
   assert.match(prompt, /<candidate id="A" source="[^"]+" revision="2">\n# Plan A v2/u);
   assert.match(prompt, /<discussion>[\s\S]*User: Drop the migration step\n\nPlanner: Dropped the migration step\./u);
 });
+
+function recordingPlanner(runs: Record<string, unknown>[]) {
+  return async (options: { id: string; spec: { provider: string; modelId: string }; followUp?: boolean }) => {
+    runs.push(options as never);
+    return {
+      id: options.id,
+      label: `${options.spec.provider}/${options.spec.modelId}`,
+      origin: "planner" as const,
+      model: options.spec,
+      status: "done" as const,
+      plan: `# Plan ${options.id}`,
+      planSubmitted: true,
+      ...(options.followUp ? { reply: "ok" } : {}),
+    };
+  };
+}
+
+test("planners and planner replies get the subscription extension the session loaded", async () => {
+  const runs: Record<string, unknown>[] = [];
+  const { mock, context } = multiPlanHarness({ kind: "talk", index: 0 }, {}, { runPlanner: recordingPlanner(runs) });
+  const auth = "/pkgs/pi-anthropic-auth/src/index.ts";
+  Object.assign(mock.pi, {
+    getCommands: () => [{ name: "anthropic-auth:status", source: "extension", sourceInfo: { path: auth } }],
+  });
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
+  assert.deepEqual(runs[0]?.providerExtensions, { anthropic: [auth] });
+  assert.deepEqual(runs[1]?.providerExtensions, { anthropic: [auth] });
+  assert.ok(!context.notifications.some((note) => /extra usage/u.test(note.message)));
+
+  const input = mock.events.get("input")?.[0];
+  await input?.({ type: "input", text: "Drop the migration step", source: "interactive" }, context.ctx);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(runs[2]?.followUp, true);
+  assert.deepEqual(runs[2]?.providerExtensions, { anthropic: [auth] });
+});
+
+test("planners warn when an extension customizes their provider but none is forwarded", async () => {
+  const runs: Record<string, unknown>[] = [];
+  const { mock, context } = multiPlanHarness({ kind: "close" }, {}, { runPlanner: recordingPlanner(runs) });
+  Object.assign(context.ctx as object, {
+    modelRegistry: {
+      ...(context.ctx as { modelRegistry: object }).modelRegistry,
+      getRegisteredProviderIds: () => ["anthropic"],
+    },
+  });
+  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
+  await mock.commands.get("plan")?.handler("multi Add a cache layer", context.ctx);
+  assert.deepEqual(runs[0]?.providerExtensions, {});
+  const warning = context.notifications.find((note) => /extra usage/u.test(note.message));
+  assert.equal(warning?.level, "warning");
+  assert.match(warning?.message ?? "", /customizes anthropic in/u);
+});

@@ -138,6 +138,27 @@ scripts. Scouts inherit toolsets with `"scouts": true` (the default), including 
 this extension enforces inside them too. Plan mode itself uses the same tree for the tools already active in your
 session; see [Plan mode's own tools](#plan-modes-own-tools).
 
+### Subscriptions in planners and scouts
+
+Because planners and scouts start with `--no-extensions`, an extension that changes how your session talks to a
+provider would be missing from them. For a Claude Pro/Max subscription this costs money: without an extension such as
+[pi-anthropic-auth](https://github.com/gotgenes/pi-anthropic-auth), Anthropic bills a subprocess's OAuth requests to
+extra usage, per token, instead of the subscription. So Plan mode forwards the provider extension your session
+loaded to every planner and scout whose model is on that provider (pi-anthropic-auth is found automatically, from the
+`anthropic-auth:status` command it registers). When no such extension is loaded, as with an API key, nothing is
+forwarded and the subprocesses use Pi's own provider. Name other providers' extensions, or override detection, with
+`providerExtensions` (an entry replaces detection for its provider; `[]` turns forwarding off):
+
+```json
+"providerExtensions": {
+  "anthropic-2": ["~/.pi/agent/npm/node_modules/@gotgenes/pi-anthropic-auth"]
+}
+```
+
+If a planner or scout runs on a provider some extension customizes in your session and nothing is forwarded for it,
+Plan mode warns when the run starts. `plannerLoadExtensions: true` instead loads all your extensions into planners
+(not scouts).
+
 ### Command grants
 
 Plan mode's bash policy only runs reviewed read-only commands, so anything that executes code (Python, scripts)
@@ -576,6 +597,7 @@ New settings in this fork:
   },
   "plannerTimeoutSeconds": 2700,
   "plannerLoadExtensions": false,
+  "providerExtensions": {},
   "plannerToolsets": {
     "web": {
       "label": "Web research",

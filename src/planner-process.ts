@@ -16,6 +16,7 @@ import {
 } from "./multi-plan.js";
 import { piSpawnCommand } from "./pi-command.js";
 import { describeToolArgs, PlannerTrace } from "./planner-trace.js";
+import { extensionsForProvider, type ProviderExtensions } from "./provider-extensions.js";
 import { PLAN_SUBAGENTS_TOOL_NAME, SCOUT_MODEL_ENV } from "./scout-process.js";
 import { SubagentTracker, type SubagentView } from "./subagent-progress.js";
 
@@ -57,6 +58,11 @@ export interface PlannerRunOptions {
   /** Absolute path of this extension's entry point, loaded into the planner with `-e`. */
   extensionPath: string;
   loadUserExtensions: boolean;
+  /**
+   * Extensions loaded per provider (e.g. the one that keeps a Claude subscription paying for
+   * Anthropic requests), added for the planner's and its scouts' models.
+   */
+  providerExtensions?: ProviderExtensions;
   /** Model for the planner's read-only subagents; enables the plan_subagents tool. */
   scoutSpec?: ModelSpec;
   /** Shell, subagents, and extra extensions and tools for this run (defaults: shell and subagents only). */
@@ -87,10 +93,14 @@ export interface PlannerRunOptions {
 export function plannerArgs(
   options: Pick<
     PlannerRunOptions,
-    "spec" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access" | "session"
+    "spec" | "extensionPath" | "loadUserExtensions" | "scoutSpec" | "access" | "session" | "providerExtensions"
   >,
 ) {
   const access = options.access ?? DEFAULT_PLANNER_ACCESS;
+  const providerExtensions = extensionsForProvider(options.providerExtensions, options.spec.provider, [
+    options.extensionPath,
+    ...access.extensions,
+  ]);
   const tools = [
     "read",
     ...(access.shell ? ["bash"] : []),
@@ -119,20 +129,27 @@ export function plannerArgs(
           "--no-extensions",
           "--extension",
           options.extensionPath,
-          ...access.extensions.flatMap((extension) => ["--extension", extension]),
+          ...[...access.extensions, ...providerExtensions].flatMap((extension) => ["--extension", extension]),
         ]),
   ];
 }
 
-export function plannerEnv(options: Pick<PlannerRunOptions, "scoutSpec" | "access">): NodeJS.ProcessEnv {
+export function plannerEnv(
+  options: Pick<PlannerRunOptions, "scoutSpec" | "access" | "providerExtensions">,
+): NodeJS.ProcessEnv {
   const access = options.access ?? DEFAULT_PLANNER_ACCESS;
+  // Scouts always start with --no-extensions, so they get their provider's extensions this way.
+  const scoutExtensions = [
+    ...access.scoutExtensions,
+    ...extensionsForProvider(options.providerExtensions, options.scoutSpec?.provider, access.scoutExtensions),
+  ];
   return {
     ...process.env,
     [PLANNER_ENV]: "1",
     PI_SKIP_VERSION_CHECK: "1",
     ...(options.scoutSpec && access.subagents ? { [SCOUT_MODEL_ENV]: formatModelSpec(options.scoutSpec) } : {}),
     [EXTRA_TOOLS_ENV]: access.tools.join(","),
-    [SCOUT_EXTENSIONS_ENV]: JSON.stringify(access.scoutExtensions),
+    [SCOUT_EXTENSIONS_ENV]: JSON.stringify(scoutExtensions),
     [SCOUT_TOOLS_ENV]: access.scoutTools.join(","),
     ...(access.mcpAllow ? { [MCP_ALLOW_ENV]: JSON.stringify(access.mcpAllow) } : {}),
     ...(access.grants?.length

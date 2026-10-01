@@ -116,6 +116,7 @@ import {
   showStoredPlan,
   updatePlanModeUi,
 } from "./presentation.js";
+import { type ProviderExtensions, resolveProviderExtensions } from "./provider-extensions.js";
 import {
   answerPlanModeQuestions,
   normalizePlanModeQuestionParams,
@@ -291,6 +292,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     pi,
     extensionPath: EXTENSION_ENTRY_PATH,
     loadUserExtensions: () => settings.plannerLoadExtensions === true,
+    providerExtensions: () => plannerProviderExtensions(),
     timeoutMs: () => configuredPlannerTimeoutSeconds(settings) * 1000,
     latestSet: (ctx) => latestCandidateSet(ctx.sessionManager.getBranch()),
     saveSet: (set) => pi.appendEntry(CANDIDATES_ENTRY_TYPE, set),
@@ -1693,6 +1695,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     prunePlannerSessions(sessionDir);
     const timeoutMs = timeLimitMinutes * 60 * 1000;
     const plannerSpecs = specs;
+    const providerExtensions = plannerProviderExtensions();
+    warnUnforwardedProviders(
+      ctx,
+      providerExtensions,
+      plannerSpecs.flatMap((spec) => {
+        const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
+        return [...(settings.plannerLoadExtensions === true ? [] : [spec]), ...(scout ? [scout] : [])];
+      }),
+    );
     const ids = plannerSpecs.map((_spec, index) => candidateId(index + offset));
     const researchTools = access.tools;
     const run = await ui.runPlannersWithProgress(ctx, {
@@ -1725,6 +1736,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               timeoutMs,
               extensionPath: EXTENSION_ENTRY_PATH,
               loadUserExtensions: settings.plannerLoadExtensions === true,
+              providerExtensions,
               signal,
               onProgress: (progress) => onProgress(index, progress),
               onTrace: (trace) => onTrace(index, trace),
@@ -1802,6 +1814,38 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
 
   function plannerSessionDir() {
     return join(getAgentDir(), "plan-mode", "planner-sessions");
+  }
+
+  /** Extensions planners and scouts load for their model's provider (see provider-extensions.ts). */
+  function plannerProviderExtensions(): ProviderExtensions {
+    const commands = typeof pi.getCommands === "function" ? pi.getCommands() : [];
+    return resolveProviderExtensions(commands, settings.providerExtensions, expandHome);
+  }
+
+  /**
+   * Warn when a planner or scout runs on a provider an extension customizes in this session but
+   * that extension is not forwarded: the subprocess would use Pi's own provider (for a Claude
+   * subscription, that means extra usage billed per token).
+   */
+  function warnUnforwardedProviders(
+    ctx: ExtensionContext,
+    providerExtensions: ProviderExtensions,
+    specs: readonly ModelSpec[],
+  ) {
+    const registry = ctx.modelRegistry as { getRegisteredProviderIds?: () => readonly string[] };
+    const customized = new Set(registry.getRegisteredProviderIds?.() ?? []);
+    const missing = [
+      ...new Set(
+        specs
+          .map((spec) => spec.provider)
+          .filter((provider) => customized.has(provider) && (providerExtensions[provider]?.length ?? 0) === 0),
+      ),
+    ];
+    if (missing.length === 0) return;
+    ctx.ui.notify(
+      `Planners run without the extension that customizes ${missing.join(", ")} in this session. Name it under providerExtensions in pi-plan-mode.json (or set plannerLoadExtensions), or a subscription may be billed as extra usage.`,
+      "warning",
+    );
   }
 
   /** Planner sessions older than 30 days are deleted when a new run starts. */

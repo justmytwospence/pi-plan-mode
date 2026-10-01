@@ -115,6 +115,11 @@ export interface PlanModeSettings {
   plannerTimeoutSeconds?: number;
   /** Load the user's extensions in planner subprocesses (needed for extension-provided models). */
   plannerLoadExtensions?: boolean;
+  /**
+   * Provider id to extensions planners and scouts load when their model is on it. An entry replaces
+   * auto-detection for that provider (`[]` turns it off); see provider-extensions.ts.
+   */
+  providerExtensions?: Record<string, string[]>;
   /** Named bundles of extensions and tools planners can be given, chosen per run in the planner picker. */
   plannerToolsets?: Record<string, PlannerToolset>;
   /** Commands Plan mode's read-only bash policy lets through when granted (e.g. marimo-pair's scripts). */
@@ -247,6 +252,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     if (typeof load !== "boolean") return undefined;
     settings.plannerLoadExtensions = load;
   }
+  if (Object.hasOwn(value, "providerExtensions")) {
+    const providerExtensions = normalizeProviderExtensions(Reflect.get(value, "providerExtensions"));
+    if (!providerExtensions) return undefined;
+    settings.providerExtensions = providerExtensions;
+  }
   if (Object.hasOwn(value, "commandGrants")) {
     const grants = normalizeCommandGrants(Reflect.get(value, "commandGrants"));
     if (!grants) return undefined;
@@ -288,6 +298,17 @@ function normalizeImplementationModelMap(value: unknown): Record<string, ModelSp
     const spec = parseModelSpec(target);
     if (!source || source.thinkingLevel || !spec) return undefined;
     entries.push([`${source.provider}/${source.modelId}`, spec]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function normalizeProviderExtensions(value: unknown): Record<string, string[]> | undefined {
+  if (!isSettingsDocument(value)) return undefined;
+  const entries: [string, string[]][] = [];
+  for (const [provider, paths] of Object.entries(value)) {
+    if (!provider.trim() || !Array.isArray(paths)) return undefined;
+    if (!paths.every((path): path is string => typeof path === "string" && path.trim().length > 0)) return undefined;
+    entries.push([provider, [...new Set(paths.map((path) => path.trim()))]]);
   }
   return Object.fromEntries(entries);
 }

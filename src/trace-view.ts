@@ -1,7 +1,8 @@
-import type { Theme } from "@earendil-works/pi-coding-agent";
+import { getMarkdownTheme, type Theme } from "@earendil-works/pi-coding-agent";
 import {
   type Component,
   type KeyId,
+  Markdown,
   matchesKey,
   type TuiMouseEvent,
   type TuiMouseEventResult,
@@ -57,6 +58,8 @@ export interface TracePane {
   progress?: PaneStats;
   /** Subagents fanned out by this planner. */
   children?: TracePane[];
+  /** The planner's plan, once it has submitted one: its lane shows the plan instead of the trace. */
+  plan?: string;
 }
 
 export interface TraceViewOptions {
@@ -100,6 +103,11 @@ export class TraceView implements Component {
   private readonly peek = new Map<string, string>();
   private readonly lineCache = new WeakMap<TraceEntry, { key: string; lines: string[] }>();
   private readonly lineCounts = new Map<string, number>();
+  /** Planners whose lane you switched back from the plan to the trace (v). */
+  private readonly showTrace = new Set<string>();
+  /** Plans already shown once, so a new plan starts at its top rather than its end. */
+  private readonly plansOpened = new Set<string>();
+  private readonly planCache = new Map<string, { plan: string; width: number; lines: string[] }>();
   private laneHeight = 10;
   private fullHeight = 10;
   // Geometry of the last overview render, for mouse hit-testing.
@@ -163,6 +171,7 @@ export class TraceView implements Component {
       const page = Math.max(1, this.fullHeight - 2);
       if (this.finished && !live && is("c")) return this.options.onClose();
       if (!pane || is("escape", "q", "left", "h")) this.focused = undefined;
+      else if (is("v") && pane.plan !== undefined) this.togglePlan(pane);
       else if (is("tab", "shift+tab", "n", "p", "ctrl+n", "ctrl+p")) {
         const next = (index + (is("tab", "n", "ctrl+n") ? 1 : -1) + rows.length) % rows.length;
         this.select(next, rows);
@@ -171,8 +180,8 @@ export class TraceView implements Component {
       else if (is("down", "j")) this.scrollPane(pane, 1, this.fullHeight);
       else if (is("pageUp", "ctrl+u", "shift+space")) this.scrollPane(pane, -page, this.fullHeight);
       else if (is("pageDown", "ctrl+d", "space")) this.scrollPane(pane, page, this.fullHeight);
-      else if (is("home", "g")) this.scroll.toTop(pane.id);
-      else if (is("end", "shift+g")) this.scroll.follow(pane.id);
+      else if (is("home", "g")) this.scroll.toTop(this.viewKey(pane));
+      else if (is("end", "shift+g")) this.scroll.follow(this.viewKey(pane));
       else return;
       this.options.requestRender();
       return;
@@ -192,17 +201,78 @@ export class TraceView implements Component {
       const next = planners[(position + (is("tab") ? 1 : -1) + planners.length) % Math.max(1, planners.length)];
       if (next) this.select(next.index, rows);
     } else if (is("enter", "right", "l")) this.focused = current?.id;
+    else if (is("v") && current?.plan !== undefined) this.togglePlan(current);
     else if (is("s")) this.lanes = !this.lanes;
     else if (current && is("pageUp", "ctrl+u")) this.scrollPane(current, -half, this.laneHeight);
     else if (current && is("pageDown", "ctrl+d")) this.scrollPane(current, half, this.laneHeight);
-    else if (current && is("home", "g")) this.scroll.toTop(current.id);
-    else if (current && is("end", "shift+g")) this.scroll.follow(current.id);
+    else if (current && is("home", "g")) this.scroll.toTop(this.viewKey(current));
+    else if (current && is("end", "shift+g")) this.scroll.follow(this.viewKey(current));
     else return;
     this.options.requestRender();
   }
 
   private scrollPane(pane: TracePane, delta: number, height: number) {
-    this.scroll.scrollBy(pane.id, delta, this.lineCounts.get(pane.id) ?? 0, height);
+    const key = this.viewKey(pane);
+    this.scroll.scrollBy(key, delta, this.lineCounts.get(key) ?? 0, height);
+  }
+
+  /** A finished planner shows its plan; v switches between the plan and the trace. */
+  private showsPlan(pane: TracePane) {
+    return pane.plan !== undefined && !this.showTrace.has(pane.id);
+  }
+
+  private togglePlan(pane: TracePane) {
+    if (this.showTrace.has(pane.id)) this.showTrace.delete(pane.id);
+    else this.showTrace.add(pane.id);
+  }
+
+  /** Plan and trace keep their own scroll positions. */
+  private viewKey(pane: TracePane) {
+    return this.showsPlan(pane) ? `${pane.id}#plan` : pane.id;
+  }
+
+  /** The lines a pane shows: its plan (from the top) once it has one, else its live trace. */
+  private contentLines(pane: TracePane, width: number) {
+    if (!this.showsPlan(pane) || pane.plan === undefined) return this.traceLines(pane.trace, width);
+    const key = this.viewKey(pane);
+    if (!this.plansOpened.has(key)) {
+      this.plansOpened.add(key);
+      this.scroll.toTop(key);
+    }
+    return this.planLines(pane.id, pane.plan, width);
+  }
+
+  private planLines(id: string, plan: string, width: number) {
+    const cached = this.planCache.get(id);
+    if (cached?.plan === plan && cached.width === width) return cached.lines;
+    let lines: string[];
+    try {
+      lines = new Markdown(plan, 0, 0, getMarkdownTheme()).render(Math.max(1, width));
+    } catch {
+      // No Markdown theme (outside Pi's TUI): plain wrapped text still reads fine.
+      lines = wrap(plan, width);
+    }
+    this.planCache.set(id, { plan, width, lines });
+    return lines;
+  }
+
+  /** `plan · 12 more ↓`, `plan`, or how far the trace is scrolled. */
+  private position(pane: TracePane, view: { below: number }, live: boolean) {
+    const theme = this.theme;
+    const key = this.viewKey(pane);
+    if (this.showsPlan(pane)) {
+      return theme.fg("success", view.below > 0 ? `plan · ${view.below} more ↓` : "plan");
+    }
+    const state = pane.progress?.state;
+    return !this.scroll.following(key)
+      ? theme.fg("warning", view.below > 0 ? `paused · ${view.below} more ↓` : "paused")
+      : (state === "running" || state === "starting") && live
+        ? theme.fg("success", "live")
+        : state === "done"
+          ? theme.fg("dim", "done")
+          : state
+            ? theme.fg("error", state === "timeout" ? "timed out" : state)
+            : "";
   }
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
@@ -359,20 +429,12 @@ export class TraceView implements Component {
 
   private lane(pane: TracePane, width: number, height: number, active: boolean, live: boolean) {
     const theme = this.theme;
-    const all = this.traceLines(pane.trace, width);
-    this.lineCounts.set(pane.id, all.length);
-    const view = this.scroll.window(pane.id, all, height);
+    const all = this.contentLines(pane, width);
+    const key = this.viewKey(pane);
+    this.lineCounts.set(key, all.length);
+    const view = this.scroll.window(key, all, height);
     const title = `${pane.id}${pane.label ? ` ${pane.label}` : ""} · ${pane.name ?? pane.model}`;
-    const state = pane.progress?.state;
-    const position = !this.scroll.following(pane.id)
-      ? theme.fg("warning", view.below > 0 ? `paused · ${view.below} more ↓` : "paused")
-      : (state === "running" || state === "starting") && live
-        ? theme.fg("success", "live")
-        : state === "done"
-          ? theme.fg("dim", "done")
-          : state
-            ? theme.fg("error", state === "timeout" ? "timed out" : state)
-            : "";
+    const position = this.position(pane, view, live);
     const head = labeledRule(
       theme,
       width,
@@ -421,22 +483,30 @@ export class TraceView implements Component {
         { key: "space", label: "page" },
         { key: "g", label: "top" },
         { key: "G", label: "follow" },
+        ...(pane.plan !== undefined ? [{ key: "v", label: this.showsPlan(pane) ? "trace" : "plan" }] : []),
         { key: "tab", label: "next agent" },
         { key: "esc", label: "back to overview", primary: !this.finished },
       ]),
     ];
     this.fullHeight = Math.max(3, height - header.length - footer.length - 1);
-    const all = this.traceLines(pane.trace, width);
-    this.lineCounts.set(pane.id, all.length);
-    const view = this.scroll.window(pane.id, all, this.fullHeight);
+    const all = this.contentLines(pane, width);
+    const key = this.viewKey(pane);
+    this.lineCounts.set(key, all.length);
+    const view = this.scroll.window(key, all, this.fullHeight);
+    const showsPlan = this.showsPlan(pane);
     const where =
       all.length === 0
         ? ""
-        : `lines ${view.start + 1}–${view.start + view.lines.length} of ${all.length}${this.scroll.following(pane.id) ? " · following" : ""}`;
+        : `lines ${view.start + 1}–${view.start + view.lines.length} of ${all.length}${!showsPlan && this.scroll.following(key) ? " · following" : ""}`;
     const body = all.length === 0 ? [theme.fg("dim", progress ? "(thinking…)" : "(waiting to start)")] : view.lines;
     return [
       ...header,
-      labeledRule(theme, width, theme.fg("muted", "trace"), theme.fg("dim", where)),
+      labeledRule(
+        theme,
+        width,
+        showsPlan ? theme.fg("success", "plan") : theme.fg("muted", "trace"),
+        theme.fg("dim", where),
+      ),
       ...padLines(body, this.fullHeight),
       ...footer,
     ];
@@ -460,6 +530,7 @@ export class TraceView implements Component {
       { key: "PgUp/PgDn", label: "scroll lane" },
       { key: "G", label: "follow" },
     );
+    if (current?.plan !== undefined) hints.push({ key: "v", label: this.showsPlan(current) ? "trace" : "plan" });
     if (this.options.getPanes().length > 1) {
       hints.push({ key: "tab", label: "next planner" }, { key: "s", label: this.lanes ? "one lane" : "lanes" });
     }

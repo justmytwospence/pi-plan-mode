@@ -70,7 +70,8 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    subagents, and the title line totals the run. Below, one lane per planner shows a live trace; selecting a
    subagent shows it in its planner's lane. Each lane scrolls on its own: the wheel or trackpad scrolls the lane
    under the pointer, `PgUp`/`PgDn` scroll the selected one, and `G` follows the end again (a scrolled lane says
-   "paused"). `s` switches to one full-width lane. Enter (or a double-click) opens an agent's full trace: thinking,
+   "paused"). A planner that has submitted its plan shows the plan in its lane (from the top) while the
+   others keep tracing; `v` switches that lane between plan and trace. `s` switches to one full-width lane. Enter (or a double-click) opens an agent's full trace: thinking,
    text, every tool call and result, and a subagent's task, with `↑↓`, `space`, `g`/`G` to move and `tab` for the
    next agent. `esc` then `y` stops the run. When every planner is done the Compare screen opens, unless you are
    reading a full trace; then `c` continues. Subagent activity reaches the monitor through the planner's

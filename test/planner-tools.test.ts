@@ -582,6 +582,50 @@ test("each lane scrolls on its own with the wheel or trackpad, and PgUp/End work
   assert.match(view.render(170).join("\n"), /B {2}GPT-6 Astra · effort xhigh/u);
 });
 
+test("a planner that finished shows its plan in its lane while the other's trace keeps running", () => {
+  const panes = tracePanes();
+  const [a, b] = panes;
+  assert.ok(a && b);
+  a.progress = {
+    ...(a.progress ?? { startedAt: 0, toolCalls: 0, subagentTasks: 0, totalTokens: 0, costUsd: 0 }),
+    state: "done",
+    endedAt: Date.now(),
+  };
+  a.plan = [
+    "# Cache the catalog",
+    "",
+    ...Array.from({ length: 40 }, (_, index) => `${index + 1}. Step ${index + 1}`),
+  ].join("\n");
+  const view = new TraceView(theme, {
+    title: "Planning",
+    getPanes: () => panes,
+    isLive: () => true,
+    rows: () => 40,
+    requestRender: () => undefined,
+    onCancel: () => undefined,
+    onClose: () => undefined,
+  });
+  let screen = view.render(170).join("\n");
+  // A's lane starts at the top of its plan; B still follows its live trace.
+  assert.match(screen, /── A · Claude Fable 5\.1 ─+ plan · \d+ more ↓ ── │ ── B · GPT-6 Astra ─+ live ──/u);
+  assert.match(screen, /Cache the catalog/u);
+  assert.doesNotMatch(screen, /read a59\.ts/u);
+  assert.match(screen, /grep b59/u);
+  assert.match(screen, /v trace/u);
+  view.handleInput("\u001b[6~"); // PgDn scrolls A's plan
+  screen = view.render(170).join("\n");
+  assert.doesNotMatch(screen, /Cache the catalog/u);
+  view.handleInput("v"); // back to A's trace
+  screen = view.render(170).join("\n");
+  assert.match(screen, /── A · Claude Fable 5\.1 ─+ done ──/u);
+  assert.match(screen, /read a59\.ts/u);
+  assert.match(screen, /v plan/u);
+  view.handleInput("v");
+  view.handleInput("\r"); // the full view shows the plan too
+  screen = view.render(170).join("\n");
+  assert.match(screen, /── plan ─+ lines \d+–\d+ of \d+ ──/u);
+});
+
 test("in a full trace the agent scrolls from the top and follows again with End", () => {
   const panes = tracePanes();
   const view = new TraceView(theme, {

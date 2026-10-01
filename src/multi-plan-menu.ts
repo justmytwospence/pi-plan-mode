@@ -275,6 +275,8 @@ export interface RunPlannersWithProgressOptions extends Lifecycle {
     onProgress: (index: number, progress: PlannerProgress) => void,
     onTrace: (index: number, trace: PlannerTrace) => void,
     onSubagents: (index: number, subagents: readonly SubagentView[]) => void,
+    /** A planner submitted its plan (the others may still be running). */
+    onPlan?: (index: number, plan: string) => void,
   ): Promise<PlanCandidate[]>;
 }
 
@@ -358,6 +360,10 @@ async function showPlannerProgress(
             const pane = panes[index];
             if (pane) pane.children = subagents.map(subagentPane);
           },
+          (index, plan) => {
+            const pane = panes[index];
+            if (pane) pane.plan = plan;
+          },
         ),
     });
     if (result.kind === "completed") return { candidates: result.value, traces: traces() };
@@ -429,6 +435,11 @@ async function runWithTraceView(
         (index, subagents) => {
           const pane = panes[index];
           if (pane) pane.children = subagents.map(subagentPane);
+          requestRender();
+        },
+        (index, plan) => {
+          const pane = panes[index];
+          if (pane) pane.plan = plan;
           requestRender();
         },
       )

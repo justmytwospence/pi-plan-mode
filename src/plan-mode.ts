@@ -1625,7 +1625,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       ids,
       events: pi.events,
       ...runLifecycle,
-      run: (signal, onProgress, onTrace, onSubagents) =>
+      run: (signal, onProgress, onTrace, onSubagents, onPlan) =>
         Promise.all(
           plannerSpecs.map((spec, index) => {
             const scout = access.subagents ? configuredScoutModel(settings, spec) : undefined;
@@ -1654,12 +1654,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               onProgress: (progress) => onProgress(index, progress),
               onTrace: (trace) => onTrace(index, trace),
               onSubagents: (subagents) => onSubagents(index, subagents),
-            }).then(({ reply: _reply, planSubmitted: _submitted, ...candidate }) => ({
-              ...candidate,
-              session,
-              launch: { access, ...(scout ? { scoutSpec: scout } : {}) },
-              ...(candidate.plan ? { revision: 1 } : {}),
-            }));
+            }).then(({ reply: _reply, planSubmitted: _submitted, ...candidate }) => {
+              // Show this planner's plan in its lane while the others keep working.
+              if (candidate.plan) onPlan?.(index, candidate.plan);
+              return {
+                ...candidate,
+                session,
+                launch: { access, ...(scout ? { scoutSpec: scout } : {}) },
+                ...(candidate.plan ? { revision: 1 } : {}),
+              };
+            });
           }),
         ),
     });

@@ -555,7 +555,7 @@ Guaranteed coexistence with Goal requires `@narumitw/pi-goal` `0.53.0` or newer 
 While a `plan_mode_question` dialog or the ready-plan menu is open, Plan mode emits `herdr:blocked` (`{ active: true, label }`, then `{ active: false }`) on the Pi event bus.
 Herdr's Pi integration counts these pairs and reports the agent as blocked, so the Agents panel and notifications show that it is waiting on you.
 While planners run (`/plan multi`) or a planner replies in talk mode, Plan mode holds `herdr:working` the same way: that work runs outside the main agent's turn, so Pi alone would report the agent idle, and a bridge that marks every open dialog as blocked would read the live trace view as a question.
-A listener such as a herdr attention bridge can report it as working instead.
+[herdr-attention-queue](https://github.com/justmytwospence/herdr-attention-queue), which installs its own pi bridge, reports it as working instead; nothing else is needed.
 Outside Herdr nothing listens and the events do nothing.
 
 ## 🛠️ Tools

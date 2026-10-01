@@ -6,6 +6,7 @@
  */
 import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { holdWorking } from "./herdr-blocked.js";
 import type { ModelSpec } from "./implementation-models.js";
 import {
   type CandidateSet,
@@ -50,6 +51,8 @@ export interface PlannerTalkDeps {
   describeModel(ctx: ExtensionContext, spec: string): { name: string; effort?: string };
   /** The monitor pane for a candidate, created when the run's traces are gone (e.g. after a restart). */
   pane(ctx: ExtensionContext, set: CandidateSet, candidate: PlanCandidate): TracePane;
+  /** pi's event bus: a replying planner holds herdr working. */
+  events?: { emit(channel: string, data: unknown): void };
   /** Test seam. */
   runPlanner?: (options: PlannerRunOptions) => Promise<PlannerTurnResult>;
 }
@@ -176,6 +179,7 @@ export class PlannerTalk {
     };
     this.turns.set(key, turn);
     this.refreshWidget(ctx);
+    const releaseWorking = holdWorking(this.deps.events, `${candidate.id} is replying`);
     const spec: ModelSpec = {
       ...candidate.model,
       ...(candidate.thinkingLevel ? { thinkingLevel: candidate.thinkingLevel } : {}),
@@ -214,6 +218,7 @@ export class PlannerTalk {
         }),
       )
       .finally(() => {
+        releaseWorking();
         this.turns.delete(key);
         this.refreshWidget(ctx);
       });

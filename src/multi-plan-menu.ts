@@ -2,6 +2,7 @@ import { type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-codi
 import { Markdown, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { defineMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
 import { CompareView } from "./compare-view.js";
+import { holdWorking } from "./herdr-blocked.js";
 import {
   type AvailableImplementationModel,
   formatModelKey,
@@ -265,6 +266,8 @@ function plannerRows(preselected: readonly ModelSpec[], available: readonly Avai
 
 export interface RunPlannersWithProgressOptions extends Lifecycle {
   specs: readonly ModelSpec[];
+  /** pi's event bus: the planners hold herdr working while they run (see herdr-blocked.ts). */
+  events?: { emit(channel: string, data: unknown): void };
   /** Candidate ids in the same order as `specs`. */
   ids: readonly string[];
   run(
@@ -286,6 +289,23 @@ export interface PlannerRunResult {
  * modes: a cancellable loader plus a status widget). Resolves undefined when the user cancels.
  */
 export async function runPlannersWithProgress(
+  ctx: ExtensionContext,
+  options: RunPlannersWithProgressOptions,
+): Promise<PlannerRunResult | undefined> {
+  // Planners work outside the main agent's turn. Hold herdr working from before the trace view
+  // opens until they finish, so the view reads as work rather than as a question.
+  const releaseWorking = holdWorking(options.events, "Planning");
+  try {
+    return await showPlannerProgress(ctx, {
+      ...options,
+      run: (...args) => options.run(...args).finally(releaseWorking),
+    });
+  } finally {
+    releaseWorking();
+  }
+}
+
+async function showPlannerProgress(
   ctx: ExtensionContext,
   options: RunPlannersWithProgressOptions,
 ): Promise<PlannerRunResult | undefined> {

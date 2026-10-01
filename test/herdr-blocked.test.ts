@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { HERDR_BLOCKED_CHANNEL, whileBlocked } from "../src/herdr-blocked.js";
+import { HERDR_BLOCKED_CHANNEL, HERDR_WORKING_CHANNEL, holdWorking, whileBlocked } from "../src/herdr-blocked.js";
+import { runPlannersWithProgress } from "../src/multi-plan-menu.js";
 import planMode from "../src/plan-mode.js";
 import { createMockContext, createMockPi } from "./support.js";
 
@@ -98,4 +99,41 @@ test("the ready-plan menu holds herdr blocked in pairs", async () => {
   assert.equal(seen.filter((event) => event.active).length, seen.filter((event) => !event.active).length);
   assert.equal(seen.at(-1)?.active, false);
   assert.equal(seen[0]?.label, "Plan ready");
+});
+
+test("holdWorking emits one active/inactive pair however often it is released", () => {
+  const seen: [string, unknown][] = [];
+  const release = holdWorking({ emit: (channel, data) => seen.push([channel, data]) }, "Planning");
+  release();
+  release();
+  assert.deepEqual(seen, [
+    [HERDR_WORKING_CHANNEL, { active: true, label: "Planning" }],
+    [HERDR_WORKING_CHANNEL, { active: false }],
+  ]);
+  const throwing = {
+    emit: () => {
+      throw new Error("listener");
+    },
+  };
+  holdWorking(throwing, "x")();
+  holdWorking(undefined, "x")();
+});
+
+test("planners hold herdr working while they run, released before the result returns", async () => {
+  const seen: unknown[] = [];
+  let runningWhileHeld = false;
+  const context = createMockContext({ mode: "print", hasUI: false });
+  const result = await runPlannersWithProgress(context.ctx, {
+    specs: [{ provider: "p", modelId: "m" }],
+    ids: ["A"],
+    isCurrent: () => true,
+    events: { emit: (channel: string, data: unknown) => channel === HERDR_WORKING_CHANNEL && seen.push(data) },
+    run: async () => {
+      runningWhileHeld = seen.length === 1;
+      return [];
+    },
+  } as never);
+  assert.ok(result);
+  assert.equal(runningWhileHeld, true);
+  assert.deepEqual(seen, [{ active: true, label: "Planning" }, { active: false }]);
 });

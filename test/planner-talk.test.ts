@@ -213,7 +213,10 @@ test("a later turn that resubmits the plan returns the revision", async () => {
   assert.equal(result.reply, "Dropped the migration step.");
 });
 
-function talkHarness(runs: Array<(options: Record<string, unknown>) => Promise<PlannerTurnResult>>) {
+function talkHarness(
+  runs: Array<(options: Record<string, unknown>) => Promise<PlannerTurnResult>>,
+  events?: { emit(channel: string, data: unknown): void },
+) {
   let set: CandidateSet = { version: 1, task: "t", createdAt: 1, candidates: [planner("A"), planner("B")] };
   const messages: Array<{ content: string; details: TalkMessageDetails }> = [];
   const notifications: string[] = [];
@@ -252,6 +255,7 @@ function talkHarness(runs: Array<(options: Record<string, unknown>) => Promise<P
       }
       return pane;
     },
+    ...(events ? { events } : {}),
     runPlanner: (options) => {
       calls.push(options as never);
       const next = runs.shift();
@@ -400,4 +404,20 @@ test("the comparison screen shows revisions and your turns, and r talks to the h
   view.handleInput("\u001b[A");
   view.handleInput("r");
   assert.deepEqual(results, [{ kind: "talk", id: "A" }]);
+});
+
+test("a replying planner holds herdr working until its reply lands", async () => {
+  const seen: [string, unknown][] = [];
+  let finish: (result: PlannerTurnResult) => void = () => undefined;
+  const harness = talkHarness([() => new Promise((resolve) => (finish = resolve))], {
+    emit: (channel, data) => seen.push([channel, data]),
+  });
+  const { talk, ctx } = harness;
+  talk.start(ctx, harness.set(), "A");
+  talk.send(ctx, "Why X?");
+  assert.deepEqual(seen, [["herdr:working", { active: true, label: "A is replying" }]]);
+  finish({ ...planner("A"), status: "done", reply: "Because Y.", planSubmitted: false, durationMs: 10 });
+  await settle();
+  assert.deepEqual(seen.at(-1), ["herdr:working", { active: false }]);
+  assert.equal(seen.length, 2);
 });

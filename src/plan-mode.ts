@@ -295,6 +295,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     saveSet: (set) => pi.appendEntry(CANDIDATES_ENTRY_TYPE, set),
     describeModel: (ctx, spec) => modelCatalog(ctx).describe(spec),
     pane: (ctx, set, candidate) => talkPane(ctx, set, candidate),
+    events: pi.events,
     ...(dependencies.runPlanner ? { runPlanner: dependencies.runPlanner } : {}),
   });
   let nextReadyPresentationNonce = 0;
@@ -1622,6 +1623,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     const run = await ui.runPlannersWithProgress(ctx, {
       specs: plannerSpecs,
       ids,
+      events: pi.events,
       ...runLifecycle,
       run: (signal, onProgress, onTrace, onSubagents) =>
         Promise.all(

@@ -692,7 +692,7 @@ export type ComparisonOutcome =
   /** With implement, go straight on to choosing the implementation model, effort, and context. */
   | { kind: "use"; candidate: PlanCandidate; implement?: boolean }
   /** Keep talking to this candidate's planner in the prompt editor. */
-  | { kind: "talk"; candidate: PlanCandidate }
+  | { kind: "talk"; candidates: PlanCandidate[] }
   | { kind: "traces" }
   /** Guidance is written afterwards in the regular prompt editor. */
   | { kind: "synthesize"; candidates: PlanCandidate[] }
@@ -857,6 +857,7 @@ async function decideSideBySide(
   const ready = set.candidates.filter((candidate) => candidate.status === "done" && candidate.plan);
   const failed = set.candidates.filter((candidate) => !(candidate.status === "done" && candidate.plan));
   const synthesisSelection = new Set(ready.map((candidate) => candidate.id));
+  const talkable = ready.filter(canTalkToPlanner);
   const byItem = (prefix: string, itemId: string | undefined) =>
     ready.find((candidate) => `${prefix}:${candidate.id}` === itemId);
   let outcome: ComparisonOutcome = { kind: "close" };
@@ -899,7 +900,17 @@ async function decideSideBySide(
                   },
                 ]
               : []),
-          ...ready.filter(canTalkToPlanner).map((candidate) => ({
+          ...(talkable.length > 1
+            ? [
+                {
+                  id: "talk:all",
+                  label: `Talk to ${talkable.map((candidate) => candidate.id).join(" + ")}`,
+                  description: "Every message goes to each planner; each replies and can revise its own plan.",
+                  action: "talk" as const,
+                },
+              ]
+            : []),
+          ...talkable.map((candidate) => ({
             id: `talk:${candidate.id}`,
             label: `Talk to ${candidate.id}`,
             description: "Keep talking to this planner in the prompt editor; it can revise its plan.",
@@ -954,9 +965,9 @@ async function decideSideBySide(
         return { kind: "close" };
       },
       talk: async ({ itemId }) => {
-        const candidate = byItem("talk", itemId);
-        if (!candidate) return { kind: "rejected" };
-        outcome = { kind: "talk", candidate };
+        const candidates = itemId === "talk:all" ? talkable : [byItem("talk", itemId)].filter((c) => c !== undefined);
+        if (candidates.length === 0) return { kind: "rejected" };
+        outcome = { kind: "talk", candidates };
         return { kind: "close" };
       },
       traces: async () => {

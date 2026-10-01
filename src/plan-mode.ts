@@ -516,7 +516,8 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
   pi.registerMessageRenderer(PLANNER_TALK_MESSAGE_TYPE, (message, options, theme) => {
     const details = (message.details ?? {}) as Partial<TalkMessageDetails>;
     const content = String(message.content ?? "");
-    const who = `planner ${details.candidate ?? "?"}${details.name ? ` · ${details.name}` : ""}`;
+    const several = (details.candidate ?? "").includes("+");
+    const who = `planner${several ? "s" : ""} ${details.candidate ?? "?"}${details.name ? ` · ${details.name}` : ""}`;
     const box = new Box(1, 1, (text) => theme.bg("customMessageBg", text));
     if (details.role === "user") {
       box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(`You → ${who}`)), 0, 0));
@@ -1782,12 +1783,21 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     }
     if (!argument) {
       ctx.ui.notify(
-        `Talk to a planner with /plan talk ${talkable.map((candidate) => candidate.id).join("|")}, or press r in /plan compare.`,
+        `Talk to a planner with /plan talk ${talkable.map((candidate) => candidate.id).join("|")}${talkable.length > 1 ? "|all" : ""}, or choose Talk in /plan compare.`,
         "info",
       );
       return;
     }
-    talk.start(ctx, set, argument.toUpperCase());
+    // `all` (or `both`) talks to every planner; `A,B` or `A+B` to several.
+    const ids =
+      argument === "all" || argument === "both"
+        ? talkable.map((candidate) => candidate.id)
+        : argument
+            .toUpperCase()
+            .split(/[,+]/u)
+            .map((id) => id.trim())
+            .filter(Boolean);
+    talk.start(ctx, set, ids);
   }
 
   function plannerSessionDir() {
@@ -1860,7 +1870,11 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     if (!lifecycle.isCurrent()) return;
     if (outcome.kind === "talk") {
       const latest = latestCandidateSet(ctx.sessionManager.getBranch()) ?? set;
-      talk.start(ctx, latest, outcome.candidate.id);
+      talk.start(
+        ctx,
+        latest,
+        outcome.candidates.map((candidate) => candidate.id),
+      );
       return;
     }
     if (outcome.kind === "use" || outcome.kind === "synthesize") talk.stop(ctx, true);

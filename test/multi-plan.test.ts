@@ -401,7 +401,7 @@ function multiPlanHarness(
         showCandidateComparison: async (_ctx: unknown, set: { candidates: PlanCandidate[] }) => {
           calls.compare?.push(set);
           if (outcome.kind === "use") return { kind: "use", candidate: set.candidates[outcome.index as number] };
-          if (outcome.kind === "talk") return { kind: "talk", candidate: set.candidates[outcome.index as number] };
+          if (outcome.kind === "talk") return { kind: "talk", candidates: [set.candidates[outcome.index as number]] };
           if (outcome.kind === "synthesize") {
             return { kind: "synthesize", candidates: set.candidates };
           }
@@ -774,6 +774,8 @@ test("after a multi-model run the decision screen shows the task, both plans sid
           origin: "planner",
           status: "done",
           plan: `# Token bucket\n\n${long}`,
+          model: { provider: "anthropic", modelId: "claude-fable-5-1" },
+          session: { dir: "/tmp", id: "plan1-A" },
           durationMs: 780_000,
           toolCalls: 72,
           costUsd: 12.4,
@@ -784,6 +786,8 @@ test("after a multi-model run the decision screen shows the task, both plans sid
           origin: "planner",
           status: "done",
           plan: "# Sliding window\n\n1. Redis",
+          model: { provider: "openai-codex", modelId: "gpt-6-astra" },
+          session: { dir: "/tmp", id: "plan1-B" },
           durationMs: 802_000,
           toolCalls: 8,
           costUsd: 5.06,
@@ -801,6 +805,7 @@ test("after a multi-model run the decision screen shows the task, both plans sid
   assert.match(screen, /Token bucket +│ +(?:# )?Sliding window/u);
   assert.match(screen, /2 plans are ready\. What next\?/u);
   assert.match(screen, /→ Implement A…[\s\S]*Implement B…[\s\S]*Merge A \+ B…/u);
+  assert.match(screen, /Talk to A \+ B[\s\S]*Talk to A[\s\S]*Talk to B/u);
   assert.ok(
     screen.indexOf("Task") < screen.indexOf("Token bucket") &&
       screen.indexOf("Token bucket") < screen.indexOf("Implement A…"),

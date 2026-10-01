@@ -268,6 +268,48 @@ function talkHarness(
 
 const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
+test("talking to both planners sends each message to both; each replies and revises on its own", async () => {
+  let finishA: (result: PlannerTurnResult) => void = () => undefined;
+  const harness = talkHarness([
+    () => new Promise((resolve) => (finishA = resolve)),
+    async () => ({
+      ...planner("B"),
+      status: "done",
+      reply: "Revised.",
+      planSubmitted: true,
+      plan: "# B v2",
+      durationMs: 10,
+    }),
+  ]);
+  const { talk, ctx } = harness;
+  assert.equal(talk.start(ctx, harness.set(), ["A", "B"]), true);
+  assert.equal(talk.targetId, "A + B");
+  assert.match(harness.notifications.at(-1) ?? "", /Now talking to planners A \+ B; each gets every message/u);
+
+  talk.send(ctx, "Both of you: drop the migration.");
+  assert.deepEqual(
+    harness.calls.map((call) => call.id),
+    ["A", "B"],
+  );
+  // Your message is shown once, addressed to both.
+  assert.equal(harness.messages.filter((message) => message.details.role === "user").length, 1);
+  assert.equal(harness.messages[0]?.details.candidate, "A + B");
+  await settle();
+  assert.equal(harness.set().candidates[1]?.plan, "# B v2");
+  assert.equal(harness.set().candidates[1]?.revision, 2);
+  assert.equal(harness.set().candidates[0]?.thread?.[0]?.text, "Both of you: drop the migration.");
+
+  // A is still replying: the next message waits, for both, so they stay in step.
+  talk.send(ctx, "Next");
+  assert.equal(harness.calls.length, 2);
+  assert.deepEqual(harness.editor, ["Next"]);
+  assert.match(harness.notifications.at(-1) ?? "", /A is still replying/u);
+  finishA({ ...planner("A"), status: "done", reply: "OK.", planSubmitted: false, durationMs: 5 });
+  await settle();
+  talk.stop(ctx);
+  assert.match(harness.notifications.at(-1) ?? "", /Stopped talking to planners A \+ B/u);
+});
+
 test("talk mode sends your message to the planner's session and records its reply and revised plan", async () => {
   let finish: (result: PlannerTurnResult) => void = () => undefined;
   const harness = talkHarness([

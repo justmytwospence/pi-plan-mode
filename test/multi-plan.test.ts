@@ -697,13 +697,13 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
                 kind: "jev" as const,
                 model: "jev-1.13.0",
                 probabilities: {
-                  shell: 0.9,
+                  shell: 0.2,
                   "toolset:web/web_search": 0.2,
                   "mcp:obsidian/search_notes": 0.8,
                   "mcp:obsidian/delete_note": 0.1,
                 },
                 selected: {
-                  shell: true,
+                  shell: false,
                   "toolset:web/web_search": false,
                   "mcp:obsidian/search_notes": true,
                   "mcp:obsidian/delete_note": false,
@@ -724,7 +724,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
     if (scenario === "jev") {
       assert.deepEqual(
         pickCalls[0]?.capabilities.map((capability) => capability.id),
-        ["toolset:web/web_search", "mcp:obsidian/search_notes", "mcp:obsidian/delete_note"],
+        ["shell", "toolset:web/web_search", "mcp:obsidian/search_notes", "mcp:obsidian/delete_note"],
       );
       assert.deepEqual(leaves, {
         shell: true,
@@ -732,7 +732,7 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
         "mcp:obsidian/search_notes": true,
         "mcp:obsidian/delete_note": false,
       });
-      assert.match(tools?.jevMessage ?? "", /Picked 2 tools for this task \(jev-1\.13\.0\)/u);
+      assert.match(tools?.jevMessage ?? "", /Picked 1 tool for this task \(jev-1\.13\.0\)/u);
     } else {
       assert.deepEqual(leaves, {
         shell: true,

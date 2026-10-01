@@ -163,7 +163,7 @@ things, such as the marimo-pair skill, which runs Python in a live notebook kern
   there, and the model is told about the grants that are on.
 - The granted code can do anything its tool can; granting it is your call. Everything else stays read-only.
 
-When `TYPESAFE_API_KEY` is set, every tool in the tree except the read-only Shell is preselected by [Jev](https://docs.typesafe.ai), TypeSafe's
+When `TYPESAFE_API_KEY` is set, every tool in the tree is scored, and all but the read-only Shell preselected, by [Jev](https://docs.typesafe.ai), TypeSafe's
 fast System One model: one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
 tokens) asks whether planners writing a plan for this task would materially benefit from it. Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
 can still change any of them. Without a key, with `jevToolSelection: false`, or when the request fails or times out
@@ -180,10 +180,11 @@ and grants from `planMode`.
 
 - **Jev picks at the first prompt.** Plan mode starts before you describe the task, so Jev scores the tree when your
   first Plan message arrives (with `/plan <prompt>`, that prompt) and narrows the policy to what the task needs:
-  for example only Context7's docs tools instead of every MCP server. A short note says what it picked. Jev only
-  scores what you opted into beyond the built-ins (extension tools in your defaults, toolsets, MCP tools, and
-  grants). It never enables a tool you did not choose, and never takes away the built-in `read`, `bash`, `grep`,
-  `find`, and `ls` that Plan mode inspects the repository with (planners' read-only Shell is kept the same way).
+  for example only Context7's docs tools instead of every MCP server. A short note says what it picked. Jev scores
+  every tool, but only changes what you opted into beyond the built-ins (extension tools in your defaults,
+  toolsets, MCP tools, and grants). It never enables a tool you did not choose, and never takes away the built-in
+  `read`, `bash`, `grep`, `find`, and `ls` that Plan mode inspects the repository with (planners' read-only Shell
+  is kept the same way); those rows still show Jev's score, so you can follow it yourself.
 - **Choose them yourself.** "Choose tools, then start…" in the `/plan` menu and `/plan tools` open the tree. Change
   anything and Jev leaves your choice alone; start without changes and Jev still picks at the first prompt.
 - **Change them mid-plan.** `/plan tools` while Plan mode is on opens the tree with the current selection and Jev's

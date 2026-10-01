@@ -3,7 +3,7 @@ import { test } from "vitest";
 import type { PickToolsInput } from "../src/jev-tool-picker.js";
 import type { McpServerCatalog } from "../src/mcp-tools.js";
 import planMode from "../src/plan-mode.js";
-import { buildSessionToolTree, leafCapabilities, leaves, sessionToolChoice } from "../src/tool-tree.js";
+import { applyJevPick, buildSessionToolTree, leafCapabilities, leaves, sessionToolChoice } from "../src/tool-tree.js";
 import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
 
 const CATALOG: McpServerCatalog[] = [
@@ -54,7 +54,7 @@ const SESSION_TOOLS = [
   { name: "custom", builtin: false },
 ];
 
-test("the session tool tree mirrors the planners' tree and Jev only scores what you opted into", () => {
+test("the session tool tree mirrors the planners' tree, and Jev scores every tool but only changes opted-in ones", () => {
   const roots = buildSessionToolTree({
     tools: SESSION_TOOLS,
     defaults: new Set(["read", "bash", "grep", "web_search", "codemode"]),
@@ -79,18 +79,20 @@ test("the session tool tree mirrors the planners' tree and Jev only scores what 
     "tool:grep": true,
     "tool:custom": false,
   });
-  // Built-ins and an extension tool you never enabled are never Jev's to change.
-  assert.deepEqual(
-    leafCapabilities(roots).map((capability) => capability.id),
-    [
-      "grant:nb",
-      "tool:web_search",
-      "tool:fetch_content",
-      "mcp:context7/query-docs",
-      "mcp:context7/resolve-library-id",
-      "mcp:obsidian/delete_note",
-    ],
-  );
+  // Jev scores every tool, but built-ins and an extension tool you never enabled stay as they are.
+  const capabilities = leafCapabilities(roots).map((capability) => capability.id);
+  assert.equal(capabilities.length, leaves(roots).length);
+  applyJevPick(roots, {
+    kind: "jev",
+    model: "jev-test",
+    probabilities: Object.fromEntries(capabilities.map((id) => [id, id === "tool:custom" ? 0.9 : 0.1])),
+    selected: Object.fromEntries(capabilities.map((id) => [id, id === "tool:custom"])),
+  });
+  const after = Object.fromEntries(leaves(roots).map((leaf) => [leaf.id, [leaf.selected, leaf.jev]]));
+  assert.deepEqual(after["tool:bash"], [true, 0.1], "a built-in keeps its selection");
+  assert.deepEqual(after["tool:custom"], [false, 0.9], "Jev never enables a tool you did not opt into");
+  assert.deepEqual(after["tool:web_search"], [false, 0.1], "an opted-in tool follows Jev");
+  for (const leaf of leaves(roots)) leaf.selected = (selected as Record<string, boolean>)[leaf.id];
 
   // Every MCP tool selected: MCP is not restricted.
   assert.equal(sessionToolChoice(roots).mcpAllow, undefined);

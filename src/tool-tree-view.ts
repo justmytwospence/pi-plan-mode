@@ -366,6 +366,9 @@ export class ToolTreeView implements Component {
     } else {
       const node = row.node;
       text = node.detail || node.description || node.label;
+      if (node.jevLocked && node.jev !== undefined) {
+        text = `${text}${text.endsWith(".") ? "" : "."} Jev scores it but leaves it as you set it.`;
+      }
       if (node.children) {
         const all = leaves([node]);
         text = `${text}${text.endsWith(".") ? "" : "."} ${all.filter((leaf) => leaf.selected).length} of ${all.length} tools selected.`;

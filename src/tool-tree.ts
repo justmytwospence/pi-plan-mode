@@ -16,8 +16,8 @@ export interface ToolNode {
   jev?: number;
   /** Shown instead of the description when the row is highlighted. */
   detail?: string;
-  /** Leaves only: Jev never scores or changes this one. */
-  jevExempt?: boolean;
+  /** Leaves only: Jev scores it, but its selection stays as you (or your settings) set it. */
+  jevLocked?: boolean;
 }
 
 export type GroupState = "all" | "some" | "none";
@@ -44,7 +44,7 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
   const grants = Object.entries(input.grants ?? {});
   const roots: ToolNode[] =
     grants.length === 0
-      ? [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true, jevExempt: true }]
+      ? [{ id: "shell", label: "Shell", description: SHELL_DESCRIPTION, selected: true, jevLocked: true }]
       : [
           {
             id: "shell-group",
@@ -57,7 +57,7 @@ export function buildToolTree(input: BuildToolTreeInput): ToolNode[] {
                 description: SHELL_DESCRIPTION,
                 selected: true,
                 // Read-only shell is how planners inspect a repository; Jev decides about everything else.
-                jevExempt: true,
+                jevLocked: true,
               },
               ...grants.map(([id, grant]) => ({
                 id: `grant:${id}`,
@@ -149,9 +149,9 @@ export interface BuildSessionToolTreeInput {
  * The tool tree for Plan mode in this session, laid out like the planners' tree: Shell (with its
  * command grants), each planner toolset whose tools are active here, the MCP servers when the `codemode`
  * tool is active, then every other tool. Leaves are `tool:<name>`, `grant:<id>`, or MCP tools.
- * Jev only scores what you already opted into beyond the built-ins (your extension tools, toolsets,
- * MCP tools, and grants): it can narrow the policy but never widens it to a tool you did not choose,
- * and never takes away the built-in tools Plan mode inspects the repository with.
+ * Jev scores every tool, but only changes what you already opted into beyond the built-ins (your
+ * extension tools, toolsets, MCP tools, and grants): it can narrow the policy but never widens it to
+ * a tool you did not choose, and never takes away the built-ins Plan mode inspects the repository with.
  */
 export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode[] {
   const available = new Map(input.tools.map((tool) => [tool.name, tool]));
@@ -167,7 +167,7 @@ export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode
       selected: input.defaults.has(name),
       // Built-ins (files and the read-only shell) are how Plan mode inspects the repository; Jev
       // decides about extension tools, MCP tools, and grants.
-      ...(tool?.builtin ? { jevExempt: true } : {}),
+      ...(tool?.builtin ? { jevLocked: true } : {}),
     };
   };
   if (available.has("bash")) {
@@ -221,7 +221,7 @@ export function buildSessionToolTree(input: BuildSessionToolTreeInput): ToolNode
     .map((tool) => {
       const leaf = toolLeaf(tool.name);
       // An extension tool you have not opted into stays yours to enable.
-      return !tool.builtin && !input.defaults.has(tool.name) ? { ...leaf, jevExempt: true } : leaf;
+      return !tool.builtin && !input.defaults.has(tool.name) ? { ...leaf, jevLocked: true } : leaf;
     });
   if (others.length > 0) {
     roots.push({
@@ -300,14 +300,12 @@ export function toggle(node: ToolNode) {
 }
 
 export function leafCapabilities(nodes: readonly ToolNode[]): ToolCapability[] {
-  return leaves(nodes)
-    .filter((leaf) => !leaf.jevExempt)
-    .map((leaf) => ({
-      id: leaf.id,
-      label: leaf.label,
-      description: leaf.description,
-      fallbackSelected: leaf.selected === true,
-    }));
+  return leaves(nodes).map((leaf) => ({
+    id: leaf.id,
+    label: leaf.label,
+    description: leaf.description,
+    fallbackSelected: leaf.selected === true,
+  }));
 }
 
 /** Show Jev's scores and, unless the user already chose, take its selection. */
@@ -315,9 +313,9 @@ export function applyJevPick(nodes: readonly ToolNode[], pick: JevToolPick, keep
   if (pick.kind !== "jev") return;
   for (const leaf of leaves(nodes)) {
     const probability = pick.probabilities[leaf.id];
-    if (probability === undefined || leaf.jevExempt) continue;
+    if (probability === undefined) continue;
     leaf.jev = probability;
-    if (!keepSelection) leaf.selected = pick.selected[leaf.id] === true;
+    if (!keepSelection && !leaf.jevLocked) leaf.selected = pick.selected[leaf.id] === true;
   }
 }
 

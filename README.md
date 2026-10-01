@@ -76,15 +76,19 @@ too. The screens are overlays, so all keys and wheel events reach them even in P
    next agent. `esc` then `y` stops the run. When every planner is done the Compare screen opens, unless you are
    reading a full trace; then `c` continues. Subagent activity reaches the monitor through the planner's
    `plan_subagents` progress updates.
-4. **Compare** (full screen): a table of the plans (time, tools, subagents, tokens, cost, length) above a
-   scrollable preview of the highlighted plan. Enter uses it, `→` reads it full screen, and with several plans
-   Space marks plans and `m` merges the marked ones: the prompt editor is prefilled with `/plan synthesize A,B `
-   for optional guidance ("B's architecture with A's migration steps") with the editor's usual wrapping,
-   multi-line input, and any editor extension such as vim mode. An unsent draft is never overwritten. Synthesis
-   runs in this session, so the model can verify disagreements against the code and ask you questions before
-   completing the merged plan. `t` reopens the planning traces; `esc` keeps the plans for `/plan compare`.
-   `/plan multi` without a task likewise prefills `/plan multi ` for you to finish.
-5. The chosen or synthesized plan goes through the normal ready flow.
+4. **Compare** (full screen): one decision screen with your task at the top, every plan side by side (each lane
+   shows its time, tools, cost, and revision, and scrolls on its own: `PgUp`/`PgDn` and `tab` for the next plan, or
+   the wheel over a lane), and the actions underneath: **Implement A…** (and B, C) uses that plan and goes straight
+   to choosing the implementation model, effort, and context (Esc there opens the full ready menu: export, save,
+   stay, discard); **Merge A + B…** (or **Merge plans…** to choose) prefills `/plan synthesize A,B ` in the prompt
+   editor for optional guidance ("B's architecture with A's migration steps") with the editor's usual wrapping,
+   multi-line input, and any editor extension such as vim mode (an unsent draft is never overwritten); **Talk to
+   A** keeps talking to that planner; **Watch planner traces** replays the run. Synthesis runs in this session, so
+   the model can verify disagreements against the code and ask you questions before completing the merged plan.
+   `esc` keeps the plans for `/plan compare`. `/plan multi` without a task likewise prefills `/plan multi ` for you
+   to finish.
+5. The chosen or synthesized plan goes through the normal ready flow, whose screen keeps the run's plans side by
+   side above it.
 
 In RPC mode the same steps use Pi's standard menus.
 
@@ -213,7 +217,9 @@ model, so the map applies to the plan's author rather than whatever model the se
 
 ## 🚀 Quick start
 
-Run `/plan` to open the state-aware menu, then start Plan mode and ask the agent to inspect and design the change.
+Run `/plan` to open the state-aware menu, then start Plan mode and ask the agent to inspect and design the change. When the
+plan is ready, the "What next?" screen shows your prompt at the top, the plan in a scrollable pane (`PgUp`/`PgDn`
+or the wheel), and the options underneath, so the context stays in view while you decide.
 Run `/plan <prompt>` when the first planning request is already known.
 
 Menus take vim-style keys: `j`/`n` and `k`/`p` move, `h` goes back, and `l` opens a submenu (an item that

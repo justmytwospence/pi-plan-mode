@@ -746,24 +746,26 @@ test("Jev's per-tool picks become the tree defaults, and a fallback keeps the se
   }
 });
 
-test("the comparison list aligns each candidate's stats in columns", async () => {
+test("after a multi-model run the decision screen shows the task, both plans side by side, then the actions", async () => {
   const { showCandidateComparison } = await import("../src/multi-plan-menu.js");
   let rendered: string[] = [];
   const context = createMockContext({
     mode: "tui",
     hasUI: true,
     custom: async (factory: unknown) => {
-      const harness = createCustomSelectorHarness(factory, 160);
+      const harness = createCustomSelectorHarness(factory, 160, undefined, 40);
       rendered = harness.render();
-      harness.handleInput("\u0003");
+      harness.handleInput("\u001b[B"); // Implement B…
+      harness.handleInput("tui.select.confirm");
       return harness.resultPromise;
     },
   });
-  await showCandidateComparison(
+  const long = Array.from({ length: 60 }, (_unused, index) => `${index + 1}. step ${index + 1}`).join("\n");
+  const outcome = await showCandidateComparison(
     context.ctx,
     {
       version: 1,
-      task: "t",
+      task: "Add rate limiting to the public API",
       createdAt: 1,
       candidates: [
         {
@@ -771,11 +773,9 @@ test("the comparison list aligns each candidate's stats in columns", async () =>
           label: "anthropic/claude-fable-5-1:xhigh",
           origin: "planner",
           status: "done",
-          plan: "# A",
+          plan: `# Token bucket\n\n${long}`,
           durationMs: 780_000,
           toolCalls: 72,
-          subagentTasks: 5,
-          totalTokens: 10_359_000,
           costUsd: 12.4,
         },
         {
@@ -783,10 +783,9 @@ test("the comparison list aligns each candidate's stats in columns", async () =>
           label: "openai-codex/gpt-6-astra:xhigh",
           origin: "planner",
           status: "done",
-          plan: "# B",
+          plan: "# Sliding window\n\n1. Redis",
           durationMs: 802_000,
           toolCalls: 8,
-          totalTokens: 4_513_000,
           costUsd: 5.06,
         },
       ],
@@ -794,74 +793,22 @@ test("the comparison list aligns each candidate's stats in columns", async () =>
     { signal: new AbortController().signal, isCurrent: () => true },
   );
   const screen = rendered.join("\n");
-  const rowA = rendered.find((line) => /✓ A +claude-fable-5-1/u.test(line)) ?? "";
-  const rowB = rendered.find((line) => /✓ B +gpt-6-astra/u.test(line)) ?? "";
-  const end = (line: string, text: string) => line.indexOf(text) + text.length;
-  assert.ok(rowA && rowB, screen);
-  assert.match(screen, /MERGE +PLAN +MODEL +EFFORT +TIME +TOOLS +SUBAGENTS +TOKENS +COST/u);
-  assert.equal(end(rowA, " 72"), end(rowB, " 8"), screen);
-  assert.equal(end(rowA, "$12.4"), end(rowB, "$5.06"));
-  assert.match(rowA, /xhigh +13m 00s +72 +5 +10\.4M +\$12\.4/u);
-  assert.match(screen, /Plan A · claude-fable-5-1/u, "the highlighted plan is previewed");
-  assert.match(screen, /⏎ use plan A/u);
-  assert.match(screen, /m merge A\+B/u);
-});
-
-test("the comparison screen previews, reads, marks, merges, and uses plans", async () => {
-  const { CompareView } = await import("../src/compare-view.js");
-  const plain = {
-    fg: (_c: string, t: string) => t,
-    bg: (_c: string, t: string) => t,
-    bold: (t: string) => t,
-    italic: (t: string) => t,
-  } as never;
-  const results: unknown[] = [];
-  const long = Array.from({ length: 80 }, (_unused, index) => `${index + 1}. step ${index + 1}`).join("\n");
-  const view = new CompareView(plain, {
-    task: "Add caching",
-    candidates: [
-      { id: "A", label: "p/a:high", origin: "planner", status: "done", plan: long, durationMs: 60_000 },
-      { id: "B", label: "p/b", origin: "planner", status: "failed", error: "out of extra usage" },
-      { id: "C", label: "p/c", origin: "planner", status: "done", plan: "# C\nshort" },
-    ],
-    describe: (candidate) => ({ name: `Model ${candidate.id}` }),
-    hasTraces: true,
-    renderMarkdown: (text) => text.split("\n"),
-    rows: () => 30,
-    requestRender: () => undefined,
-    onDone: (result) => results.push(result),
-  });
-  let screen = view.render(140).join("\n");
-  assert.match(screen, /2 ready · 1 without a plan/u);
-  assert.match(screen, /✗ B +Model B .*no plan: out of extra usage/u);
-  assert.match(screen, /1\. step 1\n/u, "the preview starts at the top");
-  assert.match(screen, /1–\d+ of 80 lines/u);
-  view.handleInput("\u001b[6~"); // PgDn scrolls the preview
-  assert.doesNotMatch(view.render(140).join("\n"), / 1\. step 1\n/u);
-  view.handleInput("\u001b[B"); // B has no plan
-  view.handleInput("\r");
-  assert.match(view.render(140).join("\n"), /B produced no plan: out of extra usage/u);
-  assert.deepEqual(results, []);
-  view.handleInput("\u001b[B"); // C
-  view.handleInput(" "); // unmark C
-  view.handleInput("m");
-  assert.match(view.render(140).join("\n"), /Mark at least two plans/u);
-  view.handleInput(" "); // mark C again
-  view.handleInput("m");
-  assert.deepEqual(results.at(-1), { kind: "synthesize", ids: ["A", "C"] });
-  view.handleInput("\u001b[A");
-  view.handleInput("\u001b[A"); // A
-  view.handleInput("\u001b[C"); // read A full screen
-  screen = view.render(140).join("\n");
-  assert.match(screen, /Plan A +Model A/u);
-  assert.match(screen, /esc back to all plans/u);
-  view.handleMouse({ type: "wheel", button: "none", x: 5, y: 10, wheelDelta: 3 } as never);
-  assert.match(view.render(140).join("\n"), /4–\d+ of 80 lines/u, "the wheel scrolls by its line delta");
-  view.handleInput("\r");
-  assert.deepEqual(results.at(-1), { kind: "use", id: "A" });
-  view.handleInput("\u001b");
-  view.handleInput("t");
-  assert.deepEqual(results.at(-1), { kind: "traces" });
+  assert.match(screen, /Task +Add rate limiting to the public API/u);
+  assert.match(
+    screen,
+    /A · claude-fable-5-1 xhigh ─+ 13m 00s · 72 tools · \$12\.4 · \d+ more ↓ ── │ ── B · gpt-6-astra xhigh/u,
+  );
+  assert.match(screen, /Token bucket +│ +(?:# )?Sliding window/u);
+  assert.match(screen, /2 plans are ready\. What next\?/u);
+  assert.match(screen, /→ Implement A…[\s\S]*Implement B…[\s\S]*Merge A \+ B…/u);
+  assert.ok(
+    screen.indexOf("Task") < screen.indexOf("Token bucket") &&
+      screen.indexOf("Token bucket") < screen.indexOf("Implement A…"),
+    "task, then plans, then the actions",
+  );
+  assert.equal(outcome.kind, "use");
+  assert.equal(outcome.kind === "use" ? outcome.candidate.id : "", "B");
+  assert.equal(outcome.kind === "use" ? outcome.implement : false, true);
 });
 
 test("planners keep their sessions; talk mode sends your messages to one, and a merge carries the discussion", async () => {

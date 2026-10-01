@@ -11,6 +11,7 @@ import {
 } from "./implementation-models.js";
 import { runMenuWithVimKeys } from "./menu-keys.js";
 import { type PlanExportDestinationProvider, planExportInputScreen } from "./plan-export-screen.js";
+import { type PlanFrame, withPlanFrame } from "./plan-frame.js";
 import { IMPLEMENTATION_THINKING_LEVELS, type PlanModeFixedThinkingLevel } from "./settings.js";
 import type { ImplementationRuntimeSelection } from "./state.js";
 
@@ -64,6 +65,8 @@ interface PlanMenuOptions extends MenuLifecycle {
   save(): void;
   stay(): void;
   exit(): void;
+  /** The task and ready plan(s), shown above the menu while you decide (TUI). */
+  frame?: PlanFrame;
 }
 
 type ImplementationScreen = "implement" | "models" | "thinking" | "context";
@@ -170,7 +173,7 @@ export async function showPlanModeMenu(ctx: ExtensionContext, options: PlanMenuO
       },
     },
   });
-  await runMenuWithVimKeys(ctx, menu, {
+  await runMenuWithVimKeys(options.frame ? withPlanFrame(ctx, options.frame) : ctx, menu, {
     getState: () => undefined,
     signal: options.signal,
     isCurrent: options.isCurrent,
@@ -187,6 +190,10 @@ interface ReadyPlanMenuOptions extends MenuLifecycle {
   save(): void;
   stay(): void;
   exit(): void;
+  /** The task and plan(s), shown above the menu while you decide (TUI). */
+  frame?: PlanFrame;
+  /** Open straight on the Implement screen (a plan was just chosen to implement). */
+  initialScreen?: "implement";
 }
 
 export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPlanMenuOptions) {
@@ -194,7 +201,7 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
   type Action = ImplementationActionId | "compare" | "export" | "save" | "stay" | "exit";
   const flow = createImplementationFlow(ctx, options.implementation, options.implement);
   const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
-    start: "ready",
+    start: options.initialScreen ?? "ready",
     screens: {
       ready: () => ({
         kind: "actions",
@@ -249,11 +256,13 @@ export async function showReadyPlanMenu(ctx: ExtensionContext, options: ReadyPla
       },
     },
   });
-  await runMenuWithVimKeys(ctx, menu, {
-    getState: () => undefined,
-    signal: options.signal,
-    isCurrent: options.isCurrent,
-  });
+  const framed = options.frame ? withPlanFrame(ctx, options.frame) : ctx;
+  const runOptions = { getState: () => undefined, signal: options.signal, isCurrent: options.isCurrent };
+  const result = await runMenuWithVimKeys(framed, menu, runOptions);
+  // Opened on the Implement screen: going back from it lands on the ready menu, not outside.
+  if (options.initialScreen && result.kind === "closed" && result.reason === "back" && options.isCurrent()) {
+    await runMenuWithVimKeys(framed, { ...menu, start: "ready" }, runOptions);
+  }
 }
 
 interface ModelChoice {

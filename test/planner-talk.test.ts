@@ -365,47 +365,28 @@ test("latest candidate set wins, so talk updates are what /plan compare reopens"
   assert.equal(PLANNER_TALK_MESSAGE_TYPE, "plan-mode-planner-talk");
 });
 
-test("the comparison screen shows revisions and your turns, and r talks to the highlighted planner", async () => {
-  const { CompareView } = await import("../src/compare-view.js");
-  const plain = {
-    fg: (_c: string, t: string) => t,
-    bg: (_c: string, t: string) => t,
-    bold: (t: string) => t,
-    italic: (t: string) => t,
-  } as never;
-  const results: unknown[] = [];
-  const view = new CompareView(plain, {
+test("the decision screen shows revisions and your turns, and offers to talk to each planner", async () => {
+  const { candidatePlanFrame } = await import("../src/plan-frame.js");
+  const set = {
+    version: 1 as const,
     task: "t",
+    createdAt: 1,
     candidates: [
       planner("A", {
         revision: 2,
         thread: [
-          { role: "user", text: "q", at: 1 },
-          { role: "planner", text: "a", at: 2, revision: 2 },
+          { role: "user" as const, text: "q", at: 1 },
+          { role: "planner" as const, text: "a", at: 2, revision: 2 },
         ],
       }),
-      { ...planner("B"), origin: "session", label: "Current plan" },
+      { ...planner("B"), origin: "session" as const, label: "Current plan" },
     ],
-    describe: (candidate) => ({ name: `Model ${candidate.id}` }),
-    hasTraces: false,
-    renderMarkdown: (text) => text.split("\n"),
-    rows: () => 30,
-    requestRender: () => undefined,
-    onDone: (result) => results.push(result),
-  });
-  const screen = view.render(150).join("\n");
-  assert.match(screen, /✓ A v2 +Model A/u);
-  assert.match(screen, /you talked 1×/u);
-  assert.match(screen, /Plan A v2 · Model A/u);
-  assert.match(screen, /r talk to A/u);
-  view.handleInput("\u001b[B"); // B: this session's own plan
-  view.handleInput("r");
-  assert.match(view.render(150).join("\n"), /B is this session's own plan/u);
-  view.handleInput("\u001b[A");
-  view.handleInput("r");
-  assert.deepEqual(results, [{ kind: "talk", id: "A" }]);
+  };
+  const frame = candidatePlanFrame({ modelRegistry: { getAvailable: () => [] } } as never, set, "Compare plans");
+  const a = frame.plans.find((plan) => plan.id === "A");
+  assert.match(a?.title ?? "", /^A · .* · v2$/u);
+  assert.match(a?.detail ?? "", /you talked 1×/u);
 });
-
 test("a replying planner holds herdr working until its reply lands", async () => {
   const seen: [string, unknown][] = [];
   let finish: (result: PlannerTurnResult) => void = () => undefined;

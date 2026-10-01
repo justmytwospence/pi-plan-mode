@@ -6,6 +6,7 @@ import {
 } from "./implementation-models.js";
 import type { ImplementationChoice, ImplementationMenuDefaults } from "./plan-action-menus.js";
 import type { PlanExportDestination } from "./plan-export.js";
+import type { PlanFrame } from "./plan-frame.js";
 import {
   configuredImplementationContext,
   configuredImplementationModel,
@@ -53,6 +54,8 @@ interface PlanActionControllerOptions {
   stay(ctx: ExtensionContext): void;
   exitReady(ctx: ExtensionContext): void;
   clearSaved(ctx: ExtensionContext): void;
+  /** The task and the ready plan(s), shown above the decision menus. */
+  planFrame?(ctx: ExtensionContext): PlanFrame | undefined;
 }
 
 function sessionModel(ctx: ExtensionContext): ImplementationModelOverride | undefined {
@@ -147,10 +150,13 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       let followUp: ((ctx: ExtensionContext) => void | Promise<void>) | undefined;
       const compare = options.compare;
       const planWithModels = options.planWithModels;
+      const hasReadyPlan = options.getState().latestPlan !== undefined;
+      const frame = hasReadyPlan ? options.planFrame?.(ctx) : undefined;
       await ui.showPlanModeMenu(ctx, {
         statusText: options.statusText(),
         implementation: implementationDefaults(ctx),
-        hasReadyPlan: options.getState().latestPlan !== undefined,
+        hasReadyPlan,
+        ...(frame ? { frame } : {}),
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),
         ...lifecycle,
@@ -178,15 +184,18 @@ export function createPlanActionController(options: PlanActionControllerOptions)
       });
       if (followUp && lifecycle.isCurrent()) await followUp(ctx);
     },
-    async showReady(ctx: ExtensionContext) {
+    async showReady(ctx: ExtensionContext, show: { initialScreen?: "implement" } = {}) {
       const lifecycle = options.captureLifecycle();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       const ui = await options.loadInteractiveUi();
       if (!lifecycle.isCurrent() || lifecycle.signal.aborted) return;
       let compareRequested = false;
       const compare = options.compare;
+      const frame = options.planFrame?.(ctx);
       await ui.showReadyPlanMenu(ctx, {
         ...lifecycle,
+        ...(frame ? { frame } : {}),
+        ...(show.initialScreen ? { initialScreen: show.initialScreen } : {}),
         implementation: implementationDefaults(ctx),
         implementationOutcome: options.implementationOutcome,
         getExportDestination: () => options.getExportDestination(ctx),

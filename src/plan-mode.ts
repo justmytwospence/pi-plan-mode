@@ -105,6 +105,7 @@ import {
 } from "./multi-plan.js";
 import { createPlanActionController, type FreshImplementationTiming } from "./plan-action-controller.js";
 import { createPlanExportController } from "./plan-export-controller.js";
+import { candidatePlanFrame, type PlanFrame } from "./plan-frame.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { runPlanner } from "./planner-process.js";
 import { PlannerTalk, type TalkMessageDetails } from "./planner-talk.js";
@@ -347,7 +348,80 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     clearSaved: (ctx) => {
       if (exitPlanMode(ctx)) ctx.ui.notify("Saved plan cleared.", "info");
     },
+    planFrame: (ctx) => readyPlanFrame(ctx),
   });
+
+  /**
+   * The context for deciding what to do with the ready plan: your task, and the plan (or, when it
+   * came from a multi-model run, every plan of that run side by side with the chosen one focused).
+   */
+  function readyPlanFrame(ctx: ExtensionContext): PlanFrame | undefined {
+    try {
+      return buildReadyPlanFrame(ctx);
+    } catch {
+      // The frame is context only; the decision menu works without it.
+      return undefined;
+    }
+  }
+
+  function buildReadyPlanFrame(ctx: ExtensionContext): PlanFrame | undefined {
+    const plan = state.enabled ? state.latestPlan?.trim() : undefined;
+    if (!plan || ctx.mode !== "tui") return undefined;
+    // The menu underneath asks what next; the frame names what you are looking at.
+    const title = "Proposed plan";
+    const set = latestCandidateSet(ctx.sessionManager.getBranch());
+    const chosen = set?.candidates.find((candidate) => candidate.status === "done" && candidate.plan?.trim() === plan);
+    if (set && chosen) return candidatePlanFrame(ctx, set, title, chosen.id);
+    const model = state.latestPlanModel;
+    const task = currentPlanTask(ctx);
+    return {
+      title,
+      ...(task ? { task } : {}),
+      plans: [
+        {
+          id: "plan",
+          title: `Plan${model?.provider && model.modelId ? ` · ${modelCatalog(ctx).name(model)}` : ""}`,
+          plan,
+        },
+      ],
+    };
+  }
+
+  /** What you asked this Plan workflow for: the first prompt (or multi-model task) after it began. */
+  function currentPlanTask(ctx: ExtensionContext) {
+    const branch = ctx.sessionManager.getBranch() as Array<{
+      type?: string;
+      customType?: string;
+      content?: unknown;
+      message?: { role?: string; content?: unknown };
+    }>;
+    const start = latestModeContract(branch);
+    if (start?.mode !== "plan") return undefined;
+    for (const entry of branch.slice(start.index + 1)) {
+      const content =
+        entry.type === "message" && entry.message?.role === "user"
+          ? entry.message.content
+          : entry.type === "custom_message" && entry.customType === MULTI_TASK_MESSAGE_TYPE
+            ? entry.content
+            : undefined;
+      const text = messageText(content);
+      if (text && text !== FINALIZE_PLAN_PROMPT) return safeTerminalText(text);
+    }
+    return undefined;
+  }
+
+  function messageText(content: unknown) {
+    if (typeof content === "string") return content.trim();
+    if (!Array.isArray(content)) return "";
+    return content
+      .flatMap((block) =>
+        typeof block === "object" && block !== null && (block as { type?: unknown }).type === "text"
+          ? [String((block as { text?: unknown }).text ?? "")]
+          : [],
+      )
+      .join("\n")
+      .trim();
+  }
 
   pi.registerTool({
     name: PLAN_MODE_QUESTION_TOOL_NAME,
@@ -1791,7 +1865,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     }
     if (outcome.kind === "use" || outcome.kind === "synthesize") talk.stop(ctx, true);
     if (outcome.kind === "use") {
-      await useCandidatePlan(ctx, outcome.candidate);
+      await useCandidatePlan(ctx, outcome.candidate, { implement: outcome.implement === true });
     } else if (outcome.kind === "synthesize") {
       const ids = outcome.candidates.map((candidate) => candidate.id).join(",");
       startCommandInEditor(
@@ -1855,7 +1929,7 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
     sendPlanModeUserMessage(formatSynthesisPrompt(chosen, guidance), ctx);
   }
 
-  async function useCandidatePlan(ctx: ExtensionContext, candidate: PlanCandidate) {
+  async function useCandidatePlan(ctx: ExtensionContext, candidate: PlanCandidate, next: { implement?: boolean } = {}) {
     if (!candidate.plan) return;
     if (!state.enabled && !enterPlanMode(ctx)) return;
     if (candidate.origin !== "session") {
@@ -1865,16 +1939,16 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       );
     }
     acceptCompletedPlan(candidate.plan, PLAN_MODE_COMPLETE_TOOL_NAME, ctx, candidate.model);
-    await presentReadyPlanNow(ctx);
+    await presentReadyPlanNow(ctx, next.implement ? { initialScreen: "implement" } : {});
   }
 
   /** Show the ready menu immediately instead of waiting for agent_settled (no model turn ran). */
-  async function presentReadyPlanNow(ctx: ExtensionContext) {
+  async function presentReadyPlanNow(ctx: ExtensionContext, show: { initialScreen?: "implement" } = {}) {
     readyPresentationIntent = undefined;
     stagedFreshImplementation = undefined;
     if (!(state.enabled && state.awaitingAction && state.latestPlan) || !ctx.hasUI) return;
     try {
-      await whileBlocked(pi.events, "Plan ready", () => planActions.showReady(latestCommandContext ?? ctx));
+      await whileBlocked(pi.events, "Plan ready", () => planActions.showReady(latestCommandContext ?? ctx, show));
       const request = stagedFreshImplementation;
       stagedFreshImplementation = undefined;
       if (request) armDeferredFreshImplementation(request);

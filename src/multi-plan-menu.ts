@@ -1,21 +1,27 @@
-import { type ExtensionContext, getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { Markdown, type TuiMouseEvent } from "@earendil-works/pi-tui";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { TuiMouseEvent } from "@earendil-works/pi-tui";
 import { defineMenu, runTask, sanitizeTerminalText } from "@narumitw/pi-tui-kit";
-import { CompareView } from "./compare-view.js";
 import { holdWorking } from "./herdr-blocked.js";
 import {
   type AvailableImplementationModel,
   formatModelKey,
   formatModelSpec,
   type ModelSpec,
-  parseModelSpec,
   sameModel,
   snapshotAvailableImplementationModels,
 } from "./implementation-models.js";
 import { runMenuWithVimKeys } from "./menu-keys.js";
 import { modelCatalog } from "./model-catalog.js";
 import { type ModelPickerRow, ModelPickerView } from "./model-picker-view.js";
-import { alignColumns, type CandidateSet, candidateSummary, type PlanCandidate, statsCells } from "./multi-plan.js";
+import {
+  alignColumns,
+  type CandidateSet,
+  candidateSummary,
+  canTalkToPlanner,
+  type PlanCandidate,
+  statsCells,
+} from "./multi-plan.js";
+import { candidatePlanFrame, withPlanFrame } from "./plan-frame.js";
 import type { PlannerProgress } from "./planner-process.js";
 import { PlannerTrace } from "./planner-trace.js";
 import type { SubagentView } from "./subagent-progress.js";
@@ -683,7 +689,8 @@ export function progressLines(specs: readonly ModelSpec[], progress: ReadonlyArr
 }
 
 export type ComparisonOutcome =
-  | { kind: "use"; candidate: PlanCandidate }
+  /** With implement, go straight on to choosing the implementation model, effort, and context. */
+  | { kind: "use"; candidate: PlanCandidate; implement?: boolean }
   /** Keep talking to this candidate's planner in the prompt editor. */
   | { kind: "talk"; candidate: PlanCandidate }
   | { kind: "traces" }
@@ -698,7 +705,7 @@ export async function showCandidateComparison(
   lifecycle: Lifecycle,
   options: { hasTraces?: boolean } = {},
 ): Promise<ComparisonOutcome> {
-  if (ctx.mode === "tui") return compareFullScreen(ctx, set, lifecycle, options);
+  if (ctx.mode === "tui") return decideSideBySide(ctx, set, lifecycle, options);
   const ready = set.candidates.filter((candidate) => candidate.status === "done" && candidate.plan);
   const summaries = new Map(
     alignColumns(
@@ -836,47 +843,147 @@ export async function showCandidateComparison(
   return outcome;
 }
 
-async function compareFullScreen(
+/**
+ * The decision screen after a multi-model run: your task at the top, every plan side by side (each
+ * scrolls on its own), and what to do next underneath: implement one, merge them, or keep
+ * talking to a planner.
+ */
+async function decideSideBySide(
   ctx: ExtensionContext,
   set: CandidateSet,
   lifecycle: Lifecycle,
   options: { hasTraces?: boolean },
 ): Promise<ComparisonOutcome> {
-  const catalog = modelCatalog(ctx);
-  const describe = (candidate: PlanCandidate) => {
-    // Planner labels are model specs (`provider/model:effort`); the session plan names its model.
-    const spec = parseModelSpec(candidate.label);
-    if (spec) return { name: catalog.name(spec), ...(spec.thinkingLevel ? { effort: spec.thinkingLevel } : {}) };
-    if (candidate.model) return { name: `Current plan · ${catalog.name(candidate.model)}` };
-    return { name: safeText(candidate.label) };
-  };
-  const result = await ctx.ui.custom<import("./compare-view.js").CompareResult>((tui, theme, _keybindings, done) => {
-    const view = new CompareView(theme, {
-      task: safeText(set.task),
-      candidates: set.candidates,
-      describe,
-      hasTraces: options.hasTraces === true,
-      renderMarkdown: (text, width) => new Markdown(text, 0, 0, getMarkdownTheme()).render(width),
-      rows: () => terminalRows(tui),
-      requestRender: () => tui.requestRender(),
-      onDone: done,
-    });
-    return {
-      render: (width: number) => view.render(width),
-      handleInput: (data: string) => view.handleInput(data),
-      handleMouse: (event: TuiMouseEvent) => view.handleMouse(event),
-      invalidate: () => view.invalidate(),
-    };
-  }, FULL_SCREEN);
-  if (!result || !lifecycle.isCurrent()) return { kind: "close" };
-  if (result.kind === "use" || result.kind === "talk") {
-    const candidate = set.candidates.find((plan) => plan.id === result.id);
-    return candidate ? { kind: result.kind, candidate } : { kind: "close" };
-  }
-  if (result.kind === "synthesize") {
-    return { kind: "synthesize", candidates: set.candidates.filter((plan) => result.ids.includes(plan.id)) };
-  }
-  return result.kind === "traces" ? { kind: "traces" } : { kind: "close" };
+  const ready = set.candidates.filter((candidate) => candidate.status === "done" && candidate.plan);
+  const failed = set.candidates.filter((candidate) => !(candidate.status === "done" && candidate.plan));
+  const synthesisSelection = new Set(ready.map((candidate) => candidate.id));
+  const byItem = (prefix: string, itemId: string | undefined) =>
+    ready.find((candidate) => `${prefix}:${candidate.id}` === itemId);
+  let outcome: ComparisonOutcome = { kind: "close" };
+  type Screen = "decide" | "synth-select";
+  type Action = "implement" | "merge-all" | "talk" | "traces" | "toggle-synth" | "synthesize";
+  const pair = ready.length === 2 ? ready.map((candidate) => candidate.id).join(" + ") : undefined;
+  const menu = defineMenu<undefined, Screen, Action, ExtensionContext>({
+    start: "decide",
+    screens: {
+      decide: () => ({
+        kind: "actions",
+        title: ready.length === 1 ? "One plan is ready. What next?" : `${ready.length} plans are ready. What next?`,
+        lines: failed.map(
+          (candidate) =>
+            `${candidate.id} · ${safeText(candidate.label)} produced no plan: ${truncate(safeText(candidate.error ?? candidate.status), 200)}`,
+        ),
+        items: [
+          ...ready.map((candidate) => ({
+            id: `implement:${candidate.id}`,
+            label: `Implement ${candidate.id}…`,
+            description: "Use this plan, then choose the model, effort, and context (Esc there for more options).",
+            action: "implement" as const,
+          })),
+          ...(pair
+            ? [
+                {
+                  id: "merge",
+                  label: `Merge ${pair}…`,
+                  description: "Merge them in this session; you add optional guidance next.",
+                  action: "merge-all" as const,
+                },
+              ]
+            : ready.length > 2
+              ? [
+                  {
+                    id: "merge",
+                    label: "Merge plans…",
+                    description: "Choose which plans to merge in this session.",
+                    to: "synth-select" as const,
+                  },
+                ]
+              : []),
+          ...ready.filter(canTalkToPlanner).map((candidate) => ({
+            id: `talk:${candidate.id}`,
+            label: `Talk to ${candidate.id}`,
+            description: "Keep talking to this planner in the prompt editor; it can revise its plan.",
+            action: "talk" as const,
+          })),
+          ...(options.hasTraces
+            ? [
+                {
+                  id: "traces",
+                  label: "Watch planner traces",
+                  description: "Replay what each planner read, searched, and thought.",
+                  action: "traces" as const,
+                },
+              ]
+            : []),
+        ],
+        hint: "close",
+      }),
+      "synth-select": () => ({
+        kind: "multiSelect",
+        title: "Plans to merge",
+        lines: [
+          "The current session model merges the selected plans and may ask you questions.",
+          "Next, write optional guidance in the prompt editor, then press Enter.",
+        ],
+        items: ready.map((candidate) => ({
+          id: candidate.id,
+          label: `${candidate.id} · ${safeText(candidate.label)}`,
+          selected: synthesisSelection.has(candidate.id),
+        })),
+        action: "toggle-synth",
+        actions: [
+          {
+            id: "guidance",
+            label: "Continue",
+            action: "synthesize",
+            ...(synthesisSelection.size < 2 ? { disabled: true, disabledReason: "Select at least two plans" } : {}),
+          },
+        ],
+        hint: "back",
+      }),
+    },
+    actions: {
+      implement: async ({ itemId }) => {
+        const candidate = byItem("implement", itemId);
+        if (!candidate) return { kind: "rejected" };
+        outcome = { kind: "use", candidate, implement: true };
+        return { kind: "close" };
+      },
+      "merge-all": async () => {
+        outcome = { kind: "synthesize", candidates: ready };
+        return { kind: "close" };
+      },
+      talk: async ({ itemId }) => {
+        const candidate = byItem("talk", itemId);
+        if (!candidate) return { kind: "rejected" };
+        outcome = { kind: "talk", candidate };
+        return { kind: "close" };
+      },
+      traces: async () => {
+        outcome = { kind: "traces" };
+        return { kind: "close" };
+      },
+      "toggle-synth": async ({ itemId, selected }) => {
+        if (!ready.some((candidate) => candidate.id === itemId)) return { kind: "rejected" };
+        if (selected) synthesisSelection.add(itemId);
+        else synthesisSelection.delete(itemId);
+        return { kind: "stay" };
+      },
+      synthesize: async () => {
+        const candidates = ready.filter((candidate) => synthesisSelection.has(candidate.id));
+        if (candidates.length < 2) return { kind: "rejected" };
+        outcome = { kind: "synthesize", candidates };
+        return { kind: "close" };
+      },
+    },
+  });
+  const frame = candidatePlanFrame(ctx, set, ready.length === 1 ? "Proposed plan" : "Proposed plans");
+  await runMenuWithVimKeys(withPlanFrame(ctx, frame), menu, {
+    getState: () => undefined,
+    signal: lifecycle.signal,
+    isCurrent: lifecycle.isCurrent,
+  });
+  return outcome;
 }
 
 function safeText(value: string) {

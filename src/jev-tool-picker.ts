@@ -1,4 +1,5 @@
 import { basename } from "node:path";
+import type { ModelRegistry } from "@earendil-works/pi-coding-agent";
 
 /** One toggle in the planner picker that Jev can preselect. */
 export interface ToolCapability {
@@ -19,64 +20,69 @@ export type JevToolPick =
     }
   | { kind: "fallback"; reason: string };
 
+export const DEFAULT_JEV_PROVIDER = "typesafe";
 export const DEFAULT_JEV_MODEL = "jev-latest";
 export const DEFAULT_JEV_THRESHOLD = 0.5;
 const DEFAULT_TIMEOUT_MS = 4_000;
 const MAX_TASK_CHARS = 4_000;
 const MAX_CONVERSATION_CHARS = 3_000;
 
-type SdkModule = typeof import("@typesafe-ai/sdk");
+/** The part of Pi's model registry the picker uses: its classifier models. */
+export type ClassifierRegistry = Pick<ModelRegistry, "findOfType" | "classify">;
 
 export interface PickToolsInput {
   task: string;
   conversation: string;
   cwd: string;
   capabilities: readonly ToolCapability[];
+  /** Pi's model registry (`ctx.modelRegistry`); Jev runs through it with Pi's credentials. */
+  registry: ClassifierRegistry;
   threshold?: number;
+  provider?: string;
   model?: string;
   timeoutMs?: number;
   signal?: AbortSignal;
-  env?: NodeJS.ProcessEnv;
-  /** Test seam: replaces the lazy SDK import. */
-  loadSdk?: () => Promise<SdkModule>;
 }
 
-const QUESTION =
-  "Would AI agents writing an implementation plan for `task` materially benefit from having `capability` while they research it?";
 const CRITERIA = {
   true: "The plan depends on information or checks this capability provides",
   false: "The plan can be researched well without it",
 };
 
+function question(capability: ToolCapability) {
+  return (
+    `Capability "${capability.label}" gives the agents: ${capability.description}. ` +
+    "Would AI agents writing an implementation plan for `task` materially benefit from having this capability while they research it?"
+  );
+}
+
 /**
- * Ask Jev (TypeSafe's System One model) which planner capabilities fit the task: one Noul per
- * capability in a single request. Every failure mode -- no API key, SDK missing, network error,
- * timeout, malformed answer -- resolves to `fallback` with a short reason, never throws.
+ * Ask Jev (TypeSafe's System One model) which planner capabilities fit the task: one bool question
+ * per capability in a single request, through Pi's classifier models. Every failure mode -- no
+ * classifier, no credentials, network error, timeout, malformed answer -- resolves to `fallback`
+ * with a short reason, never throws.
  */
 export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPick> {
-  const env = input.env ?? process.env;
   if (input.capabilities.length === 0) return { kind: "fallback", reason: "no tools to choose" };
-  if (!env.TYPESAFE_API_KEY?.trim()) return { kind: "fallback", reason: "TYPESAFE_API_KEY is not set" };
   const task = input.task.trim();
   const conversation = input.conversation.trim();
   if (!task && !conversation) return { kind: "fallback", reason: "no task to judge" };
 
-  let sdk: SdkModule;
+  const provider = input.provider?.trim() || DEFAULT_JEV_PROVIDER;
+  const modelId = input.model?.trim() || DEFAULT_JEV_MODEL;
+  let model: ReturnType<ClassifierRegistry["findOfType"]>;
   try {
-    sdk = await (input.loadSdk ?? (() => import("@typesafe-ai/sdk")))();
+    model = input.registry.findOfType("classifier", provider, modelId);
   } catch {
-    return { kind: "fallback", reason: "the TypeSafe SDK is not installed (run npm ci in the plugin)" };
+    model = undefined;
   }
+  if (!model) return { kind: "fallback", reason: `no classifier model ${provider}/${modelId}` };
 
-  const model = input.model?.trim() || DEFAULT_JEV_MODEL;
   const threshold = input.threshold ?? DEFAULT_JEV_THRESHOLD;
   const questions = Object.fromEntries(
     input.capabilities.map((capability, index) => [
       `c${index}`,
-      sdk.noul(
-        { capability: { name: capability.label, provides: capability.description }, question: QUESTION },
-        CRITERIA,
-      ),
+      { type: "bool" as const, instructions: question(capability), criteria: CRITERIA },
     ]),
   );
   const state = {
@@ -86,41 +92,44 @@ export async function pickToolsWithJev(input: PickToolsInput): Promise<JevToolPi
   };
 
   try {
-    const client = new sdk.TypeSafeClient({ apiKey: env.TYPESAFE_API_KEY.trim(), logLevel: "off" });
-    const response = await client.systemOne(
-      { state, questions, model },
-      {
-        timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
-        retry: { maxRetries: 1 },
-        ...(input.signal ? { signal: input.signal } : {}),
-      },
+    const result = await input.registry.classify(
+      model,
+      { state, questions },
+      { timeoutMs: input.timeoutMs ?? DEFAULT_TIMEOUT_MS, ...(input.signal ? { signal: input.signal } : {}) },
     );
+    if (result.stopReason !== "stop") {
+      return {
+        kind: "fallback",
+        reason: `Jev is unavailable (${describeError(result.stopReason, result.errorMessage)})`,
+      };
+    }
     const probabilities: Record<string, number> = {};
     const selected: Record<string, boolean> = {};
     for (const [index, capability] of input.capabilities.entries()) {
-      const answer = (response.answers as Record<string, { noul?: unknown } | undefined>)[`c${index}`];
-      const value = answer?.noul;
+      const answer = result.answers[`c${index}`];
+      const value = answer?.type === "bool" ? answer.probability : undefined;
       if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 1) {
         return { kind: "fallback", reason: "Jev returned an unexpected answer" };
       }
       probabilities[capability.id] = value;
       selected[capability.id] = value >= threshold;
     }
-    return { kind: "jev", model: typeof response.model === "string" ? response.model : model, probabilities, selected };
+    return { kind: "jev", model: result.model || modelId, probabilities, selected };
   } catch (error: unknown) {
-    return { kind: "fallback", reason: `Jev is unavailable (${describeError(error)})` };
+    return {
+      kind: "fallback",
+      reason: `Jev is unavailable (${describeError("error", error instanceof Error ? error.message : String(error))})`,
+    };
   }
 }
 
-function describeError(error: unknown) {
-  const name = error instanceof Error ? error.name : "";
-  const status = (error as { status?: unknown } | undefined)?.status;
-  if (typeof status === "number") return status === 401 ? "invalid API key" : `HTTP ${status}`;
-  if (/Timeout/u.test(name)) return "timed out";
-  if (/Abort/u.test(name)) return "cancelled";
-  if (/Connection/u.test(name)) return "no connection";
-  const message = error instanceof Error ? error.message : String(error);
-  return message.replace(/\s+/gu, " ").slice(0, 120) || "unknown error";
+function describeError(stopReason: string, message: string | undefined) {
+  if (stopReason === "aborted") return "cancelled";
+  const text = (message ?? "").replace(/\s+/gu, " ");
+  if (/No API key/iu.test(text)) return "no TypeSafe credentials";
+  if (/\b401\b|unauthori[sz]ed/iu.test(text)) return "invalid API key";
+  if (/timed out|timeout/iu.test(text)) return "timed out";
+  return text.slice(0, 120) || "unknown error";
 }
 
 function clip(text: string, max: number) {

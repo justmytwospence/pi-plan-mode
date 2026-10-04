@@ -124,11 +124,13 @@ export interface PlanModeSettings {
   plannerToolsets?: Record<string, PlannerToolset>;
   /** Commands Plan mode's read-only bash policy lets through when granted (e.g. marimo-pair's scripts). */
   commandGrants?: Record<string, CommandGrant>;
-  /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs TYPESAFE_API_KEY). */
+  /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs a Jev classifier in Pi, e.g. TYPESAFE_API_KEY). */
   jevToolSelection?: boolean;
   /** Jev probability at or above which a tool is preselected (default 0.5). */
   jevThreshold?: number;
-  /** TypeSafe model for tool selection (default jev-latest). */
+  /** Pi classifier provider for tool selection (default typesafe). */
+  jevProvider?: string;
+  /** Classifier model for tool selection (default jev-latest). */
   jevModel?: string;
   /** Command (argv) run with Claude-style hook JSON on stdin whenever a plan is accepted. */
   planCompleteCommand?: string[];
@@ -276,6 +278,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const threshold = Reflect.get(value, "jevThreshold");
     if (typeof threshold !== "number" || !(threshold >= 0 && threshold <= 1)) return undefined;
     settings.jevThreshold = threshold;
+  }
+  if (Object.hasOwn(value, "jevProvider")) {
+    const provider = Reflect.get(value, "jevProvider");
+    if (typeof provider !== "string" || !provider.trim() || provider.length > 200) return undefined;
+    settings.jevProvider = provider.trim();
   }
   if (Object.hasOwn(value, "jevModel")) {
     const model = Reflect.get(value, "jevModel");

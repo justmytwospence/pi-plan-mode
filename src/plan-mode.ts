@@ -1625,7 +1625,9 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
               conversation: transcript,
               cwd: ctx.cwd,
               capabilities: leafCapabilities(roots),
+              registry: ctx.modelRegistry,
               ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+              ...(settings.jevProvider ? { provider: settings.jevProvider } : {}),
               ...(settings.jevModel ? { model: settings.jevModel } : {}),
               signal: lifecycle.signal,
             });
@@ -2731,13 +2733,15 @@ export default function planMode(pi: ExtensionAPI, dependencies: PlanModeDepende
       conversation: buildPlannerTranscript(ctx.sessionManager.getBranch()),
       cwd: ctx.cwd,
       capabilities: leafCapabilities(roots),
+      registry: ctx.modelRegistry,
       ...(settings.jevThreshold !== undefined ? { threshold: settings.jevThreshold } : {}),
+      ...(settings.jevProvider ? { provider: settings.jevProvider } : {}),
       ...(settings.jevModel ? { model: settings.jevModel } : {}),
     });
     if (generation !== workflowGeneration || !state.enabled) return;
     if (pick.kind !== "jev") {
       persistState();
-      if (!/TYPESAFE_API_KEY|no tools/u.test(pick.reason)) {
+      if (!/TypeSafe credentials|no classifier model|no tools/u.test(pick.reason)) {
         ctx.ui.notify(`Jev could not pick tools (${safeTerminalText(pick.reason)}); the defaults apply.`, "info");
       }
       return;

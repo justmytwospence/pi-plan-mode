@@ -28,8 +28,7 @@
     "@earendil-works/pi-tui": "*"
   },
   "dependencies": {
-    "@narumitw/pi-tui-kit": "^0.59.0",
-    "@typesafe-ai/sdk": "^0.6.0"
+    "@narumitw/pi-tui-kit": "^0.59.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

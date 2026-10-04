@@ -192,10 +192,12 @@ things, such as the marimo-pair skill, which runs Python in a live notebook kern
   there, and the model is told about the grants that are on.
 - The granted code can do anything its tool can; granting it is your call. Everything else stays read-only.
 
-When `TYPESAFE_API_KEY` is set, every tool in the tree is scored, and all but the read-only Shell preselected, by [Jev](https://docs.typesafe.ai), TypeSafe's
-fast System One model: one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
+When Pi can reach a Jev classifier model (`TYPESAFE_API_KEY` for Pi's `typesafe` provider, or another provider set by
+`jevProvider`/`jevModel`), every tool in the tree is scored, and all but the read-only Shell preselected, by
+[Jev](https://docs.typesafe.ai), TypeSafe's fast System One model, called through Pi's own classifier support
+(`ctx.modelRegistry.classify`): one request with a yes/no question per tool (about 100 MCP tools take roughly 300 ms and 12k
 tokens) asks whether planners writing a plan for this task would materially benefit from it. Tools at or above `jevThreshold` (default 0.5) start checked, each row shows Jev's percentage, and you
-can still change any of them. Without a key, with `jevToolSelection: false`, or when the request fails or times out
+can still change any of them. Without a classifier or credentials, with `jevToolSelection: false`, or when the request fails or times out
 (4 s), the picker says why and falls back to each tool's `enabled` default. A toolset's `description` is what Jev
 reads, so describe what it gives planners.
 
@@ -616,6 +618,7 @@ New settings in this fork:
   "defaultPlanTools": ["read", "bash", "grep", "find", "ls", "web_search", "fetch_content", "get_search_content", "codemode"],
   "jevToolSelection": true,
   "jevThreshold": 0.5,
+  "jevProvider": "typesafe",
   "jevModel": "jev-latest",
   "planCompleteCommand": ["bash", "~/.claude/hooks/save-plan-to-obsidian.sh"]
 }

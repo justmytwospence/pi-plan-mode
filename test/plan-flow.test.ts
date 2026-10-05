@@ -100,6 +100,26 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.match(screen, /Planner A\s+Claude Sonnet 5\.5/u);
   assert.doesNotMatch(screen, /default/u, "efforts are real levels");
 
+  // Subagents get their own effort row, under theirs, once they have a model.
+  const underSubagents = () => {
+    const lines = app.render();
+    const index = lines.findIndex((line) => line.includes("subagents"));
+    return { subagents: lines[index] ?? "", next: lines[index + 1] ?? "" };
+  };
+  assert.match(underSubagents().next, /Planner B/u, "no subagent effort without subagents");
+  for (let row = 0; row < 3; row += 1) app.handleInput("\u001b[B");
+  app.handleInput("\u001b[C");
+  let rows = underSubagents();
+  assert.match(rows.subagents, /subagents\s+‹ Claude Sonnet 5\.5 ›\s*$/u, "the model row shows only the model");
+  assert.match(rows.next, /^ {7}effort\s+high/u);
+  app.handleInput("\u001b[B");
+  app.handleInput("\u001b[D");
+  rows = underSubagents();
+  assert.match(rows.next, /effort\s+‹ medium ›/u);
+  assert.match(rows.subagents, /Claude Sonnet 5\.5/u, "the effort changes without the model");
+  app.handleInput("\u001b[C");
+  for (let row = 0; row < 4; row += 1) app.handleInput("\u001b[A");
+
   app.handleInput("\t");
   screen = app.render().join("\n");
   assert.match(screen, /● Tools/u);

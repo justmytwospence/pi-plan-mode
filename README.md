@@ -33,7 +33,8 @@ covers the whole terminal. A step bar at the top right shows where you are:
 
 1. **Settings.** One page with the task, the planners, and your preferences. ↑/↓ (or ctrl+j/ctrl+k)
    pick a row, ←/→ (or ctrl+h/ctrl+l) change its value, Enter edits a text row, Tab goes on.
-   - **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on).
+   - **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on,
+     with their own **effort**; new subagent models start at `high`).
    - **Planner B**: `none` plans with one model; pick a model to plan the same task with two in
      parallel. Two is the maximum.
    - **Merger** and its **effort** (with two planners): the model M, the merger, runs on. `as

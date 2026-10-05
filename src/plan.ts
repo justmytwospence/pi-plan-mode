@@ -554,7 +554,12 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         task,
         planners: [withEffort(firstPlanner), configured[1] ? withEffort(configured[1]) : undefined],
         merger: settings.merger ? withEffort(settings.merger) : undefined,
-        scouts: { ...Object.fromEntries(Object.entries(settings.scoutModelMap ?? {})) },
+        scouts: Object.fromEntries(
+          Object.entries(settings.scoutModelMap ?? {}).map(([key, spec]) => [
+            key,
+            withEffort(spec, spec.thinkingLevel ?? "high"),
+          ]),
+        ),
         timeLimit: Math.round(configuredPlannerTimeoutSeconds(settings) / 60),
       };
       const describe = (spec: ModelSpec | undefined) => (spec ? catalog.name(spec) : theme.fg("dim", "none"));
@@ -581,9 +586,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           option && current ? sameModel(option, current) : option === current,
         );
         const next = options[(index + direction + options.length) % options.length];
-        draft.scouts[formatModelKey(spec)] = next
-          ? { ...next, thinkingLevel: current?.thinkingLevel ?? "high" }
-          : undefined;
+        draft.scouts[formatModelKey(spec)] = next ? withEffort(next, current?.thinkingLevel ?? "high") : undefined;
+      };
+      const setScoutEffort = (spec: ModelSpec | undefined, direction: 1 | -1) => {
+        const scout = scoutFor(spec);
+        if (spec && scout) draft.scouts[formatModelKey(spec)] = cycleEffort(scout, direction);
       };
       const plannerRows = (index: 0 | 1, adding: boolean): OptionRow[] => {
         const id = IDS[index];
@@ -626,15 +633,22 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           {
             id: `scouts-${id}`,
             label: `  subagents`,
+            value: () => describe(scoutFor(get())),
+            cycle: (direction) => setScout(get(), direction),
+            description: `Read-only helpers planner ${id} can fan out for broad investigations (plan_subagents), on this model. "none" turns them off.`,
+            hidden: () => !get() || (adding && index === 0),
+          },
+          {
+            id: `scouts-effort-${id}`,
+            label: `    effort`,
             value: () => {
               const scout = scoutFor(get());
-              return scout
-                ? `${catalog.name(scout)} ${effortText(theme, scout.thinkingLevel)}`
-                : theme.fg("dim", "none");
+              if (!scout) return "";
+              return effortsOf(scout).length ? effortText(theme, scout.thinkingLevel) : theme.fg("dim", "n/a");
             },
-            cycle: (direction) => setScout(get(), direction),
-            description: `Read-only helpers planner ${id} can fan out for broad investigations (plan_subagents), on this model.`,
-            hidden: () => !get() || (adding && index === 0),
+            cycle: (direction) => setScoutEffort(get(), direction),
+            description: `How hard planner ${id}'s subagents think (their thinking level).`,
+            hidden: () => !scoutFor(get()) || (adding && index === 0),
           },
         ];
       };

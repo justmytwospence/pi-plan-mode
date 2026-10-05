@@ -262,3 +262,32 @@ test("with one planner there is no merger pane", () => {
     "Tab goes straight to the actions",
   );
 });
+
+test("the top of the planning screen shows each planner's live stats, and M's once it has started", () => {
+  const a = fakeAgent("A", {
+    status: "working",
+    working: true,
+    stats: {
+      startedAt: Date.now() - 134_000,
+      toolCalls: 38,
+      subagentTasks: 4,
+      totalTokens: 182_000,
+      costUsd: 1.24,
+      lastActivity: "read src/plan.ts",
+    },
+  } as never);
+  const b = fakeAgent("B", { plan: "# Plan B", revision: 2 } as never);
+  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: true };
+  const { page } = lanesPage([a, b], () => pane);
+  let lines = page.render(140);
+  const row = (id: string) => lines.find((line) => line.includes(` ${id} Model ${id} high`)) ?? "";
+  assert.match(row("A"), /2m 14s\s+38 tools\s+4 subagents\s+182k tok\s+\$1\.24\s+read src\/plan\.ts/u);
+  assert.match(row("B"), /✓ B Model B high\s+1s.*plan ready \(v2\)/u);
+  assert.equal(row("M"), "", "no row for M before it starts");
+  assert.equal(lines.length, 30);
+
+  pane.agent = fakeAgent("M", { status: "asking", working: true } as never);
+  lines = page.render(140);
+  assert.match(lines.find((line) => line.includes("? M merger")) ?? "", /\? M merger · Model M high.*asking you/u);
+  assert.equal(lines.length, 30);
+});

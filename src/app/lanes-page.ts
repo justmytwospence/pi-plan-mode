@@ -24,6 +24,7 @@ import {
   labeledRule,
   padLines,
   padVisible,
+  renderTable,
   rule,
   ScrollState,
   selectedRow,
@@ -374,7 +375,7 @@ export class LanesPage {
     const task = this.options.task().split("\n")[0] ?? "";
     const taskLine = task ? truncateToWidth(` ${theme.fg("dim", "Task ")} ${task}`, width) : undefined;
     const footer = this.footer(width, target);
-    const top = [...header, ...(taskLine ? [taskLine] : [])];
+    const top = [...header, ...(taskLine ? [taskLine] : []), ...this.statsLines(width, agents, pane)];
     const available = Math.max(MIN_LANE_ROWS, height - top.length - footer.length);
     const mergerFocused = target.kind === "merger";
     const mergerRows = pane
@@ -516,6 +517,95 @@ export class LanesPage {
       labeledRule(theme, width, position, "", focused ? "borderAccent" : "borderMuted"),
       truncateToWidth(inputLine, width),
     ];
+  }
+
+  /**
+   * One live row per planner (and the merger once it has started): its state, model, how long its
+   * turn has run, and the tools, subagent tasks, tokens and cost it has used so far.
+   */
+  private statsLines(width: number, agents: readonly PlannerAgent[], pane: MergerPane | undefined): string[] {
+    const theme = this.theme;
+    const rows = [...agents, ...(pane?.agent ? [pane.agent] : [])];
+    if (rows.length === 0) return [];
+    const now = Date.now();
+    const count = (value: number, one: string, many: string) => (value ? `${value} ${value === 1 ? one : many}` : "");
+    const table = renderTable(
+      theme,
+      rows,
+      [
+        {
+          header: "",
+          get: (agent) =>
+            `${this.stateIcon(agent)} ${theme.bold(agent.id)} ${theme.fg("muted", `${agent === pane?.agent ? "merger · " : ""}${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}`)}`,
+          flex: true,
+          min: 12,
+        },
+        {
+          header: "",
+          get: (agent) => formatDuration((agent.stats.endedAt ?? now) - agent.stats.startedAt),
+          align: "right",
+        },
+        { header: "", get: (agent) => count(agent.stats.toolCalls, "tool", "tools"), align: "right" },
+        {
+          header: "",
+          get: (agent) => count(agent.stats.subagentTasks, "subagent", "subagents"),
+          align: "right",
+        },
+        {
+          header: "",
+          get: (agent) => (agent.stats.totalTokens ? `${formatTokens(agent.stats.totalTokens)} tok` : ""),
+          align: "right",
+        },
+        {
+          header: "",
+          get: (agent) => (agent.stats.costUsd ? formatCost(agent.stats.costUsd) : ""),
+          align: "right",
+        },
+        { header: "", get: (agent) => this.activity(agent), flex: true, min: 10 },
+      ],
+      Math.max(20, width - 1),
+    );
+    return table.lines.map((line) => truncateToWidth(` ${line}`, width));
+  }
+
+  private stateIcon(agent: PlannerAgent) {
+    const theme = this.theme;
+    switch (agent.status) {
+      case "starting":
+      case "working":
+        return theme.fg("accent", spinner());
+      case "asking":
+        return theme.fg("warning", "?");
+      case "idle":
+        return agent.plan ? theme.fg("success", "✓") : theme.fg("muted", "·");
+      case "failed":
+        return theme.fg("error", "✗");
+      default:
+        return theme.fg("dim", "–");
+    }
+  }
+
+  /** What an agent is doing right now, in a few words. */
+  private activity(agent: PlannerAgent) {
+    const theme = this.theme;
+    switch (agent.status) {
+      case "starting":
+        return theme.fg("dim", "starting");
+      case "working":
+        return agent.stats.wrappingUp
+          ? theme.fg("warning", "wrapping up")
+          : theme.fg("dim", agent.stats.lastActivity ?? "working");
+      case "asking":
+        return theme.fg("warning", "asking you");
+      case "idle":
+        return agent.plan
+          ? theme.fg("success", `plan ready${agent.revision > 1 ? ` (v${agent.revision})` : ""}`)
+          : theme.fg("muted", "waiting for you");
+      case "failed":
+        return theme.fg("error", `failed${agent.error ? `: ${agent.error}` : ""}`);
+      default:
+        return theme.fg("dim", "stopped");
+    }
   }
 
   private status(agent: PlannerAgent) {

@@ -50,7 +50,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
    from your other Pi extensions. Jev (TypeSafe) scores every tool for the task while you look,
    including Other tools, and preselects the useful ones; your own changes win. Enter asks
    `Start planning with N planners?`; Enter again starts.
-3. **Planning.** One lane per planner, side by side. Each shows what its planner is doing (or its
+3. **Planning.** Above the lanes, one live row per planner (and the merger, once it starts) shows
+   its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it
+   is doing now. One lane per planner, side by side. Each shows what its planner is doing (or its
    plan, once it has one), the subagents it has running, and a line to talk to it. Type and press
    Enter to steer a working planner or to start a new turn with an idle one; both planners can be
    working on your messages at once. When a planner asks a question, the lane shows it with its

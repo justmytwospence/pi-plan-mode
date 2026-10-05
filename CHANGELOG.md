@@ -18,6 +18,8 @@
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
   planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the
   `default` effort.
+- The planning screen shows a live stats row per planner (and the merger) above the lanes again:
+  state, turn time, tool calls, subagent tasks, tokens, cost, and current activity.
 - Each planner's subagents have their own effort row on the Settings step, separate from their
   model (saved in `scoutModelMap`).
 - Jev also ranks Other tools (tools from your other extensions), which planners can load.

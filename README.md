@@ -87,7 +87,9 @@ pi-subagents do), so one planner and two planners are the same thing:
   providers work without extra setup.
 - It asks you questions with `plan_mode_question` (shown in its lane) and submits its plan with
   `plan_mode_complete`; resubmitting makes a new version.
-- Its subagents (`plan_subagents`) are read-only `pi` subprocesses on the subagent model.
+- Its subagents (`plan_subagents`) are read-only `pi` subprocesses on the subagent model. They
+  start without your extensions, so the one a provider needs (e.g. pi-anthropic-auth, which keeps a
+  Claude subscription paying) is passed to them; `providerExtensions` overrides this per provider.
 
 Your main session is untouched until you implement: then it (or a fresh session) receives the plan.
 Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`.

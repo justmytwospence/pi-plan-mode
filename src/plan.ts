@@ -35,6 +35,7 @@ import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import { plannerSystemPrompt, plannerTaskPrompt, synthesisPrompt } from "./planner/prompt.js";
 import type { PlannerSessionFactory } from "./planner/session.js";
 import { buildPlannerTranscript, type PlanCandidate } from "./planners.js";
+import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
 import {
   configuredImplementationContext,
   configuredPlanExportPath,
@@ -845,6 +846,10 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           ...(settings.safeSubcommands ? { safeSubcommands: settings.safeSubcommands } : {}),
           guardExtensionPath: EXTENSION_ENTRY_PATH,
           expandPath: expandHome,
+          scoutProviderExtensions: extensionsForProvider(
+            resolveProviderExtensions(safeCommands(pi), settings.providerExtensions, expandHome),
+            scout?.provider,
+          ),
         });
         const agent = new PlannerAgent({
           id,
@@ -1048,6 +1053,14 @@ function availableModels(ctx: ExtensionContext): ModelSpec[] {
   if (scoped.length > 0) return scoped;
   try {
     return ctx.modelRegistry.getAvailable().map((model) => ({ provider: model.provider, modelId: model.id }));
+  } catch {
+    return [];
+  }
+}
+
+function safeCommands(pi: ExtensionAPI) {
+  try {
+    return pi.getCommands();
   } catch {
     return [];
   }

@@ -79,6 +79,11 @@ export interface ResolveAccessInput {
   safeSubcommands?: SafeSubcommands;
   guardExtensionPath: string;
   expandPath(path: string): string;
+  /**
+   * Extensions scouts (subprocesses started with --no-extensions) need for their model's provider,
+   * e.g. the one that keeps a Claude subscription paying for Anthropic requests.
+   */
+  scoutProviderExtensions?: readonly string[];
 }
 
 export interface ResolvedAccess {
@@ -123,7 +128,7 @@ export function resolveAccess(input: ResolveAccessInput): ResolvedAccess {
           ? {
               scouts: {
                 spec: scouts,
-                extensions: access.scoutExtensions,
+                extensions: [...new Set([...access.scoutExtensions, ...(input.scoutProviderExtensions ?? [])])],
                 tools: access.scoutTools,
                 ...(access.scoutMcpAllow ? { mcpAllow: access.scoutMcpAllow } : {}),
               },

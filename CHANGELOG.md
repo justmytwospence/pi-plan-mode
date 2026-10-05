@@ -11,7 +11,8 @@
   enters a plan mode.
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
-  planner subprocesses, the provider-extension forwarding, and the `default` effort.
+  planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the
+  `default` effort.
 - Jev also ranks Other tools (tools from your other extensions), which planners can load.
 
 

@@ -314,3 +314,32 @@ test("Other tools come from extension files; access resolves selections into pla
   assert.deepEqual(resolved.config.extensions, ["/ext/radius.ts"]);
   assert.equal(resolved.scoutLabel, "anthropic/claude-opus-5-5:high");
 });
+
+test("scouts get the extension that keeps a Claude subscription paying, found from its command", async () => {
+  const { extensionsForProvider, resolveProviderExtensions } = await import("../src/provider-extensions.js");
+  const auth = "/pkgs/pi-anthropic-auth/src/index.ts";
+  const found = resolveProviderExtensions(
+    [{ name: "anthropic-auth:status", source: "extension", sourceInfo: { path: auth } }],
+    undefined,
+  );
+  assert.deepEqual(found, { anthropic: [auth] });
+  assert.deepEqual(resolveProviderExtensions([], { anthropic: [] }), { anthropic: [] }, "configured [] turns it off");
+  const roots = buildToolTree({
+    toolsets: {},
+    mcpCatalog: [],
+    scoutTargets: ["anthropic/claude-opus-5-5"],
+    grants: {},
+  });
+  for (const leaf of leaves(roots)) leaf.selected = true;
+  const resolved = resolveAccess({
+    roots,
+    toolsets: {},
+    grants: {},
+    others: [],
+    scout: { provider: "anthropic", modelId: "claude-opus-5-5" },
+    guardExtensionPath: "/ext",
+    expandPath: (path) => path,
+    scoutProviderExtensions: extensionsForProvider(found, "anthropic"),
+  });
+  assert.deepEqual(resolved.config.policy.scouts?.extensions, [auth]);
+});

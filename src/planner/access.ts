@@ -17,7 +17,14 @@ import { plannerSystemPrompt } from "./prompt.js";
 
 const READ_TOOLS = ["read", "grep", "find", "ls"];
 /** Tools that make no sense in a planner: it asks you with plan_mode_question instead. */
-const NOT_FOR_PLANNERS = new Set(["ask_user_question", "plan_mode_question", "plan_mode_complete"]);
+const NOT_FOR_PLANNERS = new Set([
+  "ask_user_question",
+  "plan_mode_question",
+  "plan_mode_complete",
+  "edit",
+  "write",
+  "update_plan",
+]);
 
 /** A tool from your session that planners can load: it comes from an extension file. */
 export interface OtherTool {

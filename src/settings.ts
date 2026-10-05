@@ -110,6 +110,8 @@ export interface PlanModeSettings {
   defaultImplementationContext?: ImplementationContextChoice;
   /** Models preselected for `/plan multi`. */
   planners?: ModelSpec[];
+  /** Model of M, the merger that talks over two plans with you; unset means planner A's model. */
+  merger?: ModelSpec;
   /** Planner model (`provider/modelId`) to the model its read-only subagents (plan_subagents) run on. */
   scoutModelMap?: Record<string, ModelSpec>;
   plannerTimeoutSeconds?: number;
@@ -146,6 +148,7 @@ export interface PlanModeSettingsPatch {
   implementationModelMap?: Readonly<Record<string, ModelSpec>> | null;
   defaultImplementationContext?: ImplementationContextChoice | null;
   planners?: readonly ModelSpec[] | null;
+  merger?: ModelSpec | null;
   scoutModelMap?: Readonly<Record<string, ModelSpec>> | null;
   plannerTimeoutSeconds?: number | null;
   jevToolSelection?: boolean | null;
@@ -239,6 +242,11 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const planners = normalizePlanners(Reflect.get(value, "planners"));
     if (!planners) return undefined;
     settings.planners = planners;
+  }
+  if (Object.hasOwn(value, "merger")) {
+    const merger = parseModelSpec(Reflect.get(value, "merger"));
+    if (!merger) return undefined;
+    settings.merger = merger;
   }
   if (Object.hasOwn(value, "scoutModelMap")) {
     const scoutModelMap = normalizeImplementationModelMap(Reflect.get(value, "scoutModelMap"));
@@ -582,6 +590,8 @@ export function updatePlanModeSettings(
     else if (patch.planners !== undefined) {
       updated.planners = patch.planners.map(formatModelSpec);
     }
+    if (patch.merger === null) delete updated.merger;
+    else if (patch.merger !== undefined) updated.merger = formatModelSpec(patch.merger);
     if (patch.scoutModelMap === null) delete updated.scoutModelMap;
     else if (patch.scoutModelMap !== undefined) {
       updated.scoutModelMap = serializeImplementationModelMap(patch.scoutModelMap);

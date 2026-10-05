@@ -6,9 +6,14 @@
 
 - `/plan` is one full-screen planner (Settings → Tools → Planning → Review → Implement) for one or
   two planners. Every planner is an in-process Pi session seeded with your conversation; you talk to
-  each in its own lane (both at once), answer its questions there, merge plans, add a second planner
-  at any point, and implement with a chosen model, effort, and context. Your main session no longer
-  enters a plan mode.
+  each in its own lane (both at once), answer its questions there, add a second planner at any
+  point, and implement with a chosen model, effort, and context. Your main session no longer enters
+  a plan mode.
+- With two plans, M (the merger) replaces Merge into A / Merge into B: a third model in a pane
+  below the lanes that sees both plans and what you told each planner, talks them over with you,
+  and writes the merged plan when you ask. You can still pick A or B, and keep talking to either;
+  plans they revise reach M with your next message. `merger` in settings picks its model (default:
+  planner A's).
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
   planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the

@@ -4,11 +4,17 @@
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
+import { buildPlannerConversation } from "../planners.js";
 import type { PlanModeQuestion, PlanModeQuestionAnswer } from "../question-tool.js";
 import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.js";
 import { SubagentTracker } from "../subagent-progress.js";
 import { type PlannerPolicy, plannerExtension } from "./extension.js";
-import { createPlannerSession, type PlannerSessionFactory, type PlannerSessionHandle } from "./session.js";
+import {
+  createPlannerSession,
+  type PlannerSessionFactory,
+  type PlannerSessionHandle,
+  readSessionEntries,
+} from "./session.js";
 
 /** Fraction of the time limit after which a working planner is asked to wrap up. */
 export const SOFT_DEADLINE_FRACTION = 0.8;
@@ -55,7 +61,7 @@ export interface PlannerAccessConfig {
 }
 
 export interface PlannerAgentOptions {
-  /** `A` or `B`. */
+  /** `A` or `B`, or `M` for the merger. */
   id: string;
   spec: ModelSpec;
   /** Display name, e.g. `Claude Fable 5.1`. */
@@ -64,6 +70,8 @@ export interface PlannerAgentOptions {
   access: PlannerAccessConfig;
   /** Per turn: at 80% the planner is asked to wrap up, at the limit it is stopped. */
   timeoutMs: number;
+  /** What it is told at 80% of the limit (default: submit the best plan now). */
+  wrapUpMessage?: string;
   /** Where new planner sessions are stored. */
   sessionDir: string;
   /** Messages of your conversation, so the planner starts with your context. */
@@ -114,6 +122,11 @@ export class PlannerAgent {
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
       this.trace.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
+    } else if (options.sessionFile) {
+      // Restored without a plan (e.g. the merger mid-conversation): it waits for you, not starting.
+      this.status = "idle";
+      this.stats.endedAt = this.stats.startedAt;
+      this.trace.note(`${this.id} restored; talk to it to carry on.`);
     }
   }
 
@@ -137,11 +150,14 @@ export class PlannerAgent {
     this.send(prompt);
   }
 
-  /** Say something to the planner: steers a working turn, or starts a new one. */
-  async say(text: string, host: ExtensionContext) {
+  /**
+   * Say something to the planner: steers a working turn, or starts a new one. `shown` is what the
+   * trace shows as yours when the message carries more (e.g. the merger's briefing).
+   */
+  async say(text: string, host: ExtensionContext, shown?: string) {
     const message = text.trim();
     if (!message || this.disposed) return;
-    this.trace.user(message);
+    this.trace.user(shown?.trim() || message);
     this.changed();
     const handle = await this.open(host);
     if (!handle) return;
@@ -150,6 +166,18 @@ export class PlannerAgent {
       return;
     }
     this.send(message);
+  }
+
+  /** What you and this planner said to each other after its task (no tool output), for the merger. */
+  conversation(): string {
+    let entries: readonly unknown[] = [];
+    try {
+      entries =
+        this.handle?.entries?.() ?? (this.sessionFile ? readSessionEntries(this.sessionFile, this.options.cwd) : []);
+    } catch {
+      return "";
+    }
+    return buildPlannerConversation(entries, this.id, { skipUser: (text) => text === WRAP_UP_MESSAGE });
   }
 
   /** Answer the pending questions (or skip them with undefined). */
@@ -298,7 +326,7 @@ export class PlannerAgent {
         this.stats.wrappingUp = true;
         this.stats.lastActivity = "asked to wrap up";
         this.trace.note("Time is almost up: asked the planner to finish now.", "warning");
-        void session.steer(WRAP_UP_MESSAGE).catch(() => undefined);
+        void session.steer(this.options.wrapUpMessage ?? WRAP_UP_MESSAGE).catch(() => undefined);
         this.changed();
       },
       Math.max(1, Math.floor(limit * SOFT_DEADLINE_FRACTION)),

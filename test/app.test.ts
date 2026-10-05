@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { LanesPage } from "../src/app/lanes-page.js";
+import { LanesPage, type MergerPane } from "../src/app/lanes-page.js";
 import { OptionsPage } from "../src/app/options-page.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
@@ -92,7 +92,7 @@ function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent 
   } as unknown as PlannerAgent;
 }
 
-function lanesPage(agents: PlannerAgent[]) {
+function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined) {
   const said: [string, string][] = [];
   const actions: string[] = [];
   let hidden = 0;
@@ -100,6 +100,8 @@ function lanesPage(agents: PlannerAgent[]) {
     title: "Plan",
     task: () => "add a cache",
     agents: () => agents,
+    ...(merger ? { merger } : {}),
+    sayToMerger: (text) => said.push(["M", text]),
     actions: () => [
       { id: "implement:A", label: "Implement A…", description: "implement" },
       { id: "export:A", label: "Export A…", description: "export", input: { placeholder: "path", initial: "PLAN.md" } },
@@ -191,4 +193,72 @@ test("Tab reaches the actions; an action with input asks for it; Esc offers Hide
   assert.ok(page.render(100).some((line) => line.includes("Hide (keep the plans)")));
   page.handleInput(KEY.enter);
   assert.equal(hidden(), 1);
+});
+
+test("with two planners, M's pane sits below the lanes: Tab reaches it, and it grows while focused", () => {
+  const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
+  const b = fakeAgent("B", { status: "working", working: true } as never);
+  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: false };
+  const { page, said } = lanesPage([a, b], () => pane);
+  const mergerHeight = (lines: string[]) => {
+    const top = lines.findIndex((line) => line.includes("M · merger · Model M high"));
+    const bottom = lines.findIndex((line, index) => index > top && line.startsWith("› "));
+    return bottom - top + 1;
+  };
+  let lines = page.render(120);
+  assert.equal(lines.length, 30);
+  assert.ok(lines.some((line) => line.includes("waiting for both plans")));
+  assert.equal(mergerHeight(lines), 6, "collapsed while you are in a lane");
+
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.tab);
+  lines = page.render(120);
+  assert.equal(lines.length, 30);
+  assert.ok(mergerHeight(lines) > 6, "grows while focused");
+  page.handleInput(KEY.enter);
+  assert.deepEqual(said, [], "nothing to merge until both plans are in");
+
+  pane.ready = true;
+  assert.ok(page.render(120).some((line) => line.includes("⏎ compare")));
+  page.handleInput(KEY.enter);
+  for (const char of "which is safer?") page.handleInput(char);
+  page.handleInput(KEY.enter);
+  assert.deepEqual(said, [
+    ["M", ""],
+    ["M", "which is safer?"],
+  ]);
+
+  // Once M has started it is a lane of its own: its questions, its plan, ctrl+o for its chat.
+  const answers: unknown[] = [];
+  pane.agent = fakeAgent("M", {
+    status: "asking",
+    working: true,
+    pending: {
+      questions: [{ id: "q", header: "Store", question: "Which?", options: [{ label: "Redis", description: "r" }] }],
+      resolve: () => undefined,
+    },
+    answer: (value: unknown) => answers.push(value),
+  } as never);
+  assert.ok(page.render(120).some((line) => line.includes("? Store")));
+  page.handleInput(KEY.enter);
+  assert.equal(answers.length, 1);
+  Object.assign(pane.agent, { status: "idle", working: false, pending: undefined, plan: "# Merged", revision: 1 });
+  lines = page.render(120);
+  assert.ok(lines.some((line) => line.includes("# Merged") || line.includes("Merged")));
+  assert.ok(lines.some((line) => line.includes("^o chat")));
+  page.handleInput(KEY.tab);
+  assert.ok(
+    page.render(120).some((line) => line.includes("Implement A…")),
+    "Tab goes on to the actions",
+  );
+});
+
+test("with one planner there is no merger pane", () => {
+  const { page } = lanesPage([fakeAgent("A", { plan: "# Plan", revision: 1 } as never)], () => undefined);
+  assert.ok(!page.render(100).some((line) => line.includes("merger")));
+  page.handleInput(KEY.tab);
+  assert.ok(
+    page.render(100).some((line) => line.includes("do it")),
+    "Tab goes straight to the actions",
+  );
 });

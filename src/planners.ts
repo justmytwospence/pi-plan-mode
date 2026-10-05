@@ -1,5 +1,4 @@
 import { type CommandGrant, type ResolvedGrant, resolveGrant } from "./command-grants.js";
-import type { ImplementationModelOverride } from "./implementation-models.js";
 import { isMcpToolName, type McpServerCatalog, mcpToolNames } from "./mcp-tools.js";
 
 export const PLANNER_ENV = "PI_PLAN_MODE_PLANNER";
@@ -141,16 +140,8 @@ export function resolvePlannerAccess(
 const MAX_TRANSCRIPT_CHARS = 40_000;
 const MAX_TOOL_RESULT_CHARS = 4_000;
 
-/** A planner's plan, as the synthesis prompt describes it. */
-export interface PlanCandidate {
-  /** `A` or `B`. */
-  id: string;
-  /** Model spec label. */
-  label: string;
-  model?: ImplementationModelOverride;
-  plan?: string;
-  revision?: number;
-}
+/** Marks where a planner session's copy of your conversation ends and its own work begins. */
+export const PLANNER_SEED_END_ENTRY = "plan-seed-end";
 
 export function formatDuration(ms: number) {
   const seconds = Math.max(0, Math.round(ms / 1000));
@@ -190,7 +181,12 @@ type BranchEntry = {
  * plan-question answers. Tool output and completed plans are left out so planners explore the
  * repository themselves and are not anchored on an earlier plan.
  */
-export function buildPlannerTranscript(entries: readonly unknown[], maxChars = MAX_TRANSCRIPT_CHARS) {
+export function buildPlannerTranscript(
+  entries: readonly unknown[],
+  maxChars = MAX_TRANSCRIPT_CHARS,
+  assistantLabel = "Assistant",
+  skipUser: (text: string) => boolean = () => false,
+) {
   const branch = entries as BranchEntry[];
   let start = 0;
   let summary: string | undefined;
@@ -210,10 +206,10 @@ export function buildPlannerTranscript(entries: readonly unknown[], maxChars = M
     const { role } = entry.message;
     if (role === "user") {
       const text = textContent(entry.message.content);
-      if (text) blocks.push(`User: ${text}`);
+      if (text && !skipUser(text)) blocks.push(`User: ${text}`);
     } else if (role === "assistant") {
       const text = textContent(entry.message.content);
-      if (text) blocks.push(`Assistant: ${text}`);
+      if (text) blocks.push(`${assistantLabel}: ${text}`);
     } else if (role === "toolResult" && entry.message.toolName === "plan_mode_question") {
       const text = textContent(entry.message.content);
       if (text) blocks.push(`Answers to planning questions:\n${truncate(text, MAX_TOOL_RESULT_CHARS)}`);
@@ -224,6 +220,33 @@ export function buildPlannerTranscript(entries: readonly unknown[], maxChars = M
   const first = blocks[0] ?? "";
   const tailBudget = Math.max(0, maxChars - Math.min(first.length, maxChars / 4) - 64);
   return `${truncate(first, maxChars / 4)}\n\n[… earlier conversation omitted …]\n\n${transcript.slice(-tailBudget)}`;
+}
+
+/**
+ * What you and a planner said to each other after its task prompt: your messages, its replies, and
+ * your answers to its questions (no tool output), for the merger. The copy of your own conversation
+ * a planner starts with is left out; sessions from before the seed marker fall back to starting
+ * after the task prompt.
+ */
+export function buildPlannerConversation(
+  entries: readonly unknown[],
+  plannerId: string,
+  options: { maxChars?: number; skipUser?: (text: string) => boolean } = {},
+) {
+  const branch = entries as BranchEntry[];
+  const marker = branch.findIndex((entry) => entry?.type === "custom" && entry.customType === PLANNER_SEED_END_ENTRY);
+  const isUser = (entry: BranchEntry | undefined) => entry?.type === "message" && entry.message?.role === "user";
+  const taskPrompt =
+    marker >= 0
+      ? branch.findIndex((entry, index) => index > marker && isUser(entry))
+      : branch.findIndex((entry) => isUser(entry) && textContent(entry.message?.content).includes("\n## Task\n"));
+  const start = taskPrompt >= 0 ? taskPrompt + 1 : marker >= 0 ? marker + 1 : 0;
+  return buildPlannerTranscript(
+    branch.slice(start),
+    options.maxChars ?? MAX_TRANSCRIPT_CHARS / 2,
+    `Planner ${plannerId}`,
+    options.skipUser,
+  );
 }
 
 /** Tells a model which MCP tools it may call from codemode scripts, and how to find them. */

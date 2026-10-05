@@ -2,6 +2,8 @@
 // running next to your main session in the same Pi process (as pi-btw and pi-subagents run theirs).
 // The policy is this package's planner extension, passed as an inline factory; provider auth comes
 // from the providers your session registered, so subscriptions and custom providers work unchanged.
+
+import { existsSync } from "node:fs";
 import {
   type AgentSession,
   type AgentSessionEvent,
@@ -17,6 +19,7 @@ import {
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { ModelSpec } from "../implementation-models.js";
+import { PLANNER_SEED_END_ENTRY } from "../planners.js";
 
 /** What a planner session runs with. */
 export interface PlannerSessionOptions {
@@ -40,6 +43,8 @@ export interface PlannerSessionHandle {
   session: AgentSession;
   /** The session file, to continue after a reload. */
   file: string | undefined;
+  /** The session's entries on its current branch (the merger reads what you said to a planner). */
+  entries?(): readonly unknown[];
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   dispose(): void;
 }
@@ -101,6 +106,7 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
         // A message Pi will not store (e.g. a custom extension message) is just left out.
       }
     }
+    sessionManager.appendCustomEntry(PLANNER_SEED_END_ENTRY, {});
   }
 
   const { session } = await createAgentSession({
@@ -118,9 +124,20 @@ async function openSession(host: ExtensionContext, options: PlannerSessionOption
   return {
     session,
     file: sessionManager.getSessionFile(),
+    entries: () => sessionManager.getBranch(),
     subscribe: (listener) => session.subscribe(listener),
     dispose: () => session.dispose(),
   };
+}
+
+/** A stored planner session's entries, read without opening it as an agent session. */
+export function readSessionEntries(file: string, cwd: string): readonly unknown[] {
+  if (!existsSync(file)) return [];
+  try {
+    return SessionManager.open(file, undefined, cwd).getBranch();
+  } catch {
+    return [];
+  }
 }
 
 /** The planner reaches models the way your session does: the same registered providers. */

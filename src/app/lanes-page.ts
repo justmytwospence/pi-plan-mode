@@ -1,6 +1,9 @@
 // Planning and Review: one lane per planner (one or two), side by side. Each lane shows what its
 // planner is doing (or its plan, once it has one), the questions it is asking you, and a line to
-// talk to it; you can talk to both at once. Below the lanes, the actions for the plans.
+// talk to it; you can talk to both at once. With two planners, a full-width pane below the lanes
+// talks to M, the merger: a third model that sees both plans and helps you merge them. The focused
+// pane gets the room: M grows while you talk to it and shrinks to a few lines otherwise. Below
+// everything, the actions for the plans.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   Input,
@@ -38,13 +41,27 @@ export interface LaneAction {
   input?: { placeholder: string; initial: string };
 }
 
+/** The merger pane, shown with two planners. */
+export interface MergerPane {
+  /** The merger, once you have talked to it. */
+  agent: PlannerAgent | undefined;
+  /** Its model (and effort), shown before it starts. */
+  name: string;
+  /** Both plans are in, so it can start. */
+  ready: boolean;
+}
+
 export interface LanesPageOptions {
   title: string;
   task: () => string;
   agents(): readonly PlannerAgent[];
+  /** The merger pane below the lanes, or undefined (one planner). */
+  merger?(): MergerPane | undefined;
   actions(): LaneAction[];
   onAction(id: string, text?: string): void;
   say(agent: PlannerAgent, text: string): void;
+  /** Talk to the merger (starting it on the first message); empty text asks it to compare the plans. */
+  sayToMerger?(text: string): void;
   /** Esc: hide the screen (planners keep going), or stop every working planner. */
   hide(): void;
   stopAll(): void;
@@ -60,10 +77,19 @@ interface QuestionCursor {
 
 type Modal = { kind: "escape"; choice: number } | { kind: "input"; action: LaneAction; input: Input };
 
+/** What Tab moves between: the lanes, the merger pane, and the actions bar. */
+type Target = { kind: "lane"; agent: PlannerAgent } | { kind: "merger"; pane: MergerPane } | { kind: "actions" };
+
 const MAX_SUBAGENT_LINES = 3;
+const MERGER_ID = "M";
+/** Rows of the merger pane while you are elsewhere: its title, a few lines, and its input. */
+const MERGER_COLLAPSED_ROWS = 6;
+/** Share of the space below the header the merger pane takes while you talk to it. */
+const MERGER_FOCUSED_SHARE = 0.55;
+const MIN_LANE_ROWS = 6;
 
 export class LanesPage {
-  /** Lane index, or `lanes.length` for the actions bar. */
+  /** Index into the Tab targets: the lanes, then the merger pane (if any), then the actions bar. */
   focus = 0;
   private actionIndex = 0;
   private modal: Modal | undefined;
@@ -78,6 +104,7 @@ export class LanesPage {
   private readonly laneHeights = new Map<string, number>();
   private laneTop = 0;
   private laneLayout: Array<{ x: number; width: number; agent: PlannerAgent }> = [];
+  private mergerTop = 0;
   private actionsTop = 0;
 
   constructor(
@@ -87,7 +114,7 @@ export class LanesPage {
     this.renderer = new TraceRenderer(theme);
   }
 
-  /** The step the page stands for: Planning while anyone works, Review once plans are in. */
+  /** The step the page stands for: Planning while a planner works, Review once plans are in. */
   step(): WorkflowStep {
     const agents = this.options.agents();
     if (agents.some((agent) => agent.working)) return "Planning";
@@ -96,18 +123,47 @@ export class LanesPage {
 
   /** Go to the actions bar (e.g. when every plan is in). */
   focusActions() {
-    this.focus = this.options.agents().length;
+    this.focus = this.targets().length - 1;
   }
 
   get typing() {
-    return this.modal?.kind === "input" || this.focus < this.options.agents().length;
+    return this.modal?.kind === "input" || this.focusedTarget().kind !== "actions";
+  }
+
+  private pane() {
+    return this.options.merger?.();
+  }
+
+  private targets(): Target[] {
+    const pane = this.pane();
+    return [
+      ...this.options.agents().map((agent): Target => ({ kind: "lane", agent })),
+      ...(pane ? [{ kind: "merger", pane } as Target] : []),
+      { kind: "actions" },
+    ];
+  }
+
+  private focusedTarget(): Target {
+    const targets = this.targets();
+    if (this.focus >= targets.length) this.focus = targets.length - 1;
+    return targets[this.focus] ?? { kind: "actions" };
+  }
+
+  /** Every agent on the page: the planners and the merger once it has started. */
+  private everyone() {
+    const merger = this.pane()?.agent;
+    return [...this.options.agents(), ...(merger ? [merger] : [])];
   }
 
   private input(agent: PlannerAgent) {
-    let input = this.inputs.get(agent.id);
+    return this.inputFor(agent.id);
+  }
+
+  private inputFor(id: string) {
+    let input = this.inputs.get(id);
     if (!input) {
-      input = new Input({ prompt: "", placeholder: `talk to ${agent.id}…` });
-      this.inputs.set(agent.id, input);
+      input = new Input({ prompt: "", placeholder: `talk to ${id}…` });
+      this.inputs.set(id, input);
     }
     return input;
   }
@@ -124,8 +180,8 @@ export class LanesPage {
 
   handleInput(data: string) {
     const is = (...keys: KeyId[]) => keys.some((key) => matchesKey(data, key));
-    const agents = this.options.agents();
-    if (this.focus > agents.length) this.focus = agents.length;
+    const targets = this.targets();
+    if (this.focus >= targets.length) this.focus = targets.length - 1;
     if (this.modal?.kind === "escape") return this.handleEscapeModal(data, is);
     if (this.modal?.kind === "input") {
       const modal = this.modal;
@@ -142,12 +198,18 @@ export class LanesPage {
     }
     if (is("tab") || is("shift+tab")) {
       const step = is("tab") ? 1 : -1;
-      this.focus = (this.focus + step + agents.length + 1) % (agents.length + 1);
-      if (this.focus === agents.length) this.actionIndex = 0;
+      this.focus = (this.focus + step + targets.length) % targets.length;
+      if (targets[this.focus]?.kind === "actions") this.actionIndex = 0;
       return this.options.requestRender();
     }
-    if (this.focus === agents.length) return this.handleActions(is);
-    const agent = agents[this.focus];
+    const target = targets[this.focus];
+    if (!target || target.kind === "actions") return this.handleActions(is);
+    if (target.kind === "merger" && !target.pane.agent) {
+      if (is("enter")) this.startMerger(target.pane);
+      else if (!is("up", "down", "ctrl+u", "ctrl+d", "ctrl+o")) this.inputFor(MERGER_ID).handleInput(data);
+      return this.options.requestRender();
+    }
+    const agent = target.kind === "lane" ? target.agent : target.pane.agent;
     if (!agent) return;
     const half = Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2));
     if (is("ctrl+u")) this.scrollLane(agent, -half);
@@ -164,9 +226,20 @@ export class LanesPage {
       cursor.option = (cursor.option + (is("up") ? -1 : 1) + count) % count;
     } else if (is("up")) this.scrollLane(agent, -1);
     else if (is("down")) this.scrollLane(agent, 1);
-    else if (is("enter")) this.submit(agent);
+    else if (is("enter")) this.submit(agent, target.kind === "merger");
     else this.input(agent).handleInput(data);
     this.options.requestRender();
+  }
+
+  /** Enter in the merger pane before M exists: start it with what you typed, or ask it to compare. */
+  private startMerger(pane: MergerPane) {
+    if (!pane.ready) return;
+    const input = this.inputFor(MERGER_ID);
+    const text = input.getValue().trim();
+    input.setValue("");
+    this.scroll.follow(`${MERGER_ID}:trace`);
+    this.showTrace.add(MERGER_ID);
+    this.options.sayToMerger?.(text);
   }
 
   private handleEscapeModal(_data: string, is: (...keys: KeyId[]) => boolean) {
@@ -185,7 +258,7 @@ export class LanesPage {
   }
 
   private escapeChoices() {
-    const working = this.options.agents().some((agent) => agent.working);
+    const working = this.everyone().some((agent) => agent.working);
     return [
       { id: "hide", label: working ? "Hide (keep planning)" : "Hide (keep the plans)" },
       ...(working ? [{ id: "stop", label: "Stop planning" }] : []),
@@ -221,8 +294,8 @@ export class LanesPage {
     return cursor;
   }
 
-  /** Enter in a lane: answer its question, or send what you typed. */
-  private submit(agent: PlannerAgent) {
+  /** Enter in a lane or the merger pane: answer its question, or send what you typed. */
+  private submit(agent: PlannerAgent, merger = false) {
     const input = this.input(agent);
     const text = input.getValue().trim();
     const pending = agent.pending;
@@ -257,7 +330,8 @@ export class LanesPage {
     input.setValue("");
     this.scroll.follow(`${agent.id}:trace`);
     this.showTrace.add(agent.id);
-    this.options.say(agent, text);
+    if (merger) this.options.sayToMerger?.(text);
+    else this.options.say(agent, text);
   }
 
   private scrollLane(agent: PlannerAgent, delta: number) {
@@ -267,17 +341,22 @@ export class LanesPage {
 
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
     const lane =
-      event.y >= this.laneTop && event.y < this.actionsTop
+      event.y >= this.laneTop && event.y < this.mergerTop
         ? this.laneLayout.find((candidate) => event.x >= candidate.x && event.x < candidate.x + candidate.width + 1)
         : undefined;
-    if (event.type === "wheel" && lane) {
-      this.scrollLane(lane.agent, Math.sign(event.wheelDelta ?? 0) * 3);
+    const pane = this.pane();
+    const inMerger = pane !== undefined && event.y >= this.mergerTop && event.y < this.actionsTop;
+    const scrolled = lane?.agent ?? (inMerger ? pane?.agent : undefined);
+    if (event.type === "wheel" && scrolled) {
+      this.scrollLane(scrolled, Math.sign(event.wheelDelta ?? 0) * 3);
       this.options.requestRender();
       return { handled: true };
     }
     if (event.type === "click") {
+      const targets = this.targets();
       if (lane) this.focus = this.options.agents().indexOf(lane.agent);
-      else if (event.y >= this.actionsTop) this.focus = this.options.agents().length;
+      else if (inMerger) this.focus = targets.findIndex((target) => target.kind === "merger");
+      else if (event.y >= this.actionsTop) this.focus = targets.length - 1;
       this.options.requestRender();
       return { handled: true };
     }
@@ -288,37 +367,54 @@ export class LanesPage {
     const theme = this.theme;
     const height = this.options.rowsAvailable();
     const agents = this.options.agents();
-    if (this.focus > agents.length) this.focus = agents.length;
-    const header = pageHeader(theme, width, this.options.title, this.context(agents), this.step());
+    const target = this.focusedTarget();
+    const pane = this.pane();
+    for (const agent of this.everyone()) this.syncRevision(agent);
+    const header = pageHeader(theme, width, this.options.title, this.context(agents, pane), this.step());
     const task = this.options.task().split("\n")[0] ?? "";
     const taskLine = task ? truncateToWidth(` ${theme.fg("dim", "Task ")} ${task}`, width) : undefined;
-    const footer = this.footer(width, agents);
+    const footer = this.footer(width, target);
     const top = [...header, ...(taskLine ? [taskLine] : [])];
-    const laneRows = Math.max(6, height - top.length - footer.length);
+    const available = Math.max(MIN_LANE_ROWS, height - top.length - footer.length);
+    const mergerFocused = target.kind === "merger";
+    const mergerRows = pane
+      ? Math.max(
+          5,
+          Math.min(
+            available - MIN_LANE_ROWS,
+            mergerFocused || pane.agent?.pending ? Math.floor(available * MERGER_FOCUSED_SHARE) : MERGER_COLLAPSED_ROWS,
+          ),
+        )
+      : 0;
+    const laneRows = Math.max(MIN_LANE_ROWS, available - mergerRows);
     this.laneTop = top.length;
-    const lanes = this.renderLanes(agents, width, laneRows);
-    this.actionsTop = top.length + lanes.length;
-    return [...top, ...lanes, ...footer].map((line) => truncateToWidth(line, width));
+    const lanes = this.renderLanes(agents, width, laneRows, target);
+    this.mergerTop = top.length + lanes.length;
+    const merger = pane ? this.renderMerger(pane, width, mergerRows, mergerFocused) : [];
+    this.actionsTop = this.mergerTop + merger.length;
+    return [...top, ...lanes, ...merger, ...footer].map((line) => truncateToWidth(line, width));
   }
 
-  private context(agents: readonly PlannerAgent[]) {
-    const tokens = agents.reduce((sum, agent) => sum + agent.stats.totalTokens, 0);
-    const cost = agents.reduce((sum, agent) => sum + agent.stats.costUsd, 0);
+  private context(agents: readonly PlannerAgent[], pane: MergerPane | undefined) {
+    const all = [...agents, ...(pane?.agent ? [pane.agent] : [])];
+    const tokens = all.reduce((sum, agent) => sum + agent.stats.totalTokens, 0);
+    const cost = all.reduce((sum, agent) => sum + agent.stats.costUsd, 0);
     return [
       agents.length === 1 ? "1 planner" : `${agents.length} planners`,
+      ...(pane?.agent ? ["merger"] : []),
       ...(tokens ? [`${formatTokens(tokens)} tok`] : []),
       ...(cost ? [formatCost(cost)] : []),
     ].join(" · ");
   }
 
-  private renderLanes(agents: readonly PlannerAgent[], width: number, rows: number): string[] {
+  private renderLanes(agents: readonly PlannerAgent[], width: number, rows: number, target: Target): string[] {
     const gap = " │ ";
     const count = Math.max(1, agents.length);
     const laneWidth = Math.max(20, Math.floor((width - gap.length * (count - 1)) / count));
     this.laneLayout = [];
     const columns = agents.map((agent, index) => {
       this.laneLayout.push({ x: index * (laneWidth + gap.length), width: laneWidth, agent });
-      return this.lane(agent, laneWidth, rows, index === this.focus);
+      return this.lane(agent, laneWidth, rows, target.kind === "lane" && target.agent === agent);
     });
     if (columns.length === 0) return padLines([this.theme.fg("dim", "  No planners.")], rows);
     const lines: string[] = [];
@@ -330,16 +426,51 @@ export class LanesPage {
     return lines;
   }
 
-  private lane(agent: PlannerAgent, width: number, rows: number, focused: boolean): string[] {
+  /** The merger pane: M once it has started, or what it will do before then. */
+  private renderMerger(pane: MergerPane, width: number, rows: number, focused: boolean): string[] {
+    if (pane.agent) return this.lane(pane.agent, width, rows, focused, true);
     const theme = this.theme;
-    if (agent.plan !== undefined && this.seenRevision.get(agent.id) !== agent.revision) {
-      this.seenRevision.set(agent.id, agent.revision);
-      this.showTrace.delete(agent.id);
-      this.scroll.toTop(`${agent.id}:plan`);
-    }
-    const title = `${agent.id} · ${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}${
+    const color = focused ? "borderAccent" : "borderMuted";
+    const title = `${MERGER_ID} · merger · ${pane.name}`;
+    const head = labeledRule(
+      theme,
+      width,
+      focused ? theme.fg("accent", theme.bold(title)) : theme.fg("muted", title),
+      theme.fg("dim", pane.ready ? "not started" : "waiting for both plans"),
+      color,
+    );
+    const about = pane.ready
+      ? "Talk the two plans over with M, a third model that sees both of them and what you told each planner. When you are ready, ask it to write the merged plan. Enter on an empty line asks it to compare the plans."
+      : "Once both plans are in, M, a third model that sees both of them and what you told each planner, can talk them over with you and merge them into one.";
+    const bodyHeight = Math.max(1, rows - 3);
+    const body = wrap(about, Math.max(10, width - 2)).map((line) => theme.fg("dim", ` ${line}`));
+    const input = this.inputFor(MERGER_ID);
+    input.focused = focused && this.modal === undefined;
+    const inputLine = focused
+      ? `${theme.fg("accent", "›")} ${input.render(Math.max(4, width - 2))[0] ?? ""}`
+      : theme.fg("dim", `› ${input.getValue() || `tab here to talk to ${MERGER_ID}`}`);
+    return [
+      head,
+      ...padLines(body, bodyHeight),
+      labeledRule(theme, width, theme.fg("dim", "chat"), "", color),
+      truncateToWidth(inputLine, width),
+    ];
+  }
+
+  /** A new plan version is shown from its top, in place of the trace. */
+  private syncRevision(agent: PlannerAgent) {
+    if (agent.plan === undefined || this.seenRevision.get(agent.id) === agent.revision) return;
+    this.seenRevision.set(agent.id, agent.revision);
+    this.showTrace.delete(agent.id);
+    this.scroll.toTop(`${agent.id}:plan`);
+  }
+
+  private lane(agent: PlannerAgent, width: number, rows: number, focused: boolean, merger = false): string[] {
+    const theme = this.theme;
+    const title = `${agent.id}${merger ? " · merger" : ""} · ${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}${
       agent.revision > 1 ? ` · v${agent.revision}` : ""
     }`;
+    const traceLabel = merger ? "chat" : "trace";
     const head = labeledRule(
       theme,
       width,
@@ -347,7 +478,8 @@ export class LanesPage {
       this.status(agent),
       focused ? "borderAccent" : "borderMuted",
     );
-    const subagents = agent.subagents.agents
+    // A pane too short for them (the merger, collapsed) leaves out the running subagents.
+    const subagents = (rows < 10 ? [] : agent.subagents.agents)
       .filter((sub) => sub.stats.state === "running" || sub.stats.state === "starting")
       .slice(0, MAX_SUBAGENT_LINES)
       .map((sub) =>
@@ -373,9 +505,9 @@ export class LanesPage {
       view.below > 0 || view.start > 0
         ? theme.fg(
             "dim",
-            `${this.showsPlan(agent) ? "plan" : "trace"} ${view.start + 1}–${view.start + view.lines.length}/${all.length}`,
+            `${this.showsPlan(agent) ? "plan" : traceLabel} ${view.start + 1}–${view.start + view.lines.length}/${all.length}`,
           )
-        : theme.fg("dim", this.showsPlan(agent) ? "plan" : "trace");
+        : theme.fg("dim", this.showsPlan(agent) ? "plan" : traceLabel);
     return [
       head,
       ...subagents,
@@ -438,11 +570,11 @@ export class LanesPage {
     return lines;
   }
 
-  private footer(width: number, agents: readonly PlannerAgent[]): string[] {
+  private footer(width: number, target: Target): string[] {
     const theme = this.theme;
     const actions = this.options.actions();
     if (this.actionIndex >= actions.length) this.actionIndex = 0;
-    const onBar = this.focus === agents.length;
+    const onBar = target.kind === "actions";
     const bar = actions.map((action, index) => {
       const label = ` ${action.label} `;
       return onBar && index === this.actionIndex
@@ -488,37 +620,53 @@ export class LanesPage {
       );
       return lines;
     }
-    lines.push(truncateToWidth(` ${theme.fg("muted", current?.description ?? this.laneHint(agents))}`, width));
-    lines.push(hintLine(theme, width, this.hints(agents)));
+    lines.push(truncateToWidth(` ${theme.fg("muted", current?.description ?? this.laneHint(target))}`, width));
+    lines.push(hintLine(theme, width, this.hints(target)));
     return lines;
   }
 
-  private laneHint(agents: readonly PlannerAgent[]) {
-    const agent = agents[this.focus];
+  private laneHint(target: Target) {
+    if (target.kind === "actions") return "";
+    if (target.kind === "merger" && !target.pane.agent) {
+      return target.pane.ready
+        ? "Talk the plans over with M; ⏎ on an empty line asks it to compare them. Ask it to merge them when you are ready."
+        : "M can help once both plans are in.";
+    }
+    const merger = target.kind === "merger";
+    const agent = target.kind === "lane" ? target.agent : target.pane.agent;
     if (!agent) return "";
     if (agent.pending) return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.`;
     if (agent.working) return `${agent.id} is working. Type to steer it; it reads your message after its current step.`;
+    if (merger && agent.plan) {
+      return "M's merged plan is ready. Talk to M to change it; Tab to the actions to implement it.";
+    }
+    if (merger) return "Talk it through with M; when you are ready, ask it to write the merged plan.";
     if (agent.plan) return `${agent.id}'s plan is ready. Talk to it to change it; Tab to the actions to implement it.`;
     return `${agent.id} is waiting for you. Type a message and press ⏎.`;
   }
 
-  private hints(agents: readonly PlannerAgent[]): Hint[] {
-    const onBar = this.focus === agents.length;
-    if (onBar) {
+  private hints(target: Target): Hint[] {
+    const panes = this.targets().length - 1;
+    if (target.kind === "actions") {
       return [
         { key: "⏎", label: "do it", primary: true },
         { key: "←→", label: "choose" },
-        { key: "tab", label: agents.length > 1 ? "lanes" : "lane" },
+        { key: "tab", label: panes > 1 ? "panes" : "lane" },
         { key: "esc", label: "leave" },
       ];
     }
-    const agent = agents[this.focus];
+    const agent = target.kind === "lane" ? target.agent : target.pane.agent;
+    const merger = target.kind === "merger";
+    const compares =
+      target.kind === "merger" && !agent && target.pane.ready && !this.inputFor(MERGER_ID).getValue().trim();
     return [
-      { key: "⏎", label: agent?.pending ? "answer" : "send", primary: true },
-      ...(agent?.pending ? [{ key: "↑↓", label: "pick" }] : [{ key: "↑↓", label: "scroll" }]),
-      { key: "^u/^d", label: "page" },
-      ...(agent?.plan !== undefined ? [{ key: "^o", label: this.showsPlan(agent) ? "trace" : "plan" }] : []),
-      { key: "tab", label: agents.length > 1 ? "next lane / actions" : "actions" },
+      { key: "⏎", label: agent?.pending ? "answer" : compares ? "compare" : "send", primary: true },
+      ...(agent?.pending ? [{ key: "↑↓", label: "pick" }] : agent ? [{ key: "↑↓", label: "scroll" }] : []),
+      ...(agent ? [{ key: "^u/^d", label: "page" }] : []),
+      ...(agent?.plan !== undefined
+        ? [{ key: "^o", label: this.showsPlan(agent) ? (merger ? "chat" : "trace") : "plan" }]
+        : []),
+      { key: "tab", label: panes > 1 ? "next pane / actions" : "actions" },
       { key: "esc", label: "leave" },
     ];
   }

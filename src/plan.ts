@@ -13,7 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
-import { type LaneAction, LanesPage } from "./app/lanes-page.js";
+import { type LaneAction, LanesPage, type MergerPane } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage } from "./app/options-page.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { holdWorking } from "./herdr-blocked.js";
@@ -32,9 +32,18 @@ import { exportPlanToFile } from "./plan-export.js";
 import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
-import { plannerSystemPrompt, plannerTaskPrompt, synthesisPrompt } from "./planner/prompt.js";
+import {
+  MERGER_COMPARE_MESSAGE,
+  MERGER_WRAP_UP_MESSAGE,
+  type MergerSource,
+  mergerBriefing,
+  mergerMessage,
+  mergerSystemPrompt,
+  plannerSystemPrompt,
+  plannerTaskPrompt,
+} from "./planner/prompt.js";
 import type { PlannerSessionFactory } from "./planner/session.js";
-import { buildPlannerTranscript, type PlanCandidate } from "./planners.js";
+import { buildPlannerTranscript } from "./planners.js";
 import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
 import {
   configuredImplementationContext,
@@ -56,6 +65,8 @@ const RUNTIME_ENTRY = "plan-implementation-runtime";
 const RUNTIME_CONSUMED_ENTRY = "plan-implementation-runtime-consumed";
 const STATUS_KEY = "plan";
 const IDS = ["A", "B"] as const;
+/** The merger's id: M talks two plans over with you and merges them when you ask. */
+const MERGER_ID = "M";
 const TIME_LIMITS = [15, 30, 45, 60, 90, 120, 180] as const;
 
 export interface PlanDependencies {
@@ -90,14 +101,19 @@ interface StoredRun {
   task: string;
   state: "active" | "discarded" | "implemented";
   planners: StoredPlanner[];
+  /** The merger, once you have talked to it, and the plan versions it has been given. */
+  merger?: StoredPlanner & { seen?: Record<string, number> };
 }
 
-/** One planning run: the task and its planners. */
+/** One planning run: the task, its planners, and the merger once you talk to it. */
 interface PlanRun {
   id: string;
   createdAt: number;
   task: string;
   agents: PlannerAgent[];
+  merger?: PlannerAgent;
+  /** The plan version of each planner the merger has been given. */
+  mergerSeen: Map<string, number>;
   /** How to start another planner with the same tools. */
   launch?: { roots: ToolNode[]; others: OtherTool[]; seed: readonly unknown[] };
 }
@@ -105,6 +121,8 @@ interface PlanRun {
 interface Draft {
   task: string;
   planners: [ModelSpec, ModelSpec | undefined];
+  /** The merger's model; undefined uses planner A's. */
+  merger: ModelSpec | undefined;
   scouts: Record<string, ModelSpec | undefined>;
   timeLimit: number;
 }
@@ -146,31 +164,40 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       createdAt: run.createdAt,
       task: run.task,
       state,
-      planners: run.agents.map((agent) => ({
-        id: agent.id,
-        spec: agent.label,
-        name: agent.name,
-        access: storeAccess(agent.access),
-        ...(agent.sessionFile ? { sessionFile: agent.sessionFile } : {}),
-        ...(agent.plan ? { plan: agent.plan, revision: agent.revision } : {}),
-      })),
+      planners: run.agents.map(storePlanner),
+      ...(run.merger ? { merger: { ...storePlanner(run.merger), seen: Object.fromEntries(run.mergerSeen) } } : {}),
     };
     pi.appendEntry(RUN_ENTRY, stored);
   };
 
-  const revisions = new Map<string, number>();
+  /** What each agent last saved: its plan version and session file. */
+  const saved = new Map<string, string>();
   const onAgentChange = () => {
     if (!run) return;
-    // Save a run whenever a plan arrives or changes, so it survives a reload.
+    // Save a run whenever a session file or a plan arrives or changes, so it survives a reload.
     let changed = false;
-    for (const agent of run.agents) {
-      if (revisions.get(agent.id) !== agent.revision) {
-        revisions.set(agent.id, agent.revision);
-        changed = true;
+    for (const agent of everyone(run)) {
+      const signature = `${agent.revision}|${agent.sessionFile ?? ""}`;
+      const previous = saved.get(agent.id);
+      if (previous === signature) continue;
+      saved.set(agent.id, signature);
+      changed = true;
+      // A planner revised a plan the merger has seen: say when M will get it.
+      const seen = run.mergerSeen.get(agent.id);
+      const revised = previous?.split("|")[0] !== String(agent.revision);
+      if (
+        run.merger &&
+        agent !== run.merger &&
+        agent.plan &&
+        seen !== undefined &&
+        seen !== agent.revision &&
+        revised
+      ) {
+        run.merger.trace.note(`Plan ${agent.id} v${agent.revision} is in; M gets it with your next message.`);
       }
     }
     if (changed) persistRun();
-    const working = run.agents.some((agent) => agent.working);
+    const working = everyone(run).some((agent) => agent.working);
     if (working && !releaseWorking) releaseWorking = holdWorking(pi.events, "Planning");
     if (!working && releaseWorking) {
       releaseWorking();
@@ -187,21 +214,22 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       ctx.ui.setStatus(STATUS_KEY, undefined);
       return;
     }
-    const parts = run.agents.map(
+    const agents = everyone(run);
+    const parts = agents.map(
       (agent) =>
         `${agent.id} ${agent.status === "asking" ? "asking you" : agent.working ? "working" : agent.plan ? "ready" : agent.status === "failed" ? "failed" : "waiting"}`,
     );
     ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/plan)`);
-    const notice = run.agents
+    const notice = agents
       .filter((agent) => agent.status === "asking" || (!agent.working && agent.plan))
       .map((agent) => `${agent.id}:${agent.status}:${agent.revision}`)
       .join(",");
     if (notice && notice !== lastNotified) {
       lastNotified = notice;
-      const asking = run.agents.find((agent) => agent.status === "asking");
+      const asking = agents.find((agent) => agent.status === "asking");
       ctx.ui.notify(
         asking
-          ? `Planner ${asking.id} is asking you something. /plan to answer.`
+          ? `${asking.id === MERGER_ID ? "The merger" : `Planner ${asking.id}`} is asking you something. /plan to answer.`
           : "A plan is ready. /plan to review it.",
         "info",
       );
@@ -211,11 +239,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   const disposeRun = (state: StoredRun["state"]) => {
     if (!run) return;
     persistRun(state);
-    for (const agent of run.agents) agent.dispose();
+    for (const agent of everyone(run)) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
     run = undefined;
-    revisions.clear();
+    saved.clear();
     updateStatus();
   };
 
@@ -224,38 +252,47 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     const latest = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === RUN_ENTRY)
       ?.data as StoredRun | undefined;
     if (latest?.state !== "active" || !Array.isArray(latest.planners)) return;
-    const agents = latest.planners.flatMap((stored) => {
+    const restore = (stored: StoredPlanner, role: "planner" | "merger") => {
       const spec = parseModelSpec(stored.spec);
-      if (!spec) return [];
-      return [
-        new PlannerAgent({
-          id: stored.id,
-          spec,
-          name: stored.name,
-          cwd: ctx.cwd,
-          access: restoreAccess(stored.access, settings),
-          timeoutMs: configuredPlannerTimeoutSeconds(settings) * 1000,
-          sessionDir: plannerSessionDir(),
-          seed: [],
-          ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
-          ...(stored.plan ? { plan: stored.plan, revision: stored.revision ?? 1 } : {}),
-          onChange: onAgentChange,
-          ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
-        }),
-      ];
-    });
+      if (!spec) return undefined;
+      return new PlannerAgent({
+        id: stored.id,
+        spec,
+        name: stored.name,
+        cwd: ctx.cwd,
+        access: restoreAccess(stored.access, settings, role),
+        timeoutMs: configuredPlannerTimeoutSeconds(settings) * 1000,
+        ...(role === "merger" ? { wrapUpMessage: MERGER_WRAP_UP_MESSAGE } : {}),
+        sessionDir: plannerSessionDir(),
+        seed: [],
+        ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
+        ...(stored.plan ? { plan: stored.plan, revision: stored.revision ?? 1 } : {}),
+        onChange: onAgentChange,
+        ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
+      });
+    };
+    const agents = latest.planners.flatMap((stored) => restore(stored, "planner") ?? []);
     if (agents.length === 0) return;
-    run = { id: latest.id, createdAt: latest.createdAt, task: latest.task, agents };
-    for (const agent of agents) revisions.set(agent.id, agent.revision);
+    // A merger without a session file never had its briefing saved: the next message briefs a new one.
+    const merger = agents.length > 1 && latest.merger?.sessionFile ? restore(latest.merger, "merger") : undefined;
+    run = {
+      id: latest.id,
+      createdAt: latest.createdAt,
+      task: latest.task,
+      agents,
+      ...(merger ? { merger } : {}),
+      mergerSeen: new Map(merger ? Object.entries(latest.merger?.seen ?? {}) : []),
+    };
+    for (const agent of everyone(run)) saved.set(agent.id, `${agent.revision}|${agent.sessionFile ?? ""}`);
   };
 
   // --- Events ------------------------------------------------------------------------------------
 
   pi.on("session_start", async (_event, ctx) => {
     hostCtx = ctx;
-    for (const agent of run?.agents ?? []) agent.dispose();
+    for (const agent of run ? everyone(run) : []) agent.dispose();
     run = undefined;
-    revisions.clear();
+    saved.clear();
     await loadSettings();
     await applyPendingRuntime(ctx);
     restoreRun(ctx);
@@ -263,7 +300,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   });
 
   pi.on("session_shutdown", () => {
-    for (const agent of run?.agents ?? []) agent.dispose();
+    for (const agent of run ? everyone(run) : []) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
   });
@@ -306,7 +343,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       const render = () => tui.requestRender();
       let page: Component & { typing?: boolean } = undefined as never;
       const ticker = setInterval(() => {
-        if (run?.agents.some((agent) => agent.working)) render();
+        if (run && everyone(run).some((agent) => agent.working)) render();
       }, 250);
       ticker.unref?.();
       const close = () => {
@@ -328,12 +365,14 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           title: "Plan",
           task: () => run?.task ?? "",
           agents: () => run?.agents ?? [],
+          merger: () => mergerPane(),
           actions: () => laneActions(),
           onAction: (id, text) => onLaneAction(id, text),
-          say: (agent, text) => void say(ctx, agent, text),
+          say: (agent, text) => void agent.say(text, ctx),
+          sayToMerger: (text) => talkToMerger(ctx, text),
           hide: close,
           stopAll: () => {
-            for (const agent of run?.agents ?? []) void agent.stop();
+            for (const agent of run ? everyone(run) : []) void agent.stop();
           },
           rowsAvailable: rows,
           requestRender: render,
@@ -341,26 +380,86 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         return lanesPage;
       };
 
+      // --- The merger -------------------------------------------------------------------------
+
+      /** The merger pane, with two planners: M once you have talked to it, else what it will run on. */
+      const mergerPane = (): MergerPane | undefined => {
+        if (!run || run.agents.length < 2) return undefined;
+        const spec = run.merger?.spec ?? mergerSpec();
+        if (!spec) return undefined;
+        return {
+          agent: run.merger,
+          name: `${catalog.name(spec)}${spec.thinkingLevel ? ` ${spec.thinkingLevel}` : ""}`,
+          ready: run.agents.every((agent) => agent.plan !== undefined),
+        };
+      };
+      const mergerSpec = () => draft.merger ?? run?.agents[0]?.spec;
+
+      /**
+       * Talk to the merger. The first message briefs it (both plans and what you told each planner)
+       * and starts its session; later ones carry the plans revised since it last saw them.
+       */
+      const talkToMerger = (context: ExtensionCommandContext, text: string) => {
+        const current = run;
+        if (!current || current.agents.length < 2) return;
+        const sources = current.agents.flatMap((agent): MergerSource[] =>
+          agent.plan ? [{ id: agent.id, label: agent.label, plan: agent.plan, revision: agent.revision }] : [],
+        );
+        if (!current.merger && sources.length < current.agents.length) return;
+        const message = text.trim() || MERGER_COMPARE_MESSAGE;
+        const shown = text.trim() || "Compare the two plans.";
+        let merger = current.merger;
+        let full: string;
+        if (!merger) {
+          const spec = mergerSpec();
+          const base = current.agents[0];
+          if (!spec || !base) return;
+          merger = new PlannerAgent({
+            id: MERGER_ID,
+            spec,
+            name: catalog.name(spec),
+            cwd: context.cwd,
+            access: { ...base.access, systemPrompt: [mergerSystemPrompt()] },
+            timeoutMs: draft.timeLimit * 60_000,
+            wrapUpMessage: MERGER_WRAP_UP_MESSAGE,
+            sessionDir: plannerSessionDir(),
+            seed: current.launch?.seed ?? context.sessionManager.buildSessionProjection().messages,
+            onChange: onAgentChange,
+            ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
+          });
+          current.merger = merger;
+          current.mergerSeen.clear();
+          const briefed = sources.map((source) => {
+            const conversation = current.agents.find((agent) => agent.id === source.id)?.conversation();
+            return conversation ? { ...source, conversation } : source;
+          });
+          full = mergerBriefing(current.task, briefed, message);
+        } else {
+          const revised = sources.filter((source) => current.mergerSeen.get(source.id) !== source.revision);
+          if (revised.length > 0) {
+            merger.trace.note(
+              `Sent M the latest ${revised.map((source) => `${source.id} v${source.revision}`).join(" and ")}.`,
+            );
+          }
+          full = mergerMessage(revised, message);
+        }
+        for (const source of sources) current.mergerSeen.set(source.id, source.revision);
+        persistRun();
+        void merger.say(full, context, shown);
+        render();
+      };
+
       const laneActions = (): LaneAction[] => {
         const agents = run?.agents ?? [];
-        const ready = agents.filter((agent) => agent.plan);
+        // The merged plan comes first: once there is one, it is usually the one to build.
+        const ready = [...(run?.merger?.plan ? [run.merger] : []), ...agents.filter((agent) => agent.plan)];
         const actions: LaneAction[] = [];
         for (const agent of ready) {
           actions.push({
             id: `implement:${agent.id}`,
             label: `Implement ${agent.id}…`,
-            description: `Implement plan ${agent.id}${agent.revision > 1 ? ` v${agent.revision}` : ""}: choose the model, effort, and context next.`,
+            description: `Implement ${agent === run?.merger ? "the merged plan M" : `plan ${agent.id}`}${agent.revision > 1 ? ` v${agent.revision}` : ""}: choose the model, effort, and context next.`,
           });
-        }
-        if (ready.length === 2) {
-          for (const agent of ready) {
-            const other = ready.find((candidate) => candidate !== agent);
-            actions.push({
-              id: `merge:${agent.id}`,
-              label: `Merge into ${agent.id}`,
-              description: `Ask ${agent.id} to merge ${other?.id}'s plan into its own; ${agent.id}'s lane shows the result.`,
-            });
-          }
         }
         if (agents.length === 1) {
           actions.push({
@@ -396,20 +495,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
       const onLaneAction = (id: string, text?: string) => {
         const [kind, agentId] = id.split(":");
-        const agent = run?.agents.find((candidate) => candidate.id === agentId);
+        const agent = run ? everyone(run).find((candidate) => candidate.id === agentId) : undefined;
         if (kind === "implement" && agent?.plan) return show(implementPage(agent));
-        if (kind === "merge" && agent) {
-          const other = run?.agents.find((candidate) => candidate !== agent && candidate.plan);
-          if (other?.plan && agent.plan) {
-            void say(
-              ctx,
-              agent,
-              synthesisPrompt(candidateOf(agent), candidateOf(other)),
-              "Merge your plan with the other plan.",
-            );
-          }
-          return render();
-        }
         if (kind === "export" && agent?.plan) {
           const plan = agent.plan;
           void exportPlanToFile(
@@ -466,6 +553,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       const draft: Draft = {
         task,
         planners: [withEffort(firstPlanner), configured[1] ? withEffort(configured[1]) : undefined],
+        merger: settings.merger ? withEffort(settings.merger) : undefined,
         scouts: { ...Object.fromEntries(Object.entries(settings.scoutModelMap ?? {})) },
         timeLimit: Math.round(configuredPlannerTimeoutSeconds(settings) / 60),
       };
@@ -571,6 +659,35 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           ...plannerRows(0, adding),
           ...plannerRows(1, adding),
           {
+            id: "merger",
+            label: "Merger",
+            value: () => {
+              if (draft.merger) return describe(draft.merger);
+              const first = run?.agents[0]?.spec ?? draft.planners[0];
+              return `${catalog.name(first)} ${theme.fg("dim", "(as planner A)")}`;
+            },
+            cycle: (direction) => {
+              draft.merger = cycleModel(draft.merger, direction, true);
+            },
+            description:
+              'M, a third model: once both plans are in, it talks them over with you and merges them into one when you ask. "as planner A" uses planner A\'s model and effort.',
+            hidden: () => !draft.planners[1],
+          },
+          {
+            id: "merger-effort",
+            label: "  effort",
+            value: () => {
+              const spec = draft.merger;
+              if (!spec) return "";
+              return effortsOf(spec).length ? effortText(theme, spec.thinkingLevel) : theme.fg("dim", "n/a");
+            },
+            cycle: (direction) => {
+              if (draft.merger) draft.merger = cycleEffort(draft.merger, direction);
+            },
+            description: "How hard M, the merger, thinks (its thinking level).",
+            hidden: () => !draft.planners[1] || !draft.merger,
+          },
+          {
             id: "time",
             label: "Time limit",
             value: () => `${draft.timeLimit} min`,
@@ -655,6 +772,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           rowsAvailable: rows,
           requestRender: render,
           onChange: (row) => {
+            if (row.id.startsWith("merger")) {
+              const { merger: _previous, ...rest } = settings;
+              settings = draft.merger ? { ...rest, merger: draft.merger } : rest;
+              saveSettings({ merger: draft.merger ?? null });
+            }
             if (row.id.startsWith("planner") || row.id.startsWith("effort")) {
               const planners = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
               if (!adding) saveSettings({ planners });
@@ -743,7 +865,10 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
       const implementPage = (first: PlannerAgent) => {
         let author = first;
-        const ready = () => (run?.agents ?? []).filter((agent) => agent.plan);
+        const ready = () => [
+          ...(run?.merger?.plan ? [run.merger] : []),
+          ...(run?.agents ?? []).filter((agent) => agent.plan),
+        ];
         const defaults = (agent: PlannerAgent) => {
           const mapped = settings.implementationModelMap?.[formatModelKey(agent.spec)];
           const base = mapped ?? sessionSpec ?? agent.spec;
@@ -755,7 +880,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           {
             id: "plan",
             label: "Plan",
-            value: () => `${author.id} · ${author.name}${author.revision > 1 ? ` v${author.revision}` : ""}`,
+            value: () =>
+              `${author.id}${author.id === MERGER_ID ? " (merged)" : ""} · ${author.name}${author.revision > 1 ? ` v${author.revision}` : ""}`,
             cycle: (direction) => {
               const list = ready();
               const index = list.indexOf(author);
@@ -825,6 +951,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           createdAt: Date.now(),
           task: draft.task,
           agents: [],
+          mergerSeen: new Map(),
           launch: { roots: current.roots, others: current.others, seed },
         };
         const specs = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
@@ -908,21 +1035,6 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   }
 
   // --- Talking and implementing --------------------------------------------------------------
-
-  async function say(ctx: ExtensionContext, agent: PlannerAgent, text: string, shown?: string) {
-    if (shown) agent.trace.user(shown);
-    await agent.say(text, ctx);
-  }
-
-  function candidateOf(agent: PlannerAgent): PlanCandidate {
-    return {
-      id: agent.id,
-      label: agent.label,
-      model: { provider: agent.spec.provider, modelId: agent.spec.modelId },
-      ...(agent.plan ? { plan: agent.plan } : {}),
-      revision: agent.revision,
-    };
-  }
 
   function hook(ctx: ExtensionContext, agent: PlannerAgent) {
     if (!settings.planCompleteCommand || !agent.plan) return;
@@ -1015,15 +1127,35 @@ function storeAccess(access: PlannerAccessConfig): StoredAccess {
   };
 }
 
+/** The planners, then the merger once it has started. */
+function everyone(run: PlanRun): PlannerAgent[] {
+  return run.merger ? [...run.agents, run.merger] : run.agents;
+}
+
+function storePlanner(agent: PlannerAgent): StoredPlanner {
+  return {
+    id: agent.id,
+    spec: agent.label,
+    name: agent.name,
+    access: storeAccess(agent.access),
+    ...(agent.sessionFile ? { sessionFile: agent.sessionFile } : {}),
+    ...(agent.plan ? { plan: agent.plan, revision: agent.revision } : {}),
+  };
+}
+
 /** A restored planner's tools; without a record (older runs), it may read, search and run safe commands. */
-function restoreAccess(stored: StoredAccess | undefined, settings: PlanModeSettings): PlannerAccessConfig {
+function restoreAccess(
+  stored: StoredAccess | undefined,
+  settings: PlanModeSettings,
+  role: "planner" | "merger" = "planner",
+): PlannerAccessConfig {
   const tools = stored?.tools ?? ["read", "grep", "find", "ls", "bash", "plan_mode_question", "plan_mode_complete"];
   const scoutSpec = stored?.scouts ? parseModelSpec(stored.scouts.spec) : undefined;
   return {
     tools,
     extensions: stored?.extensions ?? [],
     skills: stored?.skills ?? [],
-    systemPrompt: [plannerSystemPrompt()],
+    systemPrompt: [role === "merger" ? mergerSystemPrompt() : plannerSystemPrompt()],
     policy: {
       tools: new Set(tools),
       ...(stored?.mcpAllow ? { mcpAllow: stored.mcpAllow } : {}),

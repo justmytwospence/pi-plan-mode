@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { runPlanCompleteHook } from "../src/plan-hook.js";
-import { plannerTaskPrompt, synthesisPrompt } from "../src/planner/prompt.js";
-import { buildPlannerTranscript } from "../src/planners.js";
+import { mergerBriefing, mergerMessage, mergerSystemPrompt, plannerTaskPrompt } from "../src/planner/prompt.js";
+import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../src/planners.js";
 
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
   type: "message",
@@ -45,7 +45,7 @@ test("the planner transcript keeps conversation and answers but not tool output 
   assert.match(long, /message 199 /u);
 });
 
-test("planner and synthesis prompts carry the task, the tools, and the other plan", () => {
+test("planner prompts carry the task and the tools", () => {
   const prompt = plannerTaskPrompt({
     task: "Add caching",
     planners: 2,
@@ -62,8 +62,61 @@ test("planner and synthesis prompts carry the task, the tools, and the other pla
   const alone = plannerTaskPrompt({ task: "", planners: 1, tools: [], grants: [] });
   assert.doesNotMatch(alone, /Another model/u);
   assert.match(alone, /discussed in the conversation/u);
-  const merge = synthesisPrompt({ id: "A", label: "a/x", plan: "# A" }, { id: "B", label: "b/y", plan: "# B plan" });
-  assert.match(merge, /<other-plan id="B">\n# B plan\n<\/other-plan>/u);
+});
+
+test("the merger is briefed with both plans and what you told each planner, then sent only revised plans", () => {
+  assert.match(
+    mergerSystemPrompt(),
+    /Do not call plan_mode_complete until the user asks you to write the merged plan/u,
+  );
+  const briefing = mergerBriefing(
+    "Add caching",
+    [
+      { id: "A", label: "a/x:high", plan: "# A plan", revision: 2, conversation: "User: use Redis\n\nPlanner A: ok" },
+      { id: "B", label: "b/y", plan: "# B plan", revision: 1 },
+    ],
+    "which is safer?",
+  );
+  assert.match(briefing, /## Task\n\nAdd caching/u);
+  assert.match(briefing, /<plan id="A" model="a\/x:high" version="2">\n# A plan\n<\/plan>/u);
+  assert.match(briefing, /<conversation planner="A">\nUser: use Redis\n\nPlanner A: ok\n<\/conversation>/u);
+  assert.match(briefing, /<plan id="B" model="b\/y" version="1">\n# B plan\n<\/plan>/u);
+  assert.doesNotMatch(briefing, /<conversation planner="B">/u, "no conversation, no block");
+  assert.match(briefing, /## The user's message\n\nwhich is safer\?$/u);
+
+  assert.equal(mergerMessage([], " go ahead "), "go ahead");
+  const update = mergerMessage([{ id: "B", label: "b/y", plan: "# B v2", revision: 2 }], "and now?");
+  assert.match(update, /planner B, which revised its plan/u);
+  assert.match(update, /<plan id="B" model="b\/y" version="2">\n# B v2\n<\/plan>/u);
+  assert.match(update, /## The user's message\n\nand now\?$/u);
+});
+
+test("a planner's conversation for the merger starts after its task prompt and leaves out your copied session", () => {
+  const entries = [
+    message("user", "main session request"),
+    message("assistant", [{ type: "text", text: "main session reply" }]),
+    { type: "custom", customType: PLANNER_SEED_END_ENTRY },
+    message("user", "Another model is planning...\n\n## Task\n\nAdd caching"),
+    message("assistant", [{ type: "text", text: "Looking around." }]),
+    message("toolResult", [{ type: "text", text: "FILE CONTENTS" }], { toolName: "read" }),
+    message("toolResult", [{ type: "text", text: "Store: Redis" }], { toolName: "plan_mode_question" }),
+    message("user", "WRAP UP"),
+    message("user", "prefer fewer dependencies"),
+    message("assistant", [{ type: "text", text: "Dropping the new library." }]),
+  ];
+  const conversation = buildPlannerConversation(entries, "A", { skipUser: (text) => text === "WRAP UP" });
+  assert.match(conversation, /^Planner A: Looking around\./u);
+  assert.match(conversation, /Answers to planning questions:\nStore: Redis/u);
+  assert.match(conversation, /User: prefer fewer dependencies\n\nPlanner A: Dropping the new library\.$/u);
+  for (const excluded of ["main session", "## Task", "FILE CONTENTS", "WRAP UP"]) {
+    assert.equal(conversation.includes(excluded), false, excluded);
+  }
+  // Sessions from before the marker start after the task prompt.
+  const legacy = buildPlannerConversation(
+    entries.filter((entry) => entry.type !== "custom"),
+    "B",
+  );
+  assert.match(legacy, /^Planner B: Looking around\./u);
 });
 
 test("the plan-complete hook receives Claude-style JSON and the plan file", async () => {

@@ -1,8 +1,9 @@
 # 🧭 pi-plan-mode — Plan Before Pi Edits Code
 
 A [Pi](https://pi.dev) extension: `/plan` opens a full-screen planner. One or two models plan your
-task read-only while you watch, answer their questions, and talk to them; then you implement the
-plan you like, with the model, effort, and context you choose.
+task read-only while you watch, answer their questions, and talk to them; with two, a third model
+can talk the plans over with you and merge them. Then you implement the plan you like, with the
+model, effort, and context you choose.
 
 Started as a fork of [`@narumitw/pi-plan-mode`](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode)
 (MIT, history preserved); the planner has since been rebuilt around in-process planner sessions.
@@ -35,6 +36,8 @@ covers the whole terminal. A step bar at the top right shows where you are:
    - **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on).
    - **Planner B**: `none` plans with one model; pick a model to plan the same task with two in
      parallel. Two is the maximum.
+   - **Merger** and its **effort** (with two planners): the model M, the merger, runs on. `as
+     planner A` uses planner A's model and effort.
    - **Time limit** per planner turn (it is asked to wrap up at 80%, stopped at the limit).
    - Preferences: whether Jev picks tools, where implementation starts by default, the export path,
      and the shortcut that opens the planner.
@@ -50,16 +53,23 @@ covers the whole terminal. A step bar at the top right shows where you are:
    plan, once it has one), the subagents it has running, and a line to talk to it. Type and press
    Enter to steer a working planner or to start a new turn with an idle one; both planners can be
    working on your messages at once. When a planner asks a question, the lane shows it with its
-   options: ↑/↓ and Enter pick one, or type your own answer. Tab moves between the lanes and the
-   actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
+   options: ↑/↓ and Enter pick one, or type your own answer. Tab moves between the lanes, the
+   merger pane (with two planners), and the actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
    its trace.
-4. **Review.** Once plans are in, the actions below the lanes are:
-   - **Implement A… / Implement B…**
-   - **Merge into A / Merge into B** (with two plans): asks that planner to merge the other's plan
-     into its own; its lane shows the result as a new version (A v2).
+4. **Review.** With two planners, a full-width pane below the lanes talks to **M, the merger**: a
+   third model that sees both plans and what you told each planner, and can read the repository to
+   settle where they disagree. It starts when you first talk to it, once both plans are in (Enter on
+   an empty line asks it to compare them). Talk the plans over; when you are ready, ask it to write
+   the merged plan, and its pane shows it (ctrl+o switches between its plan and the chat). You can
+   keep talking to A and B too: a plan they revise reaches M with your next message. The focused
+   pane gets the room: M grows while you talk to it and shrinks to a few lines otherwise.
+
+   Once plans are in, the actions below are:
+   - **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one)
    - **Add a planner…** (with one): plan the same task with a second model; the first keeps its
      plan and everything it read.
-   - **Export A…**: write the plan to a Markdown file (path prefilled from settings).
+   - **Export M… / Export A… / Export B…**: write that plan to a Markdown file (path prefilled from
+     settings).
    - **Save & close** and **Discard**.
 
    You can keep talking to either planner in Review, too.
@@ -91,8 +101,13 @@ pi-subagents do), so one planner and two planners are the same thing:
   start without your extensions, so the one a provider needs (e.g. pi-anthropic-auth, which keeps a
   Claude subscription paying) is passed to them; `providerExtensions` overrides this per provider.
 
+The merger is the same kind of session with the same tools, briefed differently: on your first
+message it gets both plans and what you and each planner said to each other (your messages, their
+replies, your answers; no tool output, which could overflow its context), and its prompt keeps it
+from writing the merged plan until you ask.
+
 Your main session is untouched until you implement: then it (or a fresh session) receives the plan.
-Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`.
+Planner and merger sessions are stored under `~/.pi/agent/plan-mode/planners/`.
 
 ## ⚙️ Settings
 
@@ -147,6 +162,8 @@ edits the common ones; the rest are JSON-only:
 
 - Model specs are `provider/modelId`, optionally with `:off|minimal|low|medium|high|xhigh|max`.
 - `planners`: planner A and (optionally) B, preselected on the Settings step.
+- `merger` (optional): the model M, the merger, runs on, e.g. `"anthropic/claude-fable-5-1:xhigh"`;
+  unset, it uses planner A's.
 - `scoutModelMap`: planner model → the model its subagents run on.
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP
   servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.

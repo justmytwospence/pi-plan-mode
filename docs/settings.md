@@ -4,7 +4,7 @@
 
 Settings live in `<getAgentDir()>/pi-plan-mode.json` (normally `~/.pi/agent/pi-plan-mode.json`).
 The file may be a symlink; saves write through it, preserve unknown fields, and publish atomically.
-The Settings step of `/plan` edits planners, efforts, subagent models, the time limit, Jev tool
+The Settings step of `/plan` edits planners, efforts, subagent models, the merger, the time limit, Jev tool
 selection, the default implementation context, the export path, and the shortcut; everything else
 is edited in the file. An invalid file is ignored (defaults apply) and never overwritten.
 

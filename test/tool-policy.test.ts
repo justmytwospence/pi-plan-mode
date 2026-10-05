@@ -1,17 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import planMode, {
+import {
   canSelectToolInPlanMode,
   classifyPlanModeTool,
-  isSafeCommand,
-  withRequiredPlanModeTools,
-} from "../src/plan-mode.js";
-import {
   findBlockedCommandSegment,
   findBlockedPowerShellCommandSegment,
+  isSafeCommand,
   isSafePowerShellCommand,
 } from "../src/tool-policy.js";
-import { builtinTool, createMockContext, createMockPi, extensionTool } from "./support.js";
+import { builtinTool, extensionTool } from "./support.js";
 
 test("tool selection allows safe built-ins and non-built-ins only", () => {
   type PlanTool = Parameters<typeof canSelectToolInPlanMode>[0];
@@ -20,11 +17,6 @@ test("tool selection allows safe built-ins and non-built-ins only", () => {
   assert.equal(canSelectToolInPlanMode(builtinTool("edit") as PlanTool), false);
   assert.equal(canSelectToolInPlanMode(extensionTool("custom") as PlanTool), true);
   assert.equal(canSelectToolInPlanMode(extensionTool("edit") as PlanTool), true);
-  assert.deepEqual(withRequiredPlanModeTools(["read", "plan_mode_question", "read"]), [
-    "read",
-    "plan_mode_question",
-    "plan_mode_complete",
-  ]);
 });
 
 test("isSafeCommand permits read-only command lists and rejects shell mutation", () => {
@@ -457,43 +449,3 @@ const isSafeCommandWithPolicy = isSafeCommand as unknown as (
   command: string,
   safeSubcommands?: TestSafeSubcommands,
 ) => boolean;
-
-test("active Plan mode blocks update_plan and blocked built-ins at the tool hook", async () => {
-  const mock = createMockPi({
-    activeTools: ["read", "bash", "update_plan", "danger"],
-    allTools: [builtinTool("read"), builtinTool("bash"), builtinTool("danger"), extensionTool("edit")],
-  });
-  planMode(mock.pi);
-  const context = createMockContext();
-  await mock.events.get("session_start")?.[0]?.({ reason: "startup" }, context.ctx);
-  const hook = mock.events.get("tool_call")?.[0];
-  const inactiveHelper = await hook?.({ toolName: "plan_mode_complete", input: { plan: "# invalid" } }, context.ctx);
-  assert.deepEqual(inactiveHelper, {
-    block: true,
-    reason: "plan_mode_complete is only available while Plan mode is active.",
-  });
-  await mock.commands.get("plan")?.handler("start", context.ctx);
-  const blocked = await hook?.({ toolName: "update_plan", input: {} }, context.ctx);
-  const blockedBuiltin = await hook?.({ toolName: "danger", input: {} }, context.ctx);
-  const allowed = await hook?.({ toolName: "read", input: {} }, context.ctx);
-  const optedInExtension = await hook?.({ toolName: "edit", input: {} }, context.ctx);
-  assert.deepEqual(blocked, {
-    block: true,
-    reason: "Plan mode blocks update_plan because it tracks execution progress rather than conversational planning.",
-  });
-  assert.deepEqual(blockedBuiltin, {
-    block: true,
-    reason: "Plan mode blocks tool 'danger' because its built-in policy is blocked and settings cannot enable it.",
-  });
-  assert.equal(allowed, undefined);
-  assert.deepEqual(optedInExtension, {
-    block: true,
-    reason: "Plan mode blocks mutating tool 'edit'.",
-  });
-
-  await mock.events.get("session_shutdown")?.[0]?.({ reason: "reload" }, context.ctx);
-  assert.deepEqual(await hook?.({ toolName: "read", input: {} }, context.ctx), {
-    block: true,
-    reason: "Plan mode blocks tool 'read' because workflow ownership is unavailable.",
-  });
-});

@@ -1,6 +1,7 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import { formatModelSpec, type ModelSpec } from "./implementation-models.js";
 import { MCP_GATEWAY_TOOL } from "./mcp-tools.js";
+import { piSpawnCommand } from "./pi-command.js";
 import {
   describedTools,
   EXTRA_TOOLS_ENV,
@@ -10,8 +11,7 @@ import {
   SCOUT_EXTENSIONS_ENV,
   SCOUT_MCP_ALLOW_ENV,
   SCOUT_TOOLS_ENV,
-} from "./multi-plan.js";
-import { piSpawnCommand } from "./pi-command.js";
+} from "./planners.js";
 
 export const PLAN_SUBAGENTS_TOOL_NAME = "plan_subagents";
 export const SCOUT_MODEL_ENV = "PI_PLAN_MODE_SCOUT_MODEL";

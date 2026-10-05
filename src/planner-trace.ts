@@ -4,7 +4,9 @@ export type TraceEntry =
   | { kind: "text"; text: string }
   | { kind: "thinking"; text: string }
   | { kind: "tool"; id: string; name: string; summary: string; status: "running" | "ok" | "error"; result?: string }
-  | { kind: "note"; text: string; tone: "info" | "warning" | "error" };
+  | { kind: "note"; text: string; tone: "info" | "warning" | "error" }
+  /** Something you said to this planner. */
+  | { kind: "user"; text: string };
 
 const MAX_ENTRIES = 1_500;
 const MAX_TEXT_CHARS = 24_000;
@@ -19,6 +21,11 @@ export class PlannerTrace {
 
   note(text: string, tone: "info" | "warning" | "error" = "info") {
     this.push({ kind: "note", text, tone });
+  }
+
+  user(text: string) {
+    this.streaming = undefined;
+    this.push({ kind: "user", text });
   }
 
   /** Apply one Pi JSON/RPC session event. */

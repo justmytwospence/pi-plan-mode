@@ -1,7 +1,7 @@
 {
   "name": "@justmytwospence/pi-plan-mode",
-  "version": "0.59.0",
-  "description": "Pi read-only /plan mode with multi-model planning, guided synthesis, and plan-model-aware implementation (model, effort, context). Fork of @narumitw/pi-plan-mode.",
+  "version": "1.0.0",
+  "description": "Full-screen /plan for Pi: one or two in-process planners you watch, answer and talk to, then implement with a chosen model, effort, and context.",
   "type": "module",
   "license": "MIT",
   "private": true,
@@ -26,9 +26,6 @@
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-tui": "*"
-  },
-  "dependencies": {
-    "@narumitw/pi-tui-kit": "^0.59.0"
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.0",

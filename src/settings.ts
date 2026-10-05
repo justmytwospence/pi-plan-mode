@@ -14,7 +14,7 @@ import {
   type ModelSpec,
   parseModelSpec,
 } from "./implementation-models.js";
-import type { PlannerToolset } from "./multi-plan.js";
+import type { PlannerToolset } from "./planners.js";
 import type { SafeSubcommands } from "./tool-policy.js";
 
 export const PLAN_MODE_SETTINGS_FILE = "pi-plan-mode.json";
@@ -146,6 +146,9 @@ export interface PlanModeSettingsPatch {
   implementationModelMap?: Readonly<Record<string, ModelSpec>> | null;
   defaultImplementationContext?: ImplementationContextChoice | null;
   planners?: readonly ModelSpec[] | null;
+  scoutModelMap?: Readonly<Record<string, ModelSpec>> | null;
+  plannerTimeoutSeconds?: number | null;
+  jevToolSelection?: boolean | null;
 }
 export interface UpdatePlanModeSettingsOptions {
   settingsPath?: string;
@@ -579,6 +582,14 @@ export function updatePlanModeSettings(
     else if (patch.planners !== undefined) {
       updated.planners = patch.planners.map(formatModelSpec);
     }
+    if (patch.scoutModelMap === null) delete updated.scoutModelMap;
+    else if (patch.scoutModelMap !== undefined) {
+      updated.scoutModelMap = serializeImplementationModelMap(patch.scoutModelMap);
+    }
+    if (patch.plannerTimeoutSeconds === null) delete updated.plannerTimeoutSeconds;
+    else if (patch.plannerTimeoutSeconds !== undefined) updated.plannerTimeoutSeconds = patch.plannerTimeoutSeconds;
+    if (patch.jevToolSelection === null) delete updated.jevToolSelection;
+    else if (patch.jevToolSelection !== undefined) updated.jevToolSelection = patch.jevToolSelection;
     const settings = normalizePlanModeSettings(updated);
     if (!settings) throw invalidSettingsError(settingsPath, "invalid settings shape");
     await publishSettings(settingsPath, updated, options.signal, options.beforeRename);

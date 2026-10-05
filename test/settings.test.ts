@@ -3,6 +3,7 @@ import { access, mkdtemp, readdir, readFile, rm, symlink, unlink, writeFile } fr
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
+import { MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH } from "../src/implementation-models.js";
 import {
   awaitPlanModeSettingsWrites,
   configuredImplementationModel,
@@ -14,7 +15,6 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "../src/settings.js";
-import { MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH } from "../src/state.js";
 
 test("Plan-mode settings validate inherit and fixed thinking levels", async () => {
   assert.deepEqual(normalizePlanModeSettings({}), { thinkingLevel: "inherit" });

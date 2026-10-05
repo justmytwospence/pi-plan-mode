@@ -1,9 +1,8 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import { type ExtensionContext, withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import { DEFAULT_PLAN_EXPORT_PATH } from "./settings.js";
-import type { PlanModeState } from "./state.js";
 
 export { DEFAULT_PLAN_EXPORT_PATH };
 
@@ -14,52 +13,6 @@ export interface PlanExportResult {
 export interface PlanExportDestination {
   configuredPath: string;
   resolvedPath: string;
-}
-
-export interface PlanExportLifecycle {
-  signal: AbortSignal;
-  isCurrent(): boolean;
-  getState?(): PlanModeState;
-  finishReady?(): void;
-}
-
-export async function exportStoredPlan(
-  state: PlanModeState,
-  requestedPath: string | undefined,
-  ctx: ExtensionContext,
-  lifecycle?: PlanExportLifecycle,
-  defaultPath = DEFAULT_PLAN_EXPORT_PATH,
-) {
-  const plan =
-    (state.enabled ? state.latestPlan : undefined)?.trim() ??
-    state.savedPlan?.plan.trim() ??
-    state.activeImplementation?.plan.trim();
-  if (!plan) {
-    const error = new Error("No completed plan is available to export. Use /plan finalize when planning is complete.");
-    if (!ctx.hasUI) throw error;
-    ctx.ui.notify(error.message, "warning");
-    return false;
-  }
-
-  const isCurrent = () =>
-    !lifecycle || (lifecycle.isCurrent() && (!lifecycle.getState || lifecycle.getState() === state));
-  let result: PlanExportResult;
-  try {
-    result = await exportPlanToFile(plan, requestedPath, ctx.cwd, lifecycle?.signal, isCurrent, defaultPath);
-  } catch (error: unknown) {
-    if (lifecycle?.signal.aborted || !isCurrent()) return false;
-    if (!ctx.hasUI) throw error;
-    const detail = error instanceof Error ? error.message : String(error);
-    ctx.ui.notify(safeNotification(`Unable to export plan: ${detail}`), "error");
-    return false;
-  }
-
-  if (!isCurrent()) return false;
-  const finishedReady = state.enabled && Boolean(state.latestPlan?.trim()) && lifecycle?.finishReady !== undefined;
-  if (finishedReady) lifecycle.finishReady?.();
-  const detail = finishedReady ? " Plan mode disabled." : "";
-  ctx.ui.notify(safeNotification(`Plan exported to ${result.path}.${detail}`), "info");
-  return true;
 }
 
 export async function exportPlanToFile(

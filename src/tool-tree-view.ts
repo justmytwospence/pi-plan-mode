@@ -9,21 +9,12 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import { pageHeader } from "./app/frame.js";
 import { groupState, leaves, type ToolNode, toggle } from "./tool-tree.js";
-import {
-  fieldLine,
-  type Hint,
-  hintLine,
-  padLines,
-  padVisible,
-  rule,
-  selectedRow,
-  spinner,
-  titleLine,
-} from "./ui-kit.js";
+import { fieldLine, type Hint, hintLine, padLines, padVisible, rule, selectedRow, spinner } from "./ui-kit.js";
 
 export type ToolTreeResult =
-  | { kind: "start"; timeLimitMinutes: number /** You changed the selection yourself. */; touched: boolean }
+  | { kind: "start" /** You changed the selection yourself. */; touched: boolean }
   | { kind: "back" }
   | { kind: "cancel" };
 
@@ -39,27 +30,19 @@ export interface ToolTreeViewOptions {
   /** Short lines under the task, e.g. the Jev summary when it is already known. */
   notes: readonly string[];
   roots: ToolNode[];
+  /** What Enter does, asked as a question first: `Start planning with 1 planner`. */
   startLabel: string;
-  /** Planners' time limit; without it there is no Time limit row. */
-  timeLimitMinutes?: number;
-  timeLimitChoices?: readonly number[];
   preselection?: ToolPreselection;
   /** Next to the title; defaults to what planners may use. */
   purpose?: string;
-  /** Show the multi-model step bar (default true). */
-  steps?: boolean;
-  /** What Esc does, in the key hints (default "back to models"). */
+  /** What Esc does, in the key hints (default "back to settings"). */
   backLabel?: string;
-  /** The Enter hint (default "start planning"). */
-  startHint?: string;
-  /** The Start row's description: who gets the selection, and what is left with none. */
-  grantee?: { prefix: string; none: string };
   rows(): number;
   requestRender(): void;
   onDone(result: ToolTreeResult): void;
 }
 
-type Row = { kind: "start" } | { kind: "time" } | { kind: "node"; node: ToolNode; depth: number };
+type Row = { kind: "node"; node: ToolNode; depth: number };
 
 /**
  * Step 2: which tools planners may use. Groups (toolsets, MCP servers) open and close with Tab (or → and ←), Space
@@ -67,12 +50,11 @@ type Row = { kind: "start" } | { kind: "time" } | { kind: "node"; node: ToolNode
  * tools are selected. The highlighted row is described at the bottom.
  */
 export class ToolTreeView implements Component {
-  /** Starts on the first tool, so Space works at once; Enter starts from anywhere. */
-  private cursor: number;
-  /** Enter away from the Start row asks first. */
+  /** Starts on the first tool, so Space works at once. */
+  private cursor = 0;
+  /** Enter asks before planning starts. */
   private confirming = false;
   private scroll = 0;
-  private timeLimit: number | undefined;
   private readonly expanded = new Set<string>();
   private jevStatus: { kind: "pending" } | { kind: "done"; message: string } | undefined;
   /** True once the user changed any selection; Jev never overrides that. */
@@ -90,8 +72,6 @@ export class ToolTreeView implements Component {
     private readonly theme: Theme,
     private readonly options: ToolTreeViewOptions,
   ) {
-    this.timeLimit = options.timeLimitMinutes;
-    this.cursor = this.timeLimit === undefined ? 1 : 2;
     // Toolsets start open; MCP servers start closed so a long catalog stays scannable.
     for (const root of options.roots) if (root.children) this.expanded.add(root.id);
     if (options.preselection) {
@@ -118,7 +98,7 @@ export class ToolTreeView implements Component {
   invalidate() {}
 
   private visibleRows(): Row[] {
-    const rows: Row[] = this.timeLimit === undefined ? [{ kind: "start" }] : [{ kind: "start" }, { kind: "time" }];
+    const rows: Row[] = [];
     const visit = (node: ToolNode, depth: number) => {
       rows.push({ kind: "node", node, depth });
       if (node.children && this.expanded.has(node.id)) for (const child of node.children) visit(child, depth + 1);
@@ -148,27 +128,21 @@ export class ToolTreeView implements Component {
       // Any other key keeps editing and does what it normally does.
     }
     if (is("escape")) return this.finish({ kind: "back" });
-    // Enter starts from anywhere: directly on the Start row, after a confirmation elsewhere.
-    if (is("enter")) {
-      if (row?.kind === "start") return this.start();
-      this.confirming = true;
-    } else if (is("up", "k", "ctrl+p")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
-    else if (is("down", "j", "ctrl+n")) this.cursor = (this.cursor + 1) % rows.length;
-    else if (is("pageUp")) this.cursor = Math.max(0, this.cursor - 10);
-    else if (is("pageDown")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
+    // Enter starts planning, after a confirmation.
+    if (is("enter")) this.confirming = true;
+    else if (is("up", "k", "ctrl+p", "ctrl+k")) this.cursor = (this.cursor - 1 + rows.length) % rows.length;
+    else if (is("down", "j", "ctrl+n", "ctrl+j")) this.cursor = (this.cursor + 1) % rows.length;
+    else if (is("ctrl+u")) this.cursor = Math.max(0, this.cursor - 10);
+    else if (is("ctrl+d")) this.cursor = Math.min(rows.length - 1, this.cursor + 10);
     else if (is("home", "g")) this.cursor = 0;
     else if (is("end", "shift+g")) this.cursor = rows.length - 1;
-    else if (is("+", "=")) this.stepTime(1);
-    else if (is("-")) this.stepTime(-1);
     else if (is("a")) {
       for (const leaf of leaves(this.options.roots)) leaf.selected = true;
       this.touched = true;
     } else if (is("n")) {
       for (const leaf of leaves(this.options.roots)) leaf.selected = false;
       this.touched = true;
-    } else if (row?.kind === "time" && is("right", "l", "space")) this.stepTime(1);
-    else if (row?.kind === "time" && is("left", "h")) this.stepTime(-1);
-    else if (row?.kind === "node" && is("space", "x")) this.change(row.node);
+    } else if (row?.kind === "node" && is("space", "x")) this.change(row.node);
     else if (row?.kind === "node" && is("tab")) {
       // Open or close a group; on a tool, close the group it is in and move up to it.
       if (row.node.children) this.toggleExpanded(row.node.id);
@@ -179,12 +153,12 @@ export class ToolTreeView implements Component {
         this.expanded.delete(group.node.id);
         this.cursor = parent;
       }
-    } else if (row?.kind === "node" && is("right", "l")) {
+    } else if (row?.kind === "node" && is("right", "l", "ctrl+l")) {
       // Open a group; on an open group, step into its first tool.
       if (!row.node.children) return;
       if (this.expanded.has(row.node.id)) this.cursor = Math.min(rows.length - 1, this.cursor + 1);
       else this.expanded.add(row.node.id);
-    } else if (row?.kind === "node" && is("left", "h")) {
+    } else if (row?.kind === "node" && is("left", "h", "ctrl+h")) {
       if (row.node.children && this.expanded.has(row.node.id)) this.expanded.delete(row.node.id);
       else this.cursor = this.parentIndex(rows, this.cursor) ?? this.cursor;
     } else if (!this.confirming && !dismissed) return;
@@ -203,12 +177,12 @@ export class ToolTreeView implements Component {
   }
 
   private start() {
-    this.finish({ kind: "start", timeLimitMinutes: this.timeLimit ?? 0, touched: this.touched });
+    this.finish({ kind: "start", touched: this.touched });
   }
 
-  /** `3 of 7 tools · 45 min limit` */
+  /** `3 of 7 tools` */
   private summary(selected: number, total: number) {
-    return `${selected} of ${total} tools${this.timeLimit === undefined ? "" : ` · ${this.timeLimit} min limit`}`;
+    return `${selected} of ${total} tools`;
   }
 
   private toggleExpanded(id: string) {
@@ -230,12 +204,7 @@ export class ToolTreeView implements Component {
     const row = this.shownRows[index];
     if (!row) return { handled: true };
     this.cursor = this.scroll + index;
-    if (row.kind === "start") {
-      this.start();
-      return { handled: true };
-    }
-    if (row.kind === "time") this.stepTime(event.x < 18 ? -1 : 1);
-    else {
+    {
       // Clicking the checkbox selects or clears; clicking elsewhere on a group opens or closes it.
       const boxStart = 3 + row.depth * 2 + 2;
       const onBox = event.x >= boxStart && event.x < boxStart + 3;
@@ -244,14 +213,6 @@ export class ToolTreeView implements Component {
     }
     this.options.requestRender();
     return { handled: true };
-  }
-
-  private stepTime(direction: 1 | -1) {
-    const choices = this.options.timeLimitChoices ?? [];
-    if (this.timeLimit === undefined) return;
-    const index = choices.indexOf(this.timeLimit);
-    const next = choices[Math.min(choices.length - 1, Math.max(0, (index < 0 ? 0 : index) + direction))];
-    if (next !== undefined) this.timeLimit = next;
   }
 
   render(width: number): string[] {
@@ -268,13 +229,12 @@ export class ToolTreeView implements Component {
           ? theme.fg("muted", this.jevStatus.message)
           : undefined;
     const header = [
-      rule(theme, width),
-      titleLine(
+      ...pageHeader(
         theme,
         width,
         this.options.title,
         this.options.purpose ?? "what planners and their subagents may use",
-        this.options.steps === false ? undefined : "Tools",
+        "Tools",
       ),
       ...(this.options.task ? [fieldLine(theme, width, "Task", this.options.task)] : []),
       ...(jev ? [fieldLine(theme, width, "Jev", jev)] : []),
@@ -282,7 +242,7 @@ export class ToolTreeView implements Component {
       "",
     ];
     const current = rows[this.cursor];
-    const detail = this.detail(this.confirming ? { kind: "start" } : current, width);
+    const detail = this.confirming ? this.startDetail(width) : this.detail(current, width);
     const footer = [
       rule(theme, width),
       ...padLines(detail, 3),
@@ -312,11 +272,7 @@ export class ToolTreeView implements Component {
     const body = this.shownRows.map((row, offset) => {
       const isCursor = this.scroll + offset === this.cursor;
       let line: string;
-      if (row.kind === "start") {
-        line = `${theme.fg("success", theme.bold(`▶ ${this.options.startLabel}`))}  ${theme.fg("dim", this.summary(selectedCount, all.length))}`;
-      } else if (row.kind === "time") {
-        line = `  Time limit  ${theme.fg("accent", "‹")} ${theme.bold(`${this.timeLimit} min`)} ${theme.fg("accent", "›")}  ${theme.fg("dim", "planners are asked to wrap up at 80%")}`;
-      } else {
+      {
         const node = row.node;
         const state = groupState(node);
         const box =
@@ -341,29 +297,32 @@ export class ToolTreeView implements Component {
     if (rows.length > listHeight) {
       body.push(theme.fg("dim", `   ${this.scroll + 1}–${this.scroll + this.shownRows.length} of ${rows.length} rows`));
     }
-    return [...header, ...body, ...footer].map((line) => truncateToWidth(line, width));
+    return [...header, ...padLines(body, Math.max(0, height - header.length - footer.length)), ...footer].map((line) =>
+      truncateToWidth(line, width),
+    );
+  }
+
+  private startDetail(width: number): string[] {
+    const chosen = this.options.roots
+      .map((root) => {
+        const all = leaves([root]);
+        const picked = all.filter((leaf) => leaf.selected).length;
+        return picked === 0 ? undefined : all.length === 1 ? root.label : `${root.label} ${picked}/${all.length}`;
+      })
+      .filter(Boolean);
+    const text = chosen.length
+      ? `Planners get read, grep, find, ls, and: ${chosen.join(" · ")}`
+      : "Planners get only read, grep, find, and ls.";
+    return wrapTextWithAnsi(text, Math.max(10, width - 2))
+      .slice(0, 3)
+      .map((line) => ` ${this.theme.fg("muted", line)}`);
   }
 
   private detail(row: Row | undefined, width: number): string[] {
     const theme = this.theme;
     let text: string;
     if (!row) return [];
-    if (row.kind === "start") {
-      const chosen = this.options.roots
-        .map((root) => {
-          const all = leaves([root]);
-          const picked = all.filter((leaf) => leaf.selected).length;
-          return picked === 0 ? undefined : all.length === 1 ? root.label : `${root.label} ${picked}/${all.length}`;
-        })
-        .filter(Boolean);
-      const grantee = this.options.grantee ?? {
-        prefix: "Planners get",
-        none: "Planners get only read, grep, find, and ls.",
-      };
-      text = chosen.length ? `${grantee.prefix}: ${chosen.join(" · ")}` : grantee.none;
-    } else if (row.kind === "time") {
-      text = "How long each planner may run. At 80% it is asked to wrap up; at the limit it is stopped.";
-    } else {
+    {
       const node = row.node;
       text = node.detail || node.description || node.label;
       if (node.jevLocked && node.jev !== undefined) {
@@ -380,15 +339,13 @@ export class ToolTreeView implements Component {
   }
 
   private hints(row: Row | undefined): Hint[] {
-    const start: Hint = { key: "⏎", label: this.options.startHint ?? "start planning", primary: true };
+    const start: Hint = { key: "⏎", label: "start planning", primary: true };
     const common: Hint[] = [
       { key: "↑↓", label: "move" },
       { key: "a/n", label: "all/none" },
-      { key: "esc", label: this.options.backLabel ?? "back to models" },
+      { key: "esc", label: this.options.backLabel ?? "back to settings" },
     ];
-    if (row?.kind === "start") return [start, ...common];
-    if (row?.kind === "time") return [start, { key: "←→", label: "time limit" }, ...common];
-    const node = row?.kind === "node" ? row.node : undefined;
+    const node = row?.node;
     const isGroup = node?.children !== undefined;
     const all = node !== undefined && groupState(node) === "all";
     return [
@@ -396,7 +353,7 @@ export class ToolTreeView implements Component {
       { key: "space", label: `${all ? "clear" : "select"}${isGroup ? " all" : ""}` },
       ...(isGroup && node
         ? [{ key: "tab", label: this.expanded.has(node.id) ? "close" : "open" }]
-        : row?.kind === "node" && row.depth > 0
+        : row && row.depth > 0
           ? [{ key: "tab", label: "close group" }]
           : []),
       ...common,

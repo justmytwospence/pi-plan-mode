@@ -4,12 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { commandGrantAllows, parseSimpleCommand } from "../src/command-grants.js";
-import { resolvePlannerAccess } from "../src/multi-plan.js";
-import planMode from "../src/plan-mode.js";
-import { plannerArgs, plannerEnv } from "../src/planner-process.js";
+import { resolveAccess } from "../src/planner/access.js";
+import { resolvePlannerAccess } from "../src/planners.js";
 import { normalizePlanModeSettings } from "../src/settings.js";
 import { buildToolTree, leaves, treeToSelection } from "../src/tool-tree.js";
-import { builtinTool, createMockContext, createMockPi } from "./support.js";
 
 const HOME = "/home/me";
 const EXEC = "bash ~/.agents/skills/marimo-pair/scripts/execute-code.sh";
@@ -108,69 +106,16 @@ test("grants are settings, join Shell in the tool tree for Jev, and reach planne
   const access = resolvePlannerAccess(selection, {}, (path) => path.replace(/^~/u, HOME), grants);
   assert.equal(access.shell, true, "a granted command turns bash on");
   assert.deepEqual(access.grants?.[0]?.skills, [`${HOME}/.agents/skills/marimo-pair`]);
-  const args = plannerArgs({
-    spec: { provider: "p", modelId: "m" },
-    extensionPath: "/ext",
-    loadUserExtensions: false,
-    access,
+  const resolved = resolveAccess({
+    roots,
+    toolsets: {},
+    grants,
+    others: [],
+    scout: undefined,
+    guardExtensionPath: "/ext",
+    expandPath: (path) => path.replace(/^~/u, HOME),
   });
-  assert.match(args[args.indexOf("--tools") + 1] ?? "", /(^|,)bash(,|$)/u);
-  assert.deepEqual(args.slice(args.indexOf("--skill"), args.indexOf("--skill") + 2), [
-    "--skill",
-    `${HOME}/.agents/skills/marimo-pair`,
-  ]);
-  assert.equal(plannerEnv({ access }).PI_PLAN_MODE_COMMAND_GRANTS, JSON.stringify([EXEC, DISCOVER]));
-});
-
-test("the main Plan mode session lets granted commands through and tells the model about them", async () => {
-  const mock = createMockPi({ activeTools: ["read", "bash"], allTools: [builtinTool("read"), builtinTool("bash")] });
-  planMode(mock.pi, {
-    readSettings: async () => ({
-      kind: "loaded" as const,
-      settings: {
-        thinkingLevel: "inherit" as const,
-        commandGrants: normalizePlanModeSettings({ commandGrants: grantSettings })?.commandGrants,
-      },
-    }),
-  });
-  const context = createMockContext();
-  await mock.events.get("session_start")?.[0]?.({}, context.ctx);
-  await mock.commands.get("plan")?.handler("start", context.ctx);
-  const hook = mock.events.get("tool_call")?.[0];
-  assert.ok(hook);
-  const script = `${process.env.HOME}/.agents/skills/marimo-pair/scripts/execute-code.sh`;
-  assert.equal(
-    await hook(
-      { toolName: "bash", input: { command: `bash ${script} --url http://localhost:2718 -c "print(df.shape)"` } },
-      context.ctx,
-    ),
-    undefined,
-  );
-  const blocked = (await hook({ toolName: "bash", input: { command: `python3 -c "print(1)"` } }, context.ctx)) as {
-    block: boolean;
-    reason: string;
-  };
-  assert.equal(blocked.block, true);
-  assert.match(
-    blocked.reason,
-    /Granted commands also allowed \(one per call\): bash ~\/\.agents\/skills\/marimo-pair\/scripts\/execute-code\.sh/u,
-  );
-  const chained = await hook(
-    { toolName: "bash", input: { command: `bash ${script} --url x -c "print(1)"; touch pwned` } },
-    context.ctx,
-  );
-  assert.equal((chained as { block?: boolean }).block, true);
-
-  const contextHandler = mock.events.get("context")?.[0];
-  const result = (await contextHandler?.(
-    { type: "context", messages: [{ role: "user", content: "look at my notebook", timestamp: 1 }] },
-    context.ctx,
-  )) as {
-    messages: Array<{ customType?: string; content?: unknown }>;
-  };
-  const note = result.messages.find((message) => message.customType === "plan-mode-command-grants");
-  assert.match(
-    String(note?.content),
-    /Marimo notebooks \(`bash ~\/\.agents\/skills\/marimo-pair\/scripts\/execute-code\.sh …`/u,
-  );
+  assert.ok(resolved.config.tools.includes("bash"));
+  assert.deepEqual(resolved.config.skills, [`${HOME}/.agents/skills/marimo-pair`]);
+  assert.deepEqual(resolved.config.policy.grantPrefixes, [EXEC, DISCOVER]);
 });

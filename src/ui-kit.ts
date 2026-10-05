@@ -6,7 +6,7 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-export const WORKFLOW_STEPS = ["Models", "Tools", "Planning", "Compare"] as const;
+export const WORKFLOW_STEPS = ["Settings", "Tools", "Planning", "Review", "Implement"] as const;
 export type WorkflowStep = (typeof WORKFLOW_STEPS)[number];
 
 export interface Hint {
@@ -22,7 +22,7 @@ export function spinner(now = Date.now()) {
   return SPINNER[Math.floor(now / 120) % SPINNER.length] ?? "⠋";
 }
 
-/** `✓ Models ─ ● Tools ─ ○ Planning ─ ○ Compare` */
+/** `✓ Settings ─ ● Tools ─ ○ Planning ─ ○ Review ─ ○ Implement` */
 export function stepBar(theme: Theme, current: WorkflowStep) {
   const index = WORKFLOW_STEPS.indexOf(current);
   return WORKFLOW_STEPS.map((step, position) =>

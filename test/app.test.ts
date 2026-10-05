@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { LanesPage, type MergerPane } from "../src/app/lanes-page.js";
-import { OptionsPage } from "../src/app/options-page.js";
+import { OptionsPage, type TextArea } from "../src/app/options-page.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
 import { SubagentTracker } from "../src/subagent-progress.js";
@@ -290,4 +290,67 @@ test("the top of the planning screen shows each planner's live stats, and M's on
   lines = page.render(140);
   assert.match(lines.find((line) => line.includes("? M merger")) ?? "", /\? M merger · Model M high.*asking you/u);
   assert.equal(lines.length, 30);
+});
+
+test("a multiline text row shows its whole text as a block in the free space, and edits in a text area", () => {
+  let task = Array.from({ length: 12 }, (_unused, index) => `step ${index + 1} ${"word ".repeat(12)}`).join("\n");
+  let rowsAvailable = 40;
+  const area: TextArea & { text: string } = {
+    focused: false,
+    text: "",
+    setText(text) {
+      this.text = text;
+    },
+    getText() {
+      return this.text;
+    },
+    handleInput(data) {
+      if (data === "\r") this.onSubmit?.(this.text);
+      else this.text += data;
+    },
+    render: (width) => ["─".repeat(width), `EDITOR ${area.text.slice(-12)}`, "─".repeat(width)],
+  };
+  const page = new OptionsPage(theme, {
+    title: "Plan",
+    step: "Settings",
+    rows: [
+      {
+        id: "task",
+        label: "Task",
+        value: () => task,
+        text: { get: () => task, set: (value) => (task = value), placeholder: "what to plan", multiline: true },
+        description: "task",
+      },
+      { id: "a", label: "Planner A", section: "Planners", value: () => "x", cycle: () => undefined, description: "a" },
+    ],
+    next: { label: "next", run: () => undefined },
+    back: { label: "close", run: () => undefined },
+    rowsAvailable: () => rowsAvailable,
+    requestRender: () => undefined,
+    createTextArea: () => area,
+  });
+  let lines = page.render(80);
+  assert.equal(lines.length, 40);
+  const blockLines = () => lines.filter((line) => line.startsWith("     │ "));
+  assert.ok(blockLines().length >= 12, "every line of the task shows, wrapped");
+  assert.ok(lines.some((line) => line.includes("step 12")));
+  assert.ok(lines.some((line) => line.includes("Planner A")));
+
+  rowsAvailable = 18;
+  lines = page.render(80);
+  assert.equal(lines.length, 18);
+  assert.ok(blockLines().at(-1)?.includes("more lines (⏎ to edit)"), "a long task is cut with a count");
+  assert.ok(
+    lines.some((line) => line.includes("Planner A")),
+    "the other rows still fit",
+  );
+
+  page.handleInput(KEY.enter);
+  assert.equal(page.typing, true);
+  assert.equal(area.focused, true);
+  page.handleInput("!");
+  assert.ok(page.render(80).some((line) => line.includes("EDITOR")));
+  page.handleInput(KEY.enter);
+  assert.equal(page.typing, false);
+  assert.match(task, /word !$/u);
 });

@@ -11,10 +11,10 @@ import {
   type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import { type Component, Editor, type TUI } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
 import { type LaneAction, LanesPage, type MergerPane } from "./app/lanes-page.js";
-import { type OptionRow, OptionsPage } from "./app/options-page.js";
+import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { holdWorking } from "./herdr-blocked.js";
 import {
@@ -355,6 +355,23 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       app = { close, render };
       updateStatus();
 
+      /** The task editor: pi's multi-line editor, wrapping and scrolling inside its borders. */
+      const createTextArea = (): TextArea =>
+        new Editor(
+          tui,
+          {
+            borderColor: (text) => theme.fg("borderAccent", text),
+            selectList: {
+              selectedPrefix: (text) => theme.fg("accent", text),
+              selectedText: (text) => theme.fg("accent", text),
+              description: (text) => theme.fg("muted", text),
+              scrollInfo: (text) => theme.fg("dim", text),
+              noMatch: (text) => theme.fg("dim", text),
+            },
+          },
+          { paddingX: 1 },
+        );
+
       const show = (next: Component) => {
         page = next;
         render();
@@ -666,8 +683,14 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             id: "task",
             label: "Task",
             value: () => (draft.task ? (draft.task.split("\n")[0] ?? "") : theme.fg("dim", "(from the conversation)")),
-            text: { get: () => draft.task, set: (value) => (draft.task = value), placeholder: "what to plan" },
-            description: "What to plan. Leave it empty to plan what the conversation so far is about.",
+            text: {
+              get: () => draft.task,
+              set: (value) => (draft.task = value),
+              placeholder: "(from the conversation) ⏎ to write what to plan",
+              multiline: true,
+            },
+            description:
+              "What to plan. ⏎ edits it here (shift+⏎ for a new line). Leave it empty to plan what the conversation so far is about.",
             hidden: () => adding,
           },
           ...plannerRows(0, adding),
@@ -785,6 +808,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           back: adding ? { label: "back", run: () => show(lanes()) } : { label: "close", run: close },
           rowsAvailable: rows,
           requestRender: render,
+          createTextArea,
           onChange: (row) => {
             if (row.id.startsWith("merger")) {
               const { merger: _previous, ...rest } = settings;

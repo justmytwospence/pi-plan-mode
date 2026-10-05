@@ -33,6 +33,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
 
 1. **Settings.** One page with the task, the planners, and your preferences. ↑/↓ (or ctrl+j/ctrl+k)
    pick a row, ←/→ (or ctrl+h/ctrl+l) change its value, Enter edits a text row, Tab goes on.
+   - **Task**: shown in full, wrapped, in the room the other rows leave. Enter edits it in place in
+     a multi-line editor (shift+Enter for a new line, Enter to save, Esc to cancel). Empty plans
+     what the conversation so far is about.
    - **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on,
      with their own **effort**; new subagent models start at `high`).
    - **Planner B**: `none` plans with one model; pick a model to plan the same task with two in

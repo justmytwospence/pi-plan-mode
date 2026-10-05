@@ -96,7 +96,17 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.ok(app);
   let screen = app.render().join("\n");
   assert.match(screen, /● Settings/u);
-  assert.match(screen, /Task\s+add a cache/u);
+  assert.match(screen, /Task\s*\n {5}│ add a cache/u, "the task is a block under its label");
+
+  // Enter edits the task in place in a multi-line editor; Enter saves it.
+  app.handleInput("\r");
+  screen = app.render().join("\n");
+  assert.match(screen, /shift\+⏎ new line/u);
+  for (const char of " and its tests") app.handleInput(char);
+  app.handleInput("\r");
+  screen = app.render().join("\n");
+  assert.match(screen, /│ add a cache and its tests/u);
+  assert.doesNotMatch(screen, /shift\+⏎ new line/u, "editing ended");
   assert.match(screen, /Planner A\s+Claude Sonnet 5\.5/u);
   assert.doesNotMatch(screen, /default/u, "efforts are real levels");
 

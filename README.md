@@ -92,7 +92,8 @@ covers the whole terminal. A step bar at the top right shows where you are:
 shows `plan: A working · B ready (/plan)`, and you are notified when one asks something or a plan
 is ready), **Stop planning** stops the working planners, **Back** returns. `/plan` reopens the
 screen where you left it, also after `/reload` or resuming the session: planners keep their sessions
-on disk, so you can keep talking to them.
+on disk, so you can keep talking to them. A planner (or the merger) whose turn the reload or restart
+cut off, or whose last turn failed, resumes by itself; its lane shows `continue (resumed …)`.
 
 ## 🧠 How it works
 

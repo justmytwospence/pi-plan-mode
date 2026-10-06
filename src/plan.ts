@@ -41,6 +41,7 @@ import {
   mergerSystemPrompt,
   plannerSystemPrompt,
   plannerTaskPrompt,
+  resumeMessage,
 } from "./planner/prompt.js";
 import type { PlannerSessionFactory } from "./planner/session.js";
 import { buildPlannerTranscript } from "./planners.js";
@@ -96,7 +97,11 @@ interface StoredPlanner {
   sessionFile?: string;
   plan?: string;
   revision?: number;
+  /** Its turn was in progress (or had failed) when last saved: restoring the run resumes it. */
+  turn?: TurnState;
 }
+
+type TurnState = "interrupted" | "failed";
 
 interface StoredRun {
   id: string;
@@ -173,14 +178,15 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     pi.appendEntry(RUN_ENTRY, stored);
   };
 
-  /** What each agent last saved: its plan version and session file. */
+  /** What each agent last saved: its plan version, session file, and whether a turn was underway. */
   const saved = new Map<string, string>();
   const onAgentChange = () => {
     if (!run) return;
-    // Save a run whenever a session file or a plan arrives or changes, so it survives a reload.
+    // Save a run whenever a session file, a plan, or a turn starts or ends, so a reload can restore
+    // it and resume the turns it cut off.
     let changed = false;
     for (const agent of everyone(run)) {
-      const signature = `${agent.revision}|${agent.sessionFile ?? ""}`;
+      const signature = savedSignature(agent);
       const previous = saved.get(agent.id);
       if (previous === signature) continue;
       saved.set(agent.id, signature);
@@ -286,7 +292,21 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       ...(merger ? { merger } : {}),
       mergerSeen: new Map(merger ? Object.entries(latest.merger?.seen ?? {}) : []),
     };
-    for (const agent of everyone(run)) saved.set(agent.id, `${agent.revision}|${agent.sessionFile ?? ""}`);
+    for (const agent of everyone(run)) saved.set(agent.id, savedSignature(agent));
+    // Turns a reload or restart cut off (or that had failed) carry on by themselves.
+    const stored = [...latest.planners, ...(merger && latest.merger ? [latest.merger] : [])];
+    for (const agent of everyone(run)) {
+      const turn = stored.find((candidate) => candidate.id === agent.id)?.turn;
+      if (!turn || !agent.sessionFile) continue;
+      const role = agent === run.merger ? "merger" : "planner";
+      void agent.say(
+        resumeMessage(turn, role),
+        ctx,
+        turn === "interrupted"
+          ? "continue (resumed: the session restarted mid-turn)"
+          : "try again (resumed after an error)",
+      );
+    }
   };
 
   // --- Events ------------------------------------------------------------------------------------
@@ -1186,7 +1206,18 @@ function everyone(run: PlanRun): PlannerAgent[] {
   return run.merger ? [...run.agents, run.merger] : run.agents;
 }
 
+/** A working turn is saved as interrupted: if the process dies, that is what it was. */
+function turnState(agent: PlannerAgent): TurnState | undefined {
+  if (agent.working) return "interrupted";
+  return agent.status === "failed" ? "failed" : undefined;
+}
+
+function savedSignature(agent: PlannerAgent) {
+  return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? ""}`;
+}
+
 function storePlanner(agent: PlannerAgent): StoredPlanner {
+  const turn = turnState(agent);
   return {
     id: agent.id,
     spec: agent.label,
@@ -1194,6 +1225,7 @@ function storePlanner(agent: PlannerAgent): StoredPlanner {
     access: storeAccess(agent.access),
     ...(agent.sessionFile ? { sessionFile: agent.sessionFile } : {}),
     ...(agent.plan ? { plan: agent.plan, revision: agent.revision } : {}),
+    ...(turn ? { turn } : {}),
   };
 }
 

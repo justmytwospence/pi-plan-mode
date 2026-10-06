@@ -266,7 +266,7 @@ test("a run with a merger comes back after a reload, and M carries on without a 
   assert.ok(app);
   const screen = app.render().join("\n");
   assert.match(screen, /M · merger · Claude Opus 5\.5 high/u);
-  assert.match(screen, /M restored; talk to it to carry on/u);
+  assert.match(screen, /M restored\./u);
   assert.doesNotMatch(screen, /starting/u, "a restored merger waits for you");
 
   app.handleInput("\t");
@@ -283,4 +283,81 @@ test("a run with a merger comes back after a reload, and M carries on without a 
   app.handleInput("\u001b");
   app.handleInput("\r");
   await opened;
+});
+
+test("restoring a run resumes the turns a reload cut off or that had failed, and leaves the rest", async () => {
+  const { mock, context, sessions } = setup();
+  mock.entries.push({
+    customType: "plan-run",
+    data: {
+      id: "r2",
+      createdAt: 1,
+      task: "add a cache",
+      state: "active",
+      planners: [
+        {
+          id: "A",
+          spec: "anthropic/claude-sonnet-5-5:low",
+          name: "Claude Sonnet 5.5",
+          sessionFile: "/a.jsonl",
+          turn: "interrupted",
+        },
+        {
+          id: "B",
+          spec: "anthropic/claude-opus-5-5:high",
+          name: "Claude Opus 5.5",
+          sessionFile: "/b.jsonl",
+          turn: "failed",
+        },
+      ],
+    },
+  });
+  for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
+  await flush();
+  const resumed = sessions.prompts.map((prompt) => prompt.model);
+  assert.deepEqual(resumed.sort(), ["claude-opus-5-5", "claude-sonnet-5-5"]);
+  assert.match(
+    sessions.prompts.find((prompt) => prompt.model === "claude-sonnet-5-5")?.text ?? "",
+    /cut off because the user's pi session restarted.*Carry on from where you left off/su,
+  );
+  assert.match(
+    sessions.prompts.find((prompt) => prompt.model === "claude-opus-5-5")?.text ?? "",
+    /previous turn failed with an error/u,
+  );
+  // Both finished their resumed turns; the saved run no longer marks them as cut off.
+  const stored = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
+    planners: Array<{ id: string; turn?: string; plan?: string }>;
+  };
+  assert.deepEqual(
+    stored.planners.map((planner) => [planner.id, planner.turn, Boolean(planner.plan)]),
+    [
+      ["A", undefined, true],
+      ["B", undefined, true],
+    ],
+  );
+
+  // A planner that was idle (done, or stopped by you) is not resumed.
+  const idle = setup();
+  idle.mock.entries.push({
+    customType: "plan-run",
+    data: {
+      id: "r3",
+      createdAt: 1,
+      task: "t",
+      state: "active",
+      planners: [
+        {
+          id: "A",
+          spec: "anthropic/claude-sonnet-5-5:low",
+          name: "S",
+          sessionFile: "/a.jsonl",
+          plan: "# A",
+          revision: 1,
+        },
+      ],
+    },
+  });
+  for (const handler of idle.mock.events.get("session_start") ?? []) await handler({}, idle.context.ctx);
+  await flush();
+  assert.equal(idle.sessions.prompts.length, 0);
 });

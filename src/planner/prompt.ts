@@ -98,6 +98,22 @@ export interface MergerSource {
   conversation?: string;
 }
 
+/**
+ * Sent when a run is restored (after `/reload`, a restart, or resuming the session) to an agent
+ * whose turn was cut off, or had failed, so it carries on without you typing "continue".
+ */
+export function resumeMessage(reason: "interrupted" | "failed", role: "planner" | "merger") {
+  const why =
+    reason === "interrupted"
+      ? "Your previous turn was cut off because the user's pi session restarted (a reload or a restart); whatever the interrupted step was doing did not reach you."
+      : "Your previous turn failed with an error (often a provider or credentials problem, which may be fixed now).";
+  const next =
+    role === "planner"
+      ? "Carry on from where you left off. If your plan was already complete, resubmit it with plan_mode_complete."
+      : "Carry on with what you were doing for the user; still write the merged plan only once they have asked for it.";
+  return `${why} ${next}`;
+}
+
 /** The merger's wrap-up near the time limit: answer now, but never merge unasked. */
 export const MERGER_WRAP_UP_MESSAGE =
   "Time is almost up. Stop investigating now and answer the user with what you have, saying what you could not check. Do not write the merged plan unless the user has asked for it.";

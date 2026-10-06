@@ -25,6 +25,8 @@
   lists tools that are always preselected and that Jev never deselects (default: web research,
   Context7, and Jev judgments). Subagent models start at
   `medium` effort instead of `high`.
+- Restoring a run (after `/reload`, a restart, or resuming the session) resumes the planners and
+  merger whose turn was cut off or had failed, instead of leaving them waiting for "continue".
 - The planning screen shows a live stats row per planner (and the merger) above the lanes again:
   state, turn time, tool calls, subagent tasks, tokens, cost, and current activity.
 - Each planner's subagents have their own effort row on the Settings step, separate from their

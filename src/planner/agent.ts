@@ -126,7 +126,7 @@ export class PlannerAgent {
       // Restored without a plan (e.g. the merger mid-conversation): it waits for you, not starting.
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
-      this.trace.note(`${this.id} restored; talk to it to carry on.`);
+      this.trace.note(`${this.id} restored.`);
     }
   }
 

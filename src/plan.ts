@@ -55,7 +55,7 @@ import {
   readPlanModeSettings,
   updatePlanModeSettings,
 } from "./settings.js";
-import { applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
+import { applyAlwaysOffer, applyJevPick, buildToolTree, leafCapabilities, type ToolNode } from "./tool-tree.js";
 import { type ToolPreselection, ToolTreeView } from "./tool-tree-view.js";
 import { effortText } from "./ui-kit.js";
 
@@ -855,6 +855,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           const others = otherTools(safeAllTools(pi), covered, EXTENSION_ENTRY_PATH);
           const otherNode = otherToolsNode(others);
           if (otherNode) roots.push(otherNode);
+          applyAlwaysOffer(roots, settings.alwaysOffer);
           tree = { roots, others, touched: false };
           if (settings.jevToolSelection !== false) {
             tree.pick = (dependencies.pickTools ?? pickToolsWithJev)({
@@ -1052,6 +1053,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             scoutTargets: [],
             grants: settings.commandGrants ?? {},
           });
+          applyAlwaysOffer(roots, settings.alwaysOffer);
           run.launch = { roots, others: [], seed: context.sessionManager.buildSessionProjection().messages };
         }
         launchPlanner(context, IDS[run.agents.length] ?? "B", spec, 2);

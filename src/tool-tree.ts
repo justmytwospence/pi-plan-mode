@@ -18,6 +18,8 @@ export interface ToolNode {
   detail?: string;
   /** Leaves only: Jev scores it, but its selection stays as you (or your settings) set it. */
   jevLocked?: boolean;
+  /** Leaves only: listed in `alwaysOffer`, so it starts selected and Jev leaves it on. */
+  always?: boolean;
 }
 
 export type GroupState = "all" | "some" | "none";
@@ -306,6 +308,29 @@ export function leafCapabilities(nodes: readonly ToolNode[]): ToolCapability[] {
     description: leaf.description,
     fallbackSelected: leaf.selected === true,
   }));
+}
+
+/**
+ * The names `alwaysOffer` may use for a leaf: its group (toolset, grant, MCP server, Other tool),
+ * its own name, and `group/tool`.
+ */
+export function offerNames(leaf: ToolNode): string[] {
+  const colon = leaf.id.indexOf(":");
+  const path = colon >= 0 ? leaf.id.slice(colon + 1) : leaf.id;
+  const [group = path, tool] = splitOnce(path, "/");
+  return [...new Set([path, group, ...(tool ? [tool, `${group}/${leaf.label}`] : []), leaf.label].filter(Boolean))];
+}
+
+/** Select the leaves `alwaysOffer` names and lock them against Jev's deselection. */
+export function applyAlwaysOffer(nodes: readonly ToolNode[], alwaysOffer: readonly string[] | undefined) {
+  const wanted = new Set(alwaysOffer ?? []);
+  if (wanted.size === 0) return;
+  for (const leaf of leaves(nodes)) {
+    if (!offerNames(leaf).some((name) => wanted.has(name))) continue;
+    leaf.selected = true;
+    leaf.jevLocked = true;
+    leaf.always = true;
+  }
 }
 
 /** Show Jev's scores and, unless the user already chose, take its selection. */

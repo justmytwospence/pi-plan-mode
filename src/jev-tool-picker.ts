@@ -44,15 +44,20 @@ export interface PickToolsInput {
   signal?: AbortSignal;
 }
 
+// Asked as "would it make the plan better informed", not "does the plan depend on it": the second
+// is a necessity test that research tools (web search, docs) fail for most tasks, since a plan can
+// always be written without them, only worse. Measured on sample tasks, this wording keeps web
+// search and docs on wherever they help while unrelated tools (a browser, a document archive)
+// stay low; tools wanted every time belong in `alwaysOffer` instead.
 const CRITERIA = {
-  true: "The plan depends on information or checks this capability provides",
-  false: "The plan can be researched well without it",
+  true: "It would supply relevant facts, docs, or checks for this task",
+  false: "It has nothing relevant to offer for this task",
 };
 
 function question(capability: ToolCapability) {
   return (
     `Capability "${capability.label}" gives the agents: ${capability.description}. ` +
-    "Would AI agents writing an implementation plan for `task` materially benefit from having this capability while they research it?"
+    "AI agents are researching and writing an implementation plan for `task`. Would this capability give them information that makes the plan better informed or more correct?"
   );
 }
 

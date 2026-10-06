@@ -51,7 +51,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
 2. **Tools.** What the planners may use: Shell (read-only commands and any command grants),
    Subagents, your toolsets (e.g. web research), MCP servers and their tools, and **Other tools**
    from your other Pi extensions. Jev (TypeSafe) scores every tool for the task while you look,
-   including Other tools, and preselects the useful ones; your own changes win. Enter asks
+   including Other tools, and preselects the ones that would make the plan better informed; your
+   own changes win. Tools in `alwaysOffer` (e.g. web research, docs) are always preselected and
+   marked `always`: Jev scores them but never turns them off. Enter asks
    `Start planning with N planners?`; Enter again starts.
 3. **Planning.** Above the lanes, one live row per planner (and the merger, once it starts) shows
    its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it
@@ -159,6 +161,7 @@ edits the common ones; the rest are JSON-only:
     }
   },
   "jevToolSelection": true,
+  "alwaysOffer": ["web", "context7", "jev"],
   "jevThreshold": 0.5,
   "jevProvider": "typesafe",
   "jevModel": "jev-latest",
@@ -171,6 +174,9 @@ edits the common ones; the rest are JSON-only:
 - `merger` (optional): the model M, the merger, runs on, e.g. `"anthropic/claude-fable-5-1:xhigh"`;
   unset, it uses planner A's.
 - `scoutModelMap`: planner model → the model its subagents run on.
+- `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP
+  server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group
+  (`web/web_search`, `context7/query-docs`).
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP
   servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.
 - `planCompleteCommand` runs when you implement or export a plan, with Claude Code

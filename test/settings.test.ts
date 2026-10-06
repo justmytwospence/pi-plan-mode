@@ -318,6 +318,12 @@ test("Plan-mode settings patch implementation defaults, retention, and export fi
   }
 });
 
+test("Plan-mode settings read alwaysOffer as a list of tool names", () => {
+  assert.deepEqual(normalizePlanModeSettings({ alwaysOffer: [" web ", "jev", "web"] })?.alwaysOffer, ["web", "jev"]);
+  assert.equal(normalizePlanModeSettings({ alwaysOffer: "web" }), undefined);
+  assert.equal(normalizePlanModeSettings({ alwaysOffer: ["web", ""] }), undefined);
+});
+
 test("Plan-mode settings save and clear the merger model", async () => {
   assert.deepEqual(normalizePlanModeSettings({ merger: "anthropic/claude-opus-5-5:high" })?.merger, {
     provider: "anthropic",

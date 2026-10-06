@@ -287,9 +287,12 @@ export class ToolTreeView implements Component {
         const label = padVisible(`${indent}${arrow}${box} ${name}`, labelWidth);
         const extra = node.children
           ? theme.fg("dim", `${leaves([node]).filter((leaf) => leaf.selected).length}/${leaves([node]).length}`)
-          : node.jev !== undefined
-            ? theme.fg(node.jev >= 0.5 ? "success" : "dim", `Jev ${Math.round(node.jev * 100)}%`)
-            : "";
+          : [
+              ...(node.always ? [theme.fg("accent", "always")] : []),
+              ...(node.jev !== undefined
+                ? [theme.fg(node.jev >= 0.5 ? "success" : "dim", `Jev ${Math.round(node.jev * 100)}%`)]
+                : []),
+            ].join(theme.fg("dim", " · "));
         line = `${label} ${extra}`;
       }
       return isCursor ? selectedRow(theme, width, `${theme.fg("accent", " › ")}${line}`) : `   ${line}`;
@@ -325,7 +328,9 @@ export class ToolTreeView implements Component {
     {
       const node = row.node;
       text = node.detail || node.description || node.label;
-      if (node.jevLocked && node.jev !== undefined) {
+      if (node.always) {
+        text = `${text}${text.endsWith(".") ? "" : "."} Always offered (alwaysOffer in settings): Jev scores it but never deselects it.`;
+      } else if (node.jevLocked && node.jev !== undefined) {
         text = `${text}${text.endsWith(".") ? "" : "."} Jev scores it but leaves it as you set it.`;
       }
       if (node.children) {

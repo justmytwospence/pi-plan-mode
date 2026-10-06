@@ -128,6 +128,12 @@ export interface PlanModeSettings {
   commandGrants?: Record<string, CommandGrant>;
   /** Let Jev pick tools from the task, for planners and for Plan mode itself (default true; needs a Jev classifier in Pi, e.g. TYPESAFE_API_KEY). */
   jevToolSelection?: boolean;
+  /**
+   * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
+   * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
+   * `jev`, `context7`), or one tool in a group (`web/web_search`, `context7/query-docs`).
+   */
+  alwaysOffer?: string[];
   /** Jev probability at or above which a tool is preselected (default 0.5). */
   jevThreshold?: number;
   /** Pi classifier provider for tool selection (default typesafe). */
@@ -279,6 +285,13 @@ export function normalizePlanModeSettings(value: unknown): PlanModeSettings | un
     const toolsets = normalizePlannerToolsets(Reflect.get(value, "plannerToolsets"));
     if (!toolsets) return undefined;
     settings.plannerToolsets = toolsets;
+  }
+  if (Object.hasOwn(value, "alwaysOffer")) {
+    const alwaysOffer = Reflect.get(value, "alwaysOffer");
+    if (!Array.isArray(alwaysOffer) || !alwaysOffer.every((item) => typeof item === "string" && item.trim())) {
+      return undefined;
+    }
+    settings.alwaysOffer = [...new Set(alwaysOffer.map((item: string) => item.trim()))];
   }
   if (Object.hasOwn(value, "jevToolSelection")) {
     const enabled = Reflect.get(value, "jevToolSelection");

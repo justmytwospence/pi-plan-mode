@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
 import { pickToolsWithJev, type ToolCapability } from "../src/jev-tool-picker.js";
+import { applyAlwaysOffer, applyJevPick, buildToolTree, leaves, offerNames } from "../src/tool-tree.js";
 
 const CAPABILITIES: ToolCapability[] = [
   { id: "shell", label: "Shell", description: "git and rg", fallbackSelected: true },
@@ -151,4 +152,97 @@ test("Jev judges from the conversation when there is no explicit task", async ()
   assert.match(state.task, /discussed in `conversation`/u);
   assert.ok(state.conversation.length <= 3_000);
   assert.match(state.conversation, /upgrade React Router$/u);
+});
+
+test("tools in alwaysOffer start selected, show it, and Jev scores but never deselects them", () => {
+  const roots = buildToolTree({
+    toolsets: {
+      web: {
+        label: "Web research",
+        extensions: [],
+        tools: ["web_search", "fetch_content"],
+        enabled: false,
+        scouts: false,
+      },
+      mcp: { label: "MCP", extensions: [], tools: ["codemode"], mcp: true, enabled: false, scouts: false },
+    },
+    mcpCatalog: [
+      {
+        name: "context7",
+        known: true,
+        tools: [
+          { name: "resolve-library-id", description: "ids", readOnly: true },
+          { name: "query-docs", description: "docs", readOnly: true },
+        ],
+      },
+      { name: "paperless", known: true, tools: [{ name: "search", description: "docs", readOnly: true }] },
+    ] as never,
+    scoutTargets: [],
+    grants: { jev: { label: "Jev judgments", commands: ["jev-ask"], skills: [], enabled: false, planMode: true } },
+  });
+  applyAlwaysOffer(roots, ["web", "jev", "context7"]);
+  const leaf = (id: string) => leaves(roots).find((candidate) => candidate.id === id);
+  for (const id of [
+    "toolset:web/web_search",
+    "toolset:web/fetch_content",
+    "grant:jev",
+    "mcp:context7/resolve-library-id",
+    "mcp:context7/query-docs",
+  ]) {
+    assert.equal(leaf(id)?.selected, true, id);
+    assert.equal(leaf(id)?.always, true, id);
+  }
+  assert.equal(leaf("mcp:paperless/search")?.selected, false);
+
+  const probabilities = Object.fromEntries(leaves(roots).map((candidate) => [candidate.id, 0.1]));
+  applyJevPick(roots, {
+    kind: "jev",
+    model: "jev",
+    probabilities,
+    selected: Object.fromEntries(leaves(roots).map((candidate) => [candidate.id, false])),
+  });
+  assert.equal(leaf("toolset:web/web_search")?.selected, true, "Jev leaves it on");
+  assert.equal(leaf("toolset:web/web_search")?.jev, 0.1, "but still scores it");
+
+  // One tool of a group, by group/tool.
+  const single = buildToolTree({
+    toolsets: {
+      web: { label: "Web", extensions: [], tools: ["web_search", "fetch_content"], enabled: false, scouts: false },
+    },
+    mcpCatalog: [],
+    scoutTargets: [],
+  });
+  applyAlwaysOffer(single, ["web/web_search"]);
+  assert.deepEqual(
+    leaves(single)
+      .filter((candidate) => candidate.selected && candidate.id.startsWith("toolset:"))
+      .map((candidate) => candidate.id),
+    ["toolset:web/web_search"],
+  );
+  assert.deepEqual(offerNames({ id: "mcp:context7/query-docs", label: "query-docs", description: "" }), [
+    "context7/query-docs",
+    "context7",
+    "query-docs",
+  ]);
+});
+
+test("Jev is asked whether a tool makes the plan better informed, not whether the plan depends on it", async () => {
+  let request: { questions: Record<string, { instructions: string; criteria: Record<string, string> }> } | undefined;
+  await pickToolsWithJev({
+    task: "add a cache",
+    conversation: "",
+    cwd: "/repo",
+    capabilities: [{ id: "web", label: "web_search", description: "Search the web", fallbackSelected: false }],
+    registry: {
+      findOfType: () => ({ id: "jev" }) as never,
+      classify: async (_model: unknown, input: unknown) => {
+        request = input as never;
+        return { stopReason: "stop", model: "jev", answers: { c0: { type: "bool", probability: 0.9 } } } as never;
+      },
+    },
+  });
+  const question = request?.questions.c0;
+  assert.match(question?.instructions ?? "", /better informed or more correct/u);
+  assert.doesNotMatch(question?.instructions ?? "", /materially benefit/u);
+  assert.match(question?.criteria.false ?? "", /nothing relevant to offer/u);
 });

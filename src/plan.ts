@@ -67,6 +67,8 @@ const STATUS_KEY = "plan";
 const IDS = ["A", "B"] as const;
 /** The merger's id: M talks two plans over with you and merges them when you ask. */
 const MERGER_ID = "M";
+/** The effort a subagent model starts at until you change it. */
+const SUBAGENT_EFFORT = "medium";
 const TIME_LIMITS = [15, 30, 45, 60, 90, 120, 180] as const;
 
 export interface PlanDependencies {
@@ -574,7 +576,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         scouts: Object.fromEntries(
           Object.entries(settings.scoutModelMap ?? {}).map(([key, spec]) => [
             key,
-            withEffort(spec, spec.thinkingLevel ?? "high"),
+            withEffort(spec, spec.thinkingLevel ?? SUBAGENT_EFFORT),
           ]),
         ),
         timeLimit: Math.round(configuredPlannerTimeoutSeconds(settings) / 60),
@@ -603,7 +605,9 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           option && current ? sameModel(option, current) : option === current,
         );
         const next = options[(index + direction + options.length) % options.length];
-        draft.scouts[formatModelKey(spec)] = next ? withEffort(next, current?.thinkingLevel ?? "high") : undefined;
+        draft.scouts[formatModelKey(spec)] = next
+          ? withEffort(next, current?.thinkingLevel ?? SUBAGENT_EFFORT)
+          : undefined;
       };
       const setScoutEffort = (spec: ModelSpec | undefined, direction: 1 | -1) => {
         const scout = scoutFor(spec);

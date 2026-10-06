@@ -121,11 +121,11 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   app.handleInput("\u001b[C");
   let rows = underSubagents();
   assert.match(rows.subagents, /subagents\s+‹ Claude Sonnet 5\.5 ›\s*$/u, "the model row shows only the model");
-  assert.match(rows.next, /^ {7}effort\s+high/u);
+  assert.match(rows.next, /^ {7}effort\s+medium/u, "subagents start at medium");
   app.handleInput("\u001b[B");
   app.handleInput("\u001b[D");
   rows = underSubagents();
-  assert.match(rows.next, /effort\s+‹ medium ›/u);
+  assert.match(rows.next, /effort\s+‹ low ›/u);
   assert.match(rows.subagents, /Claude Sonnet 5\.5/u, "the effort changes without the model");
   app.handleInput("\u001b[C");
   for (let row = 0; row < 4; row += 1) app.handleInput("\u001b[A");

@@ -37,7 +37,7 @@ covers the whole terminal. A step bar at the top right shows where you are:
      a multi-line editor (shift+Enter for a new line, Enter to save, Esc to cancel). Empty plans
      what the conversation so far is about.
    - **Planner A** and its **effort** and **subagents** (the model its read-only helpers run on,
-     with their own **effort**; new subagent models start at `high`).
+     with their own **effort**; new subagent models start at `medium`).
    - **Planner B**: `none` plans with one model; pick a model to plan the same task with two in
      parallel. Two is the maximum.
    - **Merger** and its **effort** (with two planners): the model M, the merger, runs on. `as

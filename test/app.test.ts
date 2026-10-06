@@ -198,29 +198,43 @@ test("Tab reaches the actions; an action with input asks for it; Esc offers Hide
 test("with two planners, M's pane sits below the lanes: Tab reaches it, and it grows while focused", () => {
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { status: "working", working: true } as never);
-  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: false };
-  const { page, said } = lanesPage([a, b], () => pane, 45);
-  const mergerHeight = (lines: string[]) => {
+  const pane: MergerPane = { agent: undefined, name: "Model M high", ready: false, waiting: "B still planning" };
+  const { page, said, actions } = lanesPage([a, b], () => pane, 45);
+  const mergerHeight = (lines: string[], last: string) => {
     const top = lines.findIndex((line) => line.includes("M · merger · Model M high"));
-    const bottom = lines.findIndex((line, index) => index > top && line.startsWith("› "));
+    const bottom = lines.findIndex((line, index) => index > top && line.startsWith(last));
     return bottom - top + 1;
   };
   let lines = page.render(120);
   assert.equal(lines.length, 45);
-  assert.ok(lines.some((line) => line.includes("waiting for both plans")));
-  assert.equal(mergerHeight(lines), 6, "collapsed while you are in a lane");
+  assert.ok(
+    lines.some((line) => line.includes("B still planning")),
+    "the pane says why M cannot start",
+  );
+  assert.equal(mergerHeight(lines, "  M starts once both plans are in"), 6, "collapsed");
 
+  // Until M can start, Tab skips it: from B straight to the actions, where Enter acts.
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.tab);
+  assert.ok(
+    page.render(120).some((line) => line.includes("⏎ do it")),
+    "Tab went from B to the actions",
+  );
+  page.handleInput(KEY.enter);
+  assert.deepEqual(actions, ["implement:A"]);
+  assert.deepEqual(said, []);
+  page.handleInput(KEY.tab);
+
+  // Once both plans are in, Tab reaches M, which grows to the bottom third.
+  pane.ready = true;
+  delete pane.waiting;
   page.handleInput(KEY.tab);
   page.handleInput(KEY.tab);
   lines = page.render(120);
   assert.equal(lines.length, 45);
   // 45 rows: header 3, task 1, stats 2, footer 4 leave 35; M takes a third of them.
-  assert.equal(mergerHeight(lines), 11, "grows to the bottom third while focused");
-  page.handleInput(KEY.enter);
-  assert.deepEqual(said, [], "nothing to merge until both plans are in");
-
-  pane.ready = true;
-  assert.ok(page.render(120).some((line) => line.includes("⏎ compare")));
+  assert.equal(mergerHeight(lines, "› "), 11, "grows to the bottom third while focused");
+  assert.ok(lines.some((line) => line.includes("⏎ compare")));
   page.handleInput(KEY.enter);
   for (const char of "which is safer?") page.handleInput(char);
   page.handleInput(KEY.enter);
@@ -365,7 +379,7 @@ test("the planning screen fits short terminals and always shows the actions bar"
         title: "Plan",
         task: () => "add a cache",
         agents: () => [a, b],
-        merger: () => ({ agent: undefined, name: "Model M high", ready: false }),
+        merger: () => ({ agent: undefined, name: "Model M high", ready: focusMerger }),
         actions: () => [{ id: "implement:A", label: "Implement A…", description: "implement" }],
         onAction: () => undefined,
         say: () => undefined,

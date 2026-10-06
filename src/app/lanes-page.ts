@@ -50,6 +50,8 @@ export interface MergerPane {
   name: string;
   /** Both plans are in, so it can start. */
   ready: boolean;
+  /** Why it cannot start yet, e.g. "B failed" or "B is still planning"; shown in its pane. */
+  waiting?: string;
 }
 
 export interface LanesPageOptions {
@@ -141,7 +143,8 @@ export class LanesPage {
     const pane = this.pane();
     return [
       ...this.options.agents().map((agent): Target => ({ kind: "lane", agent })),
-      ...(pane ? [{ kind: "merger", pane } as Target] : []),
+      // Tab reaches M only once it can start: before that it has nothing to do with what you type.
+      ...(pane && (pane.agent || pane.ready) ? [{ kind: "merger", pane } as Target] : []),
       { kind: "actions" },
     ];
   }
@@ -455,19 +458,24 @@ export class LanesPage {
       theme,
       width,
       focused ? theme.fg("accent", theme.bold(title)) : theme.fg("muted", title),
-      theme.fg("dim", pane.ready ? "not started" : "waiting for both plans"),
+      pane.ready ? theme.fg("dim", "not started") : theme.fg("warning", pane.waiting ?? "waiting for both plans"),
       color,
     );
     const about = pane.ready
       ? "Talk the two plans over with M, a third model that sees both of them and what you told each planner. When you are ready, ask it to write the merged plan. Enter on an empty line asks it to compare the plans."
-      : "Once both plans are in, M, a third model that sees both of them and what you told each planner, can talk them over with you and merge them into one.";
+      : `${pane.waiting ? `${pane.waiting}: M needs both plans, so it cannot start. ` : ""}Once both plans are in, M, a third model that sees both of them and what you told each planner, can talk them over with you and merge them into one. Until then, talk to a planner or Tab to the actions to implement a plan.`;
     const bodyHeight = Math.max(1, rows - 3);
     const body = wrap(about, Math.max(10, width - 2)).map((line) => theme.fg("dim", ` ${line}`));
     const input = this.inputFor(MERGER_ID);
     input.focused = focused && this.modal === undefined;
     const inputLine = focused
       ? `${theme.fg("accent", "›")} ${input.render(Math.max(4, width - 2))[0] ?? ""}`
-      : theme.fg("dim", `› ${input.getValue() || `tab here to talk to ${MERGER_ID}`}`);
+      : theme.fg(
+          "dim",
+          pane.ready
+            ? `› ${input.getValue() || `tab here to talk to ${MERGER_ID}`}`
+            : "  M starts once both plans are in",
+        );
     return [
       head,
       ...padLines(body, bodyHeight),

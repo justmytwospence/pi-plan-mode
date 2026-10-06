@@ -407,10 +407,19 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         if (!run || run.agents.length < 2) return undefined;
         const spec = run.merger?.spec ?? mergerSpec();
         if (!spec) return undefined;
+        const missing = run.agents.filter((agent) => agent.plan === undefined);
+        const failed = missing.filter((agent) => !agent.working);
+        const ids = (agents: PlannerAgent[]) => agents.map((agent) => agent.id).join(" and ");
+        const waiting = failed.length
+          ? `${ids(failed)} ${failed.some((agent) => agent.status === "failed") ? "failed" : "has no plan"}`
+          : missing.length
+            ? `${ids(missing)} still planning`
+            : undefined;
         return {
           agent: run.merger,
           name: `${catalog.name(spec)}${spec.thinkingLevel ? ` ${spec.thinkingLevel}` : ""}`,
           ready: run.agents.every((agent) => agent.plan !== undefined),
+          ...(waiting ? { waiting } : {}),
         };
       };
       const mergerSpec = () => draft.merger ?? run?.agents[0]?.spec;

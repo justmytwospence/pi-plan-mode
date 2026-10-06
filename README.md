@@ -63,11 +63,12 @@ covers the whole terminal. A step bar at the top right shows where you are:
    Enter to steer a working planner or to start a new turn with an idle one; both planners can be
    working on your messages at once. When a planner asks a question, the lane shows it with its
    options: ↑/↓ and Enter pick one, or type your own answer. Tab moves between the lanes, the
-   merger pane (with two planners), and the actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
+   merger pane (once both plans are in), and the actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
    its trace.
 4. **Review.** With two planners, a full-width pane below the lanes talks to **M, the merger**: a
    third model that sees both plans and what you told each planner, and can read the repository to
-   settle where they disagree. It starts when you first talk to it, once both plans are in (Enter on
+   settle where they disagree. Until both plans are in, its pane says what it is waiting for (e.g. a
+   failed planner) and Tab skips it. It starts when you first talk to it (Enter on
    an empty line asks it to compare them). Talk the plans over; when you are ready, ask it to write
    the merged plan, and its pane shows it (ctrl+o switches between its plan and the chat). You can
    keep talking to A and B too: a plan they revise reaches M with your next message. The focused

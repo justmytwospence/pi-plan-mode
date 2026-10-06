@@ -88,6 +88,8 @@ const MERGER_COLLAPSED_ROWS = 6;
 /** Share of the space below the header the merger pane takes while you talk to it. */
 const MERGER_FOCUSED_SHARE = 0.55;
 const MIN_LANE_ROWS = 6;
+/** The merger pane's smallest useful size: its title, a line, its rule, and its input. */
+const MERGER_MIN_ROWS = 5;
 
 export class LanesPage {
   /** Index into the Tab targets: the lanes, then the merger pane (if any), then the actions bar. */
@@ -375,25 +377,41 @@ export class LanesPage {
     const task = this.options.task().split("\n")[0] ?? "";
     const taskLine = task ? truncateToWidth(` ${theme.fg("dim", "Task ")} ${task}`, width) : undefined;
     const footer = this.footer(width, target);
-    const top = [...header, ...(taskLine ? [taskLine] : []), ...this.statsLines(width, agents, pane)];
-    const available = Math.max(MIN_LANE_ROWS, height - top.length - footer.length);
+    // Everything fits the screen and the actions bar always shows: when room runs short, the
+    // stats rows go first, then the merger pane (unless you are in it), and the lanes are cut last.
     const mergerFocused = target.kind === "merger";
-    const mergerRows = pane
+    const base = [...header, ...(taskLine ? [taskLine] : [])];
+    const room = height - base.length - footer.length;
+    const stats = this.statsLines(width, agents, pane);
+    const mergerMin = pane ? MERGER_MIN_ROWS : 0;
+    const top = room - stats.length >= MIN_LANE_ROWS + mergerMin ? [...base, ...stats] : base;
+    const available = Math.max(1, height - top.length - footer.length);
+    const showMerger = pane !== undefined && (mergerFocused || available >= MIN_LANE_ROWS + MERGER_MIN_ROWS);
+    const mergerRows = showMerger
       ? Math.max(
-          5,
+          MERGER_MIN_ROWS,
           Math.min(
             available - MIN_LANE_ROWS,
-            mergerFocused || pane.agent?.pending ? Math.floor(available * MERGER_FOCUSED_SHARE) : MERGER_COLLAPSED_ROWS,
+            mergerFocused || pane?.agent?.pending
+              ? Math.floor(available * MERGER_FOCUSED_SHARE)
+              : MERGER_COLLAPSED_ROWS,
           ),
         )
       : 0;
-    const laneRows = Math.max(MIN_LANE_ROWS, available - mergerRows);
+    const laneRows = Math.max(1, available - mergerRows);
     this.laneTop = top.length;
-    const lanes = this.renderLanes(agents, width, laneRows, target);
+    // The lanes render at least their own minimum; cut them to the rows they were given.
+    const lanes = this.renderLanes(agents, width, Math.max(MIN_LANE_ROWS, laneRows), target).slice(0, laneRows);
     this.mergerTop = top.length + lanes.length;
-    const merger = pane ? this.renderMerger(pane, width, mergerRows, mergerFocused) : [];
+    const merger =
+      showMerger && pane
+        ? this.renderMerger(pane, width, mergerRows, mergerFocused).slice(0, available - lanes.length)
+        : [];
     this.actionsTop = this.mergerTop + merger.length;
-    return [...top, ...lanes, ...merger, ...footer].map((line) => truncateToWidth(line, width));
+    const middle = padLines([...lanes, ...merger], available);
+    // The footer (actions bar and keys) is never the part that gets cut.
+    const above = [...top, ...middle].slice(0, Math.max(0, height - footer.length));
+    return [...above, ...footer].map((line) => truncateToWidth(line, width));
   }
 
   private context(agents: readonly PlannerAgent[], pane: MergerPane | undefined) {

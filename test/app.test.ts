@@ -354,3 +354,44 @@ test("a multiline text row shows its whole text as a block in the free space, an
   assert.equal(page.typing, false);
   assert.match(task, /word !$/u);
 });
+
+test("the planning screen fits short terminals and always shows the actions bar", () => {
+  const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
+  const b = fakeAgent("B", { status: "failed" } as never);
+  for (const rows of [12, 14, 16, 18, 20, 22, 26, 40]) {
+    for (const focusMerger of [false, true]) {
+      const page = new LanesPage(theme, {
+        title: "Plan",
+        task: () => "add a cache",
+        agents: () => [a, b],
+        merger: () => ({ agent: undefined, name: "Model M high", ready: false }),
+        actions: () => [{ id: "implement:A", label: "Implement A…", description: "implement" }],
+        onAction: () => undefined,
+        say: () => undefined,
+        hide: () => undefined,
+        stopAll: () => undefined,
+        rowsAvailable: () => rows,
+        requestRender: () => undefined,
+      });
+      if (focusMerger) {
+        page.handleInput(KEY.tab);
+        page.handleInput(KEY.tab);
+      }
+      const lines = page.render(100);
+      assert.equal(lines.length, rows, `rows=${rows}`);
+      assert.ok(
+        lines.some((line) => line.includes("Implement A…")),
+        `actions bar visible at rows=${rows}`,
+      );
+      if (focusMerger)
+        assert.ok(
+          lines.some((line) => line.includes("M · merger")),
+          `M stays while you are in it (${rows})`,
+        );
+    }
+  }
+  // With room, the stats rows and the merger pane are there.
+  const roomy = lanesPage([a, b], () => ({ agent: undefined, name: "Model M high", ready: false })).page.render(120);
+  assert.ok(roomy.some((line) => line.includes("✓ A Model A high")));
+  assert.ok(roomy.some((line) => line.includes("M · merger")));
+});

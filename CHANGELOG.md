@@ -25,6 +25,9 @@
   lists tools that are always preselected and that Jev never deselects (default: web research,
   Context7, and Jev judgments). Subagent models start at
   `medium` effort instead of `high`.
+- A planner's questions can be revisited before they are sent: ←/→ (or Backspace) on an empty
+  answer line move between them, earlier answers stay selected, and dots on the question's rule
+  show which are answered.
 - Restoring a run (after `/reload`, a restart, or resuming the session) resumes the planners and
   merger whose turn was cut off or had failed, instead of leaving them waiting for "continue".
 - The planning screen shows a live stats row per planner (and the merger) above the lanes again:

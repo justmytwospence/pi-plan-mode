@@ -73,9 +73,12 @@ export interface LanesPageOptions {
 }
 
 interface QuestionCursor {
+  /** The question set this cursor belongs to; a new set starts a new cursor. */
+  of: PlannerAgent["pending"];
   question: number;
   option: number;
-  answers: PlanModeQuestionAnswer[];
+  /** Answers by question index; going back and answering again replaces one. */
+  answers: Array<PlanModeQuestionAnswer | undefined>;
 }
 
 type Modal = { kind: "escape"; choice: number } | { kind: "input"; action: LaneAction; input: Input };
@@ -225,10 +228,18 @@ export class LanesPage {
         if (this.showTrace.has(agent.id)) this.showTrace.delete(agent.id);
         else this.showTrace.add(agent.id);
       }
+    } else if (agent.pending && this.input(agent).getValue() === "" && is("left", "backspace", "right")) {
+      // With nothing typed, ←/backspace go back a question and → forward (as far as you have answered).
+      const cursor = this.questionCursor(agent);
+      if (is("right")) {
+        const reachable = cursor.answers.findIndex((answer) => answer === undefined);
+        const last = reachable === -1 ? agent.pending.questions.length - 1 : reachable;
+        if (cursor.question < last) this.moveToQuestion(agent, cursor, cursor.question + 1);
+      } else if (cursor.question > 0) this.moveToQuestion(agent, cursor, cursor.question - 1);
     } else if (agent.pending && (is("up") || is("down"))) {
       const cursor = this.questionCursor(agent);
       const question = agent.pending.questions[cursor.question];
-      const count = (question?.options.length ?? 0) + 1;
+      const count = this.optionCount(cursor, cursor.question, question?.options.length ?? 0);
       cursor.option = (cursor.option + (is("up") ? -1 : 1) + count) % count;
     } else if (is("up")) this.scrollLane(agent, -1);
     else if (is("down")) this.scrollLane(agent, 1);
@@ -293,11 +304,31 @@ export class LanesPage {
 
   private questionCursor(agent: PlannerAgent): QuestionCursor {
     let cursor = this.questions.get(agent.id);
-    if (!cursor || !agent.pending) {
-      cursor = { question: 0, option: 0, answers: [] };
+    if (!cursor || !agent.pending || cursor.of !== agent.pending) {
+      cursor = { of: agent.pending, question: 0, option: 0, answers: [] };
       this.questions.set(agent.id, cursor);
     }
     return cursor;
+  }
+
+  /**
+   * Show another question with its earlier answer selected: an option, or your own words as a row
+   * of their own (so the line stays empty and ←/→ keep moving between questions).
+   */
+  private moveToQuestion(agent: PlannerAgent, cursor: QuestionCursor, index: number) {
+    cursor.question = index;
+    const previous = cursor.answers[index];
+    const question = agent.pending?.questions[index];
+    cursor.option = !previous
+      ? 0
+      : previous.wasCustom
+        ? (question?.options.length ?? 0) + 1
+        : Math.max(0, (previous.optionIndex ?? 1) - 1);
+  }
+
+  /** Rows a question offers: its options, Skip, and your own earlier answer if you typed one. */
+  private optionCount(cursor: QuestionCursor, questionIndex: number, optionsLength: number) {
+    return optionsLength + 1 + (cursor.answers[questionIndex]?.wasCustom ? 1 : 0);
   }
 
   /** Enter in a lane or the merger pane: answer its question, or send what you typed. */
@@ -315,21 +346,29 @@ export class LanesPage {
         return;
       }
       const option = question.options[cursor.option];
-      cursor.answers.push({
-        id: question.id,
-        header: question.header,
-        question: question.question,
-        answer: text || option?.label || "",
-        wasCustom: text.length > 0,
-        ...(text ? {} : { optionIndex: cursor.option + 1 }),
-      });
+      const earlier = cursor.answers[cursor.question];
+      // Your own earlier words, kept when you leave them selected and type nothing new.
+      const keepsEarlier = !text && cursor.option === question.options.length + 1 && earlier?.wasCustom;
+      cursor.answers[cursor.question] = keepsEarlier
+        ? earlier
+        : {
+            id: question.id,
+            header: question.header,
+            question: question.question,
+            answer: text || option?.label || "",
+            wasCustom: text.length > 0,
+            ...(text ? {} : { optionIndex: cursor.option + 1 }),
+          };
       input.setValue("");
-      cursor.question += 1;
-      cursor.option = 0;
-      if (cursor.question >= pending.questions.length) {
+      const unanswered = pending.questions.findIndex((_question, index) => cursor.answers[index] === undefined);
+      if (unanswered === -1 && cursor.question === pending.questions.length - 1) {
         this.questions.delete(agent.id);
-        agent.answer(cursor.answers);
+        agent.answer(cursor.answers.filter((answer): answer is PlanModeQuestionAnswer => answer !== undefined));
+        return;
       }
+      // On to the next question (or, after the last, the first one still unanswered).
+      const next = cursor.question + 1 < pending.questions.length ? cursor.question + 1 : unanswered;
+      this.moveToQuestion(agent, cursor, next);
       return;
     }
     if (!text) return;
@@ -672,11 +711,29 @@ export class LanesPage {
     const question = pending.questions[cursor.question];
     if (!question) return [];
     const count = pending.questions.length > 1 ? ` (${cursor.question + 1}/${pending.questions.length})` : "";
+    // One dot per question: answered, current, still to go.
+    const progress =
+      pending.questions.length > 1
+        ? pending.questions
+            .map((_question, index) =>
+              index === cursor.question
+                ? theme.fg("warning", "◉")
+                : cursor.answers[index]
+                  ? theme.fg("success", "●")
+                  : theme.fg("dim", "○"),
+            )
+            .join("")
+        : "";
     const lines = [
-      labeledRule(theme, width, theme.fg("warning", theme.bold(`? ${question.header}${count}`)), "", "warning"),
+      labeledRule(theme, width, theme.fg("warning", theme.bold(`? ${question.header}${count}`)), progress, "warning"),
       ...wrap(question.question, width).map((line) => theme.bold(line)),
     ];
-    const options = [...question.options.map((option) => option.label), "Skip (let the planner decide)"];
+    const earlier = cursor.answers[cursor.question];
+    const options = [
+      ...question.options.map((option) => option.label),
+      "Skip (let the planner decide)",
+      ...(earlier?.wasCustom ? [`✎ your answer: ${earlier.answer}`] : []),
+    ];
     options.forEach((label, index) => {
       const description = question.options[index]?.description;
       const text = `${index + 1}. ${label}${description ? theme.fg("dim", ` — ${description}`) : ""}`;
@@ -751,7 +808,10 @@ export class LanesPage {
     const merger = target.kind === "merger";
     const agent = target.kind === "lane" ? target.agent : target.pane.agent;
     if (!agent) return "";
-    if (agent.pending) return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.`;
+    if (agent.pending) {
+      const several = agent.pending.questions.length > 1;
+      return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.${several ? " ←→ (with nothing typed) move between its questions to change an answer." : ""}`;
+    }
     if (agent.working) return `${agent.id} is working. Type to steer it; it reads your message after its current step.`;
     if (merger && agent.plan) {
       return "M's merged plan is ready. Talk to M to change it; Tab to the actions to implement it.";
@@ -777,7 +837,14 @@ export class LanesPage {
       target.kind === "merger" && !agent && target.pane.ready && !this.inputFor(MERGER_ID).getValue().trim();
     return [
       { key: "⏎", label: agent?.pending ? "answer" : compares ? "compare" : "send", primary: true },
-      ...(agent?.pending ? [{ key: "↑↓", label: "pick" }] : agent ? [{ key: "↑↓", label: "scroll" }] : []),
+      ...(agent?.pending
+        ? [
+            { key: "↑↓", label: "pick" },
+            ...(agent.pending.questions.length > 1 ? [{ key: "←→", label: "question" }] : []),
+          ]
+        : agent
+          ? [{ key: "↑↓", label: "scroll" }]
+          : []),
       ...(agent ? [{ key: "^u/^d", label: "page" }] : []),
       ...(agent?.plan !== undefined
         ? [{ key: "^o", label: this.showsPlan(agent) ? (merger ? "chat" : "trace") : "plan" }]

@@ -62,7 +62,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
    plan, once it has one), the subagents it has running, and a line to talk to it. Type and press
    Enter to steer a working planner or to start a new turn with an idle one; both planners can be
    working on your messages at once. When a planner asks a question, the lane shows it with its
-   options: ↑/↓ and Enter pick one, or type your own answer. Tab moves between the lanes, the
+   options: ↑/↓ and Enter pick one, or type your own answer. With several questions, ←/→ (or
+   Backspace) on an empty answer line move between them to change an earlier answer; nothing is sent
+   until all are answered. Tab moves between the lanes, the
    merger pane (once both plans are in), and the actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
    its trace.
 4. **Review.** With two planners, a full-width pane below the lanes talks to **M, the merger**: a

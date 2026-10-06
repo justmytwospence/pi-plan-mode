@@ -410,3 +410,90 @@ test("the planning screen fits short terminals and always shows the actions bar"
   assert.ok(roomy.some((line) => line.includes("✓ A Model A high")));
   assert.ok(roomy.some((line) => line.includes("M · merger")));
 });
+
+test("in a planner's questions, ←/→ (and backspace) move between them to change an earlier answer", () => {
+  const answers: unknown[] = [];
+  const question = (id: string, header: string, labels: string[]) => ({
+    id,
+    header,
+    question: `${header}?`,
+    options: labels.map((label) => ({ label, description: label })),
+  });
+  const a = fakeAgent("A", {
+    status: "asking",
+    working: true,
+    pending: {
+      questions: [
+        question("lang", "Language", ["Python", "Node"]),
+        question("db", "Database", ["Postgres", "SQLite"]),
+        question("tests", "Tests", ["Yes", "No"]),
+      ],
+      resolve: () => undefined,
+    },
+    answer: (value: unknown) => answers.push(value),
+  } as never);
+  const { page } = lanesPage([a]);
+  const shown = () => page.render(120).join("\n");
+  assert.match(shown(), /\? Language \(1\/3\).*◉○○/u);
+  assert.match(shown(), /←→ question/u);
+
+  page.handleInput(KEY.down); // Node
+  page.handleInput(KEY.enter);
+  for (const char of "DuckDB") page.handleInput(char); // own words
+  page.handleInput(KEY.enter);
+  assert.match(shown(), /\? Tests \(3\/3\).*●●◉/u);
+
+  // Back to the database: the typed answer is a row of its own, selected, and the line is empty.
+  page.handleInput(KEY.left);
+  assert.match(shown(), /\? Database \(2\/3\)/u);
+  assert.match(shown(), /› 4\. ✎ your answer: DuckDB/u);
+  // Backspace on the empty line goes back again; Node is still selected there.
+  page.handleInput("\x7f");
+  assert.match(shown(), /\? Language \(1\/3\)/u);
+  assert.match(shown(), /› 2\. Node/u);
+  page.handleInput(KEY.up); // change it to Python
+  page.handleInput(KEY.enter);
+  // Enter moves on; keep DuckDB as it was, then answer the last one.
+  assert.match(shown(), /\? Database \(2\/3\)/u);
+  page.handleInput(KEY.enter);
+  assert.match(shown(), /\? Tests \(3\/3\)/u);
+  // → cannot run past the first unanswered question.
+  page.handleInput(KEY.right);
+  assert.match(shown(), /\? Tests \(3\/3\)/u);
+  assert.equal(answers.length, 0, "nothing is sent until every question has an answer");
+  page.handleInput(KEY.enter);
+  assert.deepEqual(answers, [
+    [
+      { id: "lang", header: "Language", question: "Language?", answer: "Python", wasCustom: false, optionIndex: 1 },
+      { id: "db", header: "Database", question: "Database?", answer: "DuckDB", wasCustom: true },
+      { id: "tests", header: "Tests", question: "Tests?", answer: "Yes", wasCustom: false, optionIndex: 1 },
+    ],
+  ]);
+});
+
+test("with text typed, ←/→ edit the answer instead of moving between questions", () => {
+  const answers: unknown[] = [];
+  const a = fakeAgent("A", {
+    status: "asking",
+    working: true,
+    pending: {
+      questions: [
+        { id: "q1", header: "One", question: "1?", options: [{ label: "x", description: "x" }] },
+        { id: "q2", header: "Two", question: "2?", options: [{ label: "y", description: "y" }] },
+      ],
+      resolve: () => undefined,
+    },
+    answer: (value: unknown) => answers.push(value),
+  } as never);
+  const { page } = lanesPage([a]);
+  page.handleInput(KEY.enter);
+  for (const char of "ac") page.handleInput(char);
+  page.handleInput(KEY.left);
+  page.handleInput("b");
+  assert.ok(
+    page.render(120).some((line) => line.includes("? Two (2/2)")),
+    "still on the second question",
+  );
+  page.handleInput(KEY.enter);
+  assert.equal((answers[0] as Array<{ answer: string }>)[1]?.answer, "abc");
+});

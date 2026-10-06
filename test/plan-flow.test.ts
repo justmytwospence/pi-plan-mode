@@ -151,7 +151,7 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   app.handleInput("\r");
   screen = app.render().join("\n");
   assert.match(screen, /Add a planner/u);
-  assert.match(screen, /Merger\s+Claude Sonnet 5\.5 \(as planner A\)/u);
+  assert.doesNotMatch(screen, /Merger/u, "no merger model: your main agent merges");
   app.handleInput("\r");
   await flush();
   screen = app.render().join("\n");
@@ -159,72 +159,128 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.equal(sessions.prompts.length, 2);
   assert.match(sessions.prompts[1]?.text ?? "", /Another model is planning the same task/u);
 
-  // Talk the plans over with M, the merger, in the pane below the lanes (Tab: A, B, M, actions).
-  app.handleInput("\t");
-  app.handleInput("\t");
+  // Each plan landed in your main conversation, in full, without starting a turn.
+  type Delivery = { content: string; details: { kind: string; id: string; revision?: number } };
+  const deliveries = () =>
+    mock.sentMessages
+      .filter((sent) => (sent.message as { customType?: string }).customType === "plan-mode-plan")
+      .map((sent) => sent.message as Delivery);
+  assert.deepEqual(
+    deliveries().map((delivery) => [delivery.details.id, delivery.details.revision]),
+    [
+      ["A", 1],
+      ["B", 1],
+    ],
+  );
+  assert.match(deliveries()[1]?.content ?? "", /<plan id="B" version="1">\n# Plan from claude-opus-5-5 #2/u);
+  assert.match(deliveries()[1]?.content ?? "", /Planner A's plan is earlier in this conversation\./u);
+  assert.deepEqual(mock.sentMessages[0]?.options, { triggerTurn: false });
+  // Your main agent has its run tools while the run is active.
+  const tools = () => mock.rawPi.getActiveTools();
+  assert.ok(tools().includes("plan_ask_planner") && tools().includes("plan_submit_merged"));
+  assert.doesNotMatch(app.render().join("\n"), /Merge into/u);
+
+  // M, below the lanes, is your main agent: what you type there goes to your main session, and the
+  // pane shows your agent's reply as it streams (fed by your main session's events).
+  const mainEvent = async (type: string, payload: Record<string, unknown> = {}) => {
+    for (const handler of mock.events.get(type) ?? []) await handler({ type, ...payload }, context.ctx);
+  };
   screen = app.render().join("\n");
-  assert.match(screen, /M · merger · Claude Sonnet 5\.5 low/u);
-  assert.match(screen, /not started/u);
-  assert.doesNotMatch(screen, /Merge into/u);
-  for (const char of "keep A's cache") app.handleInput(char);
+  assert.match(screen, /M · main agent · Claude Sonnet 5\.5/u);
+  assert.match(screen, /Plan B delivered to your agent\./u, "M's pane notes each delivery");
+  assert.match(screen, /2 planners · main agent/u);
+  app.handleInput("\t");
+  app.handleInput("\t");
+  for (const char of "which is safer?") app.handleInput(char);
   app.handleInput("\r");
-  await flush();
-  assert.equal(sessions.prompts.length, 3);
-  const briefing = sessions.prompts[2]?.text ?? "";
-  assert.match(
-    briefing,
-    /<plan id="A" model="anthropic\/claude-sonnet-5-5:low" version="1">\n# Plan from claude-sonnet-5-5 #1/u,
-  );
-  assert.match(
-    briefing,
-    /<plan id="B" model="anthropic\/claude-opus-5-5[^"]*" version="1">\n# Plan from claude-opus-5-5 #2/u,
-  );
-  assert.match(briefing, /## The user's message\n\nkeep A's cache$/u);
+  assert.equal(mock.sentUserMessages.at(-1)?.text, "which is safer?");
+  await mainEvent("agent_start");
+  await mainEvent("message_end", { message: { role: "user", content: "which is safer?" } });
+  await mainEvent("message_update", {
+    message: { role: "assistant" },
+    assistantMessageEvent: { type: "text_delta", delta: "B's invalidation is safer." },
+  });
   screen = app.render().join("\n");
-  assert.match(
-    screen,
-    /# Plan from claude-sonnet-5-5 #3|Plan from claude-sonnet-5-5 #3/u,
-    "M's pane shows its merged plan",
+  assert.match(screen, /you › which is safer\?/u);
+  assert.match(screen, /B's invalidation is safer\./u);
+  assert.match(screen, /M main agent · Claude Sonnet 5\.5.*writing/u, "its stats row shows it working");
+  await mainEvent("agent_end", { messages: [] });
+
+  // Your main agent asks planner A something; A answers (here it also resubmits), and v2 is delivered.
+  const tool = (name: string) =>
+    mock.tools.find((candidate) => (candidate as { name: string }).name === name) as unknown as {
+      execute(...args: unknown[]): Promise<{ content: Array<{ text: string }> }>;
+    };
+  const asked = await tool("plan_ask_planner").execute(
+    "t1",
+    { planner: "a", message: "why this cache?" },
+    undefined,
+    undefined,
+    context.ctx,
   );
+  assert.match(asked.content[0]?.text ?? "", /Planner A answered:[\s\S]*resubmitted its plan as v2/u);
+  assert.match(sessions.prompts.at(-1)?.text ?? "", /^\[From the user's main agent[\s\S]*why this cache\?$/u);
+  assert.match(app.render().join("\n"), /main agent › why this cache\?|A · Claude Sonnet 5\.5 low · v2/u);
+  assert.deepEqual(deliveries().at(-1)?.details, {
+    kind: "plan",
+    id: "A",
+    model: "Claude Sonnet 5.5 low",
+    revision: 2,
+    lines: 1,
+  });
+  const busy = await tool("plan_ask_planner").execute(
+    "t2",
+    { planner: "C", message: "?" },
+    undefined,
+    undefined,
+    context.ctx,
+  );
+  assert.match(busy.content[0]?.text ?? "", /There is no planner C; this run has A and B\./u);
+
+  // When you ask for it, your main agent records the merged plan: M, first among the plans.
+  const recorded = await tool("plan_submit_merged").execute(
+    "t3",
+    { plan: "# Merged plan" },
+    undefined,
+    undefined,
+    context.ctx,
+  );
+  assert.match(recorded.content[0]?.text ?? "", /^Recorded as plan M\./u);
+  screen = app.render().join("\n");
+  assert.match(screen, /✓ M main agent · Claude Sonnet 5\.5.*plan ready/u, "M's row shows its merged plan");
+  assert.match(screen, /# Merged plan|Merged plan/u, "and its pane shows it");
   assert.match(screen, /Implement M… · Implement A… · Implement B…/u, "the merged plan comes first");
+  assert.match(screen, /Save & close/u);
 
-  // A revises its plan; M gets only the revised plan with your next message.
-  app.handleInput("\t");
-  app.handleInput("\t");
-  for (const char of "smaller") app.handleInput(char);
-  app.handleInput("\r");
-  await flush();
-  assert.match(app.render().join("\n"), /A · Claude Sonnet 5\.5 low · v2/u);
-  app.handleInput("\t");
-  app.handleInput("\t");
-  for (const char of "and now?") app.handleInput(char);
-  app.handleInput("\r");
-  await flush();
-  const update = sessions.prompts.at(-1)?.text ?? "";
-  assert.match(update, /<plan id="A" [^>]*version="2">\n# Plan from claude-sonnet-5-5 #4/u);
-  assert.doesNotMatch(update, /<plan id="B"/u);
-  assert.match(update, /and now\?$/u);
-
-  // Implement the merged plan.
+  // Implement the merged plan (focus is on M: one Tab to the actions).
   app.handleInput("\t");
   app.handleInput("\r");
   screen = app.render().join("\n");
   assert.match(screen, /● Implement/u);
-  assert.match(screen, /M \(merged\) · Claude Sonnet 5\.5 v2/u);
+  assert.match(screen, /M \(merged\) · Claude Sonnet 5\.5/u);
   app.handleInput("\r");
   await opened;
   await flush();
-  assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /# Plan from claude-sonnet-5-5 #5/u);
+  assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /# Merged plan/u);
   const stored = mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
     state: string;
-    merger?: { plan?: string; seen?: Record<string, number> };
+    merged?: { plan: string; revision: number };
+    planners: Array<{ id: string; delivered?: { revision: number } }>;
   };
   assert.equal(stored.state, "implemented");
-  assert.deepEqual(stored.merger?.seen, { A: 2, B: 1 });
+  assert.equal(stored.merged?.plan, "# Merged plan");
+  assert.deepEqual(
+    stored.planners.map((planner) => [planner.id, planner.delivered?.revision]),
+    [
+      ["A", 2],
+      ["B", 1],
+    ],
+  );
+  assert.ok(!tools().includes("plan_ask_planner"), "the run tools go away with the run");
 });
 
-test("a run with a merger comes back after a reload, and M carries on without a second briefing", async () => {
-  const { mock, context, sessions, harness } = setup();
+test("a restored run keeps its deliveries and plan M, turns the tools back on, and delivers older runs' plans once", async () => {
+  const { mock, context, harness } = setup();
   mock.entries.push({
     customType: "plan-run",
     data: {
@@ -240,46 +296,40 @@ test("a run with a merger comes back after a reload, and M carries on without a 
           sessionFile: "/a.jsonl",
           plan: "# A",
           revision: 1,
+          delivered: { revision: 1, mark: 0 },
         },
+        // Saved before deliveries existed: delivered now, once.
         {
           id: "B",
           spec: "anthropic/claude-opus-5-5:high",
           name: "Claude Opus 5.5",
           sessionFile: "/b.jsonl",
-          plan: "# B v2",
+          plan: "# B",
           revision: 2,
         },
       ],
-      merger: {
-        id: "M",
-        spec: "anthropic/claude-opus-5-5:high",
-        name: "Claude Opus 5.5",
-        sessionFile: "/m.jsonl",
-        seen: { A: 1, B: 1 },
-      },
+      merged: { plan: "# M", revision: 1, name: "Claude Opus 5.5", spec: "anthropic/claude-opus-5-5" },
     },
   });
   for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
+  await flush();
+  const delivered = mock.sentMessages.map((sent) => (sent.message as { details?: { id: string } }).details?.id);
+  assert.deepEqual(delivered, ["B"]);
+  // Plans restored with the run are not announced again.
+  assert.deepEqual(
+    context.notifications.filter((note) => /is ready/u.test(note.message)),
+    [],
+  );
+  assert.ok(mock.rawPi.getActiveTools().includes("plan_submit_merged"));
+
   const opened = mock.commands.get("plan")?.handler("", context.ctx);
   await flush();
   const app = harness();
   assert.ok(app);
   const screen = app.render().join("\n");
-  assert.match(screen, /M · merger · Claude Opus 5\.5 high/u);
-  assert.match(screen, /M restored\./u);
-  assert.doesNotMatch(screen, /starting/u, "a restored merger waits for you");
-
-  app.handleInput("\t");
-  app.handleInput("\t");
-  for (const char of "go on") app.handleInput(char);
-  app.handleInput("\r");
-  await flush();
-  const sent = sessions.prompts.at(-1)?.text ?? "";
-  assert.match(sent, /<plan id="B" [^>]*version="2">\n# B v2/u);
-  assert.doesNotMatch(sent, /<plan id="A"/u);
-  assert.doesNotMatch(sent, /## Task/u, "no second briefing");
-  assert.match(sent, /go on$/u);
-
+  assert.match(screen, /M · main agent · Claude Sonnet 5\.5/u, "M is your main agent, on its model");
+  assert.match(screen, /✓ M main agent · Claude Sonnet 5\.5.*plan ready/u, "with plan M restored");
+  assert.match(screen, /Implement M…/u);
   app.handleInput("\u001b");
   app.handleInput("\r");
   await opened;

@@ -332,28 +332,6 @@ test("Plan-mode settings read alwaysOffer as a list of tool names", () => {
   assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit", alwaysOffer: ["marimo"] }), ["marimo"]);
 });
 
-test("Plan-mode settings save and clear the merger model", async () => {
-  assert.deepEqual(normalizePlanModeSettings({ merger: "anthropic/claude-opus-5-5:high" })?.merger, {
-    provider: "anthropic",
-    modelId: "claude-opus-5-5",
-    thinkingLevel: "high",
-  });
-  assert.equal(normalizePlanModeSettings({ merger: 3 }), undefined);
-  const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-merger-"));
-  const settingsPath = join(directory, "pi-plan-mode.json");
-  try {
-    await updatePlanModeSettings(
-      { merger: { provider: "openai", modelId: "gpt-6", thinkingLevel: "xhigh" } },
-      { settingsPath },
-    );
-    assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).merger, "openai/gpt-6:xhigh");
-    await updatePlanModeSettings({ merger: null }, { settingsPath });
-    assert.equal(JSON.parse(await readFile(settingsPath, "utf8")).merger, undefined);
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
-});
-
 test("Plan-mode settings explicit save promotes valid legacy content without modifying it", async () => {
   const directory = await mkdtemp(join(tmpdir(), "pi-plan-mode-settings-promote-"));
   const settingsPath = join(directory, "pi-plan-mode.json");

@@ -1,7 +1,8 @@
 // /plan: a full-screen planning app. Settings → Tools → Planning → Review → Implement, with one or
 // two planners. Each planner is an in-process Pi session (planner/agent.ts) seeded with your
-// conversation; your main session is untouched until you implement, when it (or a fresh session)
-// receives the plan.
+// conversation. M, the pane below the lanes, is your main agent: each plan lands in your main
+// conversation in full, and there your agent can question a planner or record the merged plan
+// (main-chat.ts).
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +14,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { type Component, Editor, type TUI } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
-import { type LaneAction, LanesPage, type MergerPane } from "./app/lanes-page.js";
+import { type LaneAction, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
 import { formatImplementationPrompt } from "./handoff.js";
 import { holdWorking } from "./herdr-blocked.js";
@@ -26,6 +27,14 @@ import {
   sameModel,
 } from "./implementation-models.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
+import {
+  MainAgentView,
+  type MergedPlan,
+  PLAN_MESSAGE_TYPE,
+  type PlanMessageDetails,
+  registerMainChat,
+  setMainToolsActive,
+} from "./main-chat.js";
 import { buildMcpCatalog, readConfiguredMcpServers } from "./mcp-tools.js";
 import { modelCatalog } from "./model-catalog.js";
 import { exportPlanToFile } from "./plan-export.js";
@@ -33,12 +42,8 @@ import { expandHome, runPlanCompleteHook } from "./plan-hook.js";
 import { type OtherTool, otherTools, otherToolsNode, resolveAccess } from "./planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "./planner/agent.js";
 import {
-  MERGER_COMPARE_MESSAGE,
-  MERGER_WRAP_UP_MESSAGE,
-  type MergerSource,
-  mergerBriefing,
-  mergerMessage,
-  mergerSystemPrompt,
+  planDeliveryText,
+  planFailureText,
   plannerSystemPrompt,
   plannerTaskPrompt,
   resumeMessage,
@@ -67,8 +72,8 @@ const RUNTIME_ENTRY = "plan-implementation-runtime";
 const RUNTIME_CONSUMED_ENTRY = "plan-implementation-runtime-consumed";
 const STATUS_KEY = "plan";
 const IDS = ["A", "B"] as const;
-/** The merger's id: M talks two plans over with you and merges them when you ask. */
-const MERGER_ID = "M";
+/** The merged plan your main agent records. */
+const MERGED_ID = "M";
 /** The effort a subagent model starts at until you change it. */
 const SUBAGENT_EFFORT = "medium";
 const TIME_LIMITS = [15, 30, 45, 60, 90, 120, 180] as const;
@@ -99,6 +104,14 @@ interface StoredPlanner {
   revision?: number;
   /** Its turn was in progress (or had failed) when last saved: restoring the run resumes it. */
   turn?: TurnState;
+  /** The plan version last delivered to your main conversation, and where its conversation stood. */
+  delivered?: Delivered;
+}
+
+interface Delivered {
+  revision: number;
+  /** Planner session entries already covered, so the next delivery adds only what is new. */
+  mark: number;
 }
 
 type TurnState = "interrupted" | "failed";
@@ -109,19 +122,25 @@ interface StoredRun {
   task: string;
   state: "active" | "discarded" | "implemented";
   planners: StoredPlanner[];
-  /** The merger, once you have talked to it, and the plan versions it has been given. */
-  merger?: StoredPlanner & { seen?: Record<string, number> };
+  merged?: StoredMerged;
 }
 
-/** One planning run: the task, its planners, and the merger once you talk to it. */
+/** Plan M, with the model that wrote it (your session's), for implementation defaults. */
+interface StoredMerged extends MergedPlan {
+  spec?: string;
+}
+
+/** One planning run: the task, its planners, and the plan your main agent merged, if any. */
 interface PlanRun {
   id: string;
   createdAt: number;
   task: string;
   agents: PlannerAgent[];
-  merger?: PlannerAgent;
-  /** The plan version of each planner the merger has been given. */
-  mergerSeen: Map<string, number>;
+  merged?: StoredMerged;
+  /** What each planner has delivered to your main conversation. */
+  delivered: Map<string, Delivered>;
+  /** Failures already reported to your main conversation. */
+  failuresReported: Set<string>;
   /** How to start another planner with the same tools. */
   launch?: { roots: ToolNode[]; others: OtherTool[]; seed: readonly unknown[] };
 }
@@ -129,8 +148,6 @@ interface PlanRun {
 interface Draft {
   task: string;
   planners: [ModelSpec, ModelSpec | undefined];
-  /** The merger's model; undefined uses planner A's. */
-  merger: ModelSpec | undefined;
   scouts: Record<string, ModelSpec | undefined>;
   timeLimit: number;
 }
@@ -143,7 +160,9 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   let app: { close(): void; render(): void } | undefined;
   let releaseWorking: (() => void) | undefined;
   let hostCtx: ExtensionContext | undefined;
-  let lastNotified = "";
+  /** Plan versions and question sets you have been told about (or saw on screen). */
+  const notifiedPlans = new Map<string, number>();
+  const notifiedQuestions = new WeakSet<object>();
 
   const loadSettings = async () => {
     if (dependencies.readSettings) {
@@ -167,46 +186,33 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
   const persistRun = (state: StoredRun["state"] = "active") => {
     if (!run) return;
+    const current = run;
     const stored: StoredRun = {
-      id: run.id,
-      createdAt: run.createdAt,
-      task: run.task,
+      id: current.id,
+      createdAt: current.createdAt,
+      task: current.task,
       state,
-      planners: run.agents.map(storePlanner),
-      ...(run.merger ? { merger: { ...storePlanner(run.merger), seen: Object.fromEntries(run.mergerSeen) } } : {}),
+      planners: current.agents.map((agent) => storePlanner(agent, current.delivered.get(agent.id))),
+      ...(current.merged ? { merged: current.merged } : {}),
     };
     pi.appendEntry(RUN_ENTRY, stored);
   };
 
-  /** What each agent last saved: its plan version, session file, and whether a turn was underway. */
+  /** What each planner last saved: its plan version, session file, and whether a turn was underway. */
   const saved = new Map<string, string>();
   const onAgentChange = () => {
     if (!run) return;
     // Save a run whenever a session file, a plan, or a turn starts or ends, so a reload can restore
     // it and resume the turns it cut off.
-    let changed = false;
-    for (const agent of everyone(run)) {
+    let changed = deliver();
+    for (const agent of run.agents) {
       const signature = savedSignature(agent);
-      const previous = saved.get(agent.id);
-      if (previous === signature) continue;
+      if (saved.get(agent.id) === signature) continue;
       saved.set(agent.id, signature);
       changed = true;
-      // A planner revised a plan the merger has seen: say when M will get it.
-      const seen = run.mergerSeen.get(agent.id);
-      const revised = previous?.split("|")[0] !== String(agent.revision);
-      if (
-        run.merger &&
-        agent !== run.merger &&
-        agent.plan &&
-        seen !== undefined &&
-        seen !== agent.revision &&
-        revised
-      ) {
-        run.merger.trace.note(`Plan ${agent.id} v${agent.revision} is in; M gets it with your next message.`);
-      }
     }
     if (changed) persistRun();
-    const working = everyone(run).some((agent) => agent.working);
+    const working = run.agents.some((agent) => agent.working);
     if (working && !releaseWorking) releaseWorking = holdWorking(pi.events, "Planning");
     if (!working && releaseWorking) {
       releaseWorking();
@@ -216,43 +222,119 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     app?.render();
   };
 
+  /**
+   * Deliver new plans (and revisions), in full, to your main conversation, with what you and the
+   * planner said since its last delivery; report failures there too. Returns whether anything was
+   * delivered (so the run is saved).
+   */
+  const deliver = () => {
+    const current = run;
+    if (!current) return false;
+    let delivered = false;
+    for (const agent of current.agents) {
+      const last = current.delivered.get(agent.id);
+      const model = `${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}`;
+      if (agent.plan && last?.revision !== agent.revision && !agent.working) {
+        const conversation = agent.conversation(last?.mark ?? 0);
+        const others = current.agents.filter((other) => other !== agent).map(otherPlannerLine);
+        sendToMain(
+          planDeliveryText({
+            id: agent.id,
+            model,
+            revision: agent.revision,
+            plan: agent.plan,
+            task: current.task,
+            conversation: conversation.text,
+            others,
+          }),
+          { kind: "plan", id: agent.id, model, revision: agent.revision, lines: agent.plan.split("\n").length },
+        );
+        current.delivered.set(agent.id, { revision: agent.revision, mark: conversation.mark });
+        mainAgent.trace.note(
+          `Plan ${agent.id}${agent.revision > 1 ? ` v${agent.revision}` : ""} delivered to your agent.`,
+        );
+        delivered = true;
+      }
+      if (agent.status === "failed" && agent.error) {
+        const key = `${agent.id}:${agent.stats.startedAt}:${agent.error}`;
+        if (!current.failuresReported.has(key)) {
+          current.failuresReported.add(key);
+          sendToMain(planFailureText(agent.id, model, agent.error), { kind: "failure", id: agent.id, model });
+          mainAgent.trace.note(`Planner ${agent.id} failed; your agent was told.`, "warning");
+        }
+      }
+    }
+    return delivered;
+  };
+
+  /** A message in your main conversation: shown, and read by your agent on its next turn. */
+  const sendToMain = (content: string, details: PlanMessageDetails) => {
+    try {
+      pi.sendMessage<PlanMessageDetails>(
+        { customType: PLAN_MESSAGE_TYPE, content, display: true, details },
+        {
+          triggerTurn: false,
+        },
+      );
+    } catch {
+      // A session that cannot take messages just misses the delivery; /plan still has the plan.
+    }
+  };
+
   const updateStatus = () => {
     const ctx = hostCtx;
     if (!ctx?.hasUI) return;
-    if (!run || app) {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
-      return;
-    }
-    const agents = everyone(run);
-    const parts = agents.map(
-      (agent) =>
-        `${agent.id} ${agent.status === "asking" ? "asking you" : agent.working ? "working" : agent.plan ? "ready" : agent.status === "failed" ? "failed" : "waiting"}`,
-    );
-    ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/plan)`);
-    const notice = agents
-      .filter((agent) => agent.status === "asking" || (!agent.working && agent.plan))
-      .map((agent) => `${agent.id}:${agent.status}:${agent.revision}`)
-      .join(",");
-    if (notice && notice !== lastNotified) {
-      lastNotified = notice;
-      const asking = agents.find((agent) => agent.status === "asking");
-      ctx.ui.notify(
-        asking
-          ? `${asking.id === MERGER_ID ? "The merger" : `Planner ${asking.id}`} is asking you something. /plan to answer.`
-          : "A plan is ready. /plan to review it.",
-        "info",
+    if (!run || app) ctx.ui.setStatus(STATUS_KEY, undefined);
+    else {
+      const parts = run.agents.map(
+        (agent) =>
+          `${agent.id} ${agent.status === "asking" ? "asking you" : agent.working ? "working" : agent.plan ? "ready" : agent.status === "failed" ? "failed" : "waiting"}`,
       );
+      ctx.ui.setStatus(STATUS_KEY, `plan: ${parts.join(" · ")} (/plan)`);
     }
+    if (!run) return;
+    // Tell you once per new question and once per new plan version; what you already see on the
+    // planning screen counts as told.
+    for (const agent of run.agents) {
+      if (agent.status === "asking" && agent.pending && !notifiedQuestions.has(agent.pending)) {
+        notifiedQuestions.add(agent.pending);
+        if (!app) ctx.ui.notify(`Planner ${agent.id} is asking you something. /plan to answer.`, "info");
+      } else if (agent.plan && !agent.working && notifiedPlans.get(agent.id) !== agent.revision) {
+        notifiedPlans.set(agent.id, agent.revision);
+        if (!app) {
+          const version = agent.revision > 1 ? ` v${agent.revision}` : "";
+          ctx.ui.notify(`Plan ${agent.id}${version} is ready, and in this conversation. /plan to review it.`, "info");
+        }
+      }
+    }
+  };
+
+  /** Plan M from your main agent  /** Plan M from your main agent: recorded in the run, implemented or exported from /plan. */
+  const submitMerged = (plan: string, ctx: ExtensionContext): MergedPlan | undefined => {
+    if (!run) return undefined;
+    const model = ctx.model;
+    run.merged = {
+      plan,
+      revision: (run.merged?.revision ?? 0) + 1,
+      name: model?.name || model?.id || "your main agent",
+      ...(model ? { spec: `${model.provider}/${model.id}` } : {}),
+    };
+    persistRun();
+    updateStatus();
+    app?.render();
+    return run.merged;
   };
 
   const disposeRun = (state: StoredRun["state"]) => {
     if (!run) return;
     persistRun(state);
-    for (const agent of everyone(run)) agent.dispose();
+    for (const agent of run.agents) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
     run = undefined;
     saved.clear();
+    notifiedPlans.clear();
+    setMainToolsActive(pi, false);
     updateStatus();
   };
 
@@ -261,46 +343,51 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     const latest = [...entries].reverse().find((entry) => entry.type === "custom" && entry.customType === RUN_ENTRY)
       ?.data as StoredRun | undefined;
     if (latest?.state !== "active" || !Array.isArray(latest.planners)) return;
-    const restore = (stored: StoredPlanner, role: "planner" | "merger") => {
+    const agents = latest.planners.flatMap((stored) => {
       const spec = parseModelSpec(stored.spec);
-      if (!spec) return undefined;
-      return new PlannerAgent({
-        id: stored.id,
-        spec,
-        name: stored.name,
-        cwd: ctx.cwd,
-        access: restoreAccess(stored.access, settings, role),
-        timeoutMs: configuredPlannerTimeoutSeconds(settings) * 1000,
-        ...(role === "merger" ? { wrapUpMessage: MERGER_WRAP_UP_MESSAGE } : {}),
-        sessionDir: plannerSessionDir(),
-        seed: [],
-        ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
-        ...(stored.plan ? { plan: stored.plan, revision: stored.revision ?? 1 } : {}),
-        onChange: onAgentChange,
-        ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
-      });
-    };
-    const agents = latest.planners.flatMap((stored) => restore(stored, "planner") ?? []);
+      if (!spec) return [];
+      return [
+        new PlannerAgent({
+          id: stored.id,
+          spec,
+          name: stored.name,
+          cwd: ctx.cwd,
+          access: restoreAccess(stored.access, settings),
+          timeoutMs: configuredPlannerTimeoutSeconds(settings) * 1000,
+          sessionDir: plannerSessionDir(),
+          seed: [],
+          ...(stored.sessionFile ? { sessionFile: stored.sessionFile } : {}),
+          ...(stored.plan ? { plan: stored.plan, revision: stored.revision ?? 1 } : {}),
+          onChange: onAgentChange,
+          ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
+        }),
+      ];
+    });
     if (agents.length === 0) return;
-    // A merger without a session file never had its briefing saved: the next message briefs a new one.
-    const merger = agents.length > 1 && latest.merger?.sessionFile ? restore(latest.merger, "merger") : undefined;
     run = {
       id: latest.id,
       createdAt: latest.createdAt,
       task: latest.task,
       agents,
-      ...(merger ? { merger } : {}),
-      mergerSeen: new Map(merger ? Object.entries(latest.merger?.seen ?? {}) : []),
+      ...(latest.merged ? { merged: latest.merged } : {}),
+      delivered: new Map(
+        latest.planners.flatMap((stored) => (stored.delivered ? [[stored.id, stored.delivered] as const] : [])),
+      ),
+      failuresReported: new Set(),
     };
-    for (const agent of everyone(run)) saved.set(agent.id, savedSignature(agent));
+    for (const agent of run.agents) {
+      saved.set(agent.id, savedSignature(agent));
+      if (agent.plan) notifiedPlans.set(agent.id, agent.revision);
+    }
+    setMainToolsActive(pi, true);
+    // Runs saved before plans were delivered to your main conversation deliver them now, once.
+    if (deliver()) persistRun();
     // Turns a reload or restart cut off (or that had failed) carry on by themselves.
-    const stored = [...latest.planners, ...(merger && latest.merger ? [latest.merger] : [])];
-    for (const agent of everyone(run)) {
-      const turn = stored.find((candidate) => candidate.id === agent.id)?.turn;
+    for (const agent of run.agents) {
+      const turn = latest.planners.find((candidate) => candidate.id === agent.id)?.turn;
       if (!turn || !agent.sessionFile) continue;
-      const role = agent === run.merger ? "merger" : "planner";
       void agent.say(
-        resumeMessage(turn, role),
+        resumeMessage(turn),
         ctx,
         turn === "interrupted"
           ? "continue (resumed: the session restarted mid-turn)"
@@ -311,11 +398,48 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
   // --- Events ------------------------------------------------------------------------------------
 
+  // M: your main agent, as the pane below the lanes shows it.
+  const mainAgent = new MainAgentView({
+    model: () => {
+      const model = hostCtx?.model;
+      const level = pi.getThinkingLevel();
+      const spec: ModelSpec = {
+        provider: model?.provider ?? "",
+        modelId: model?.id ?? "",
+        ...(level && level !== "off" ? { thinkingLevel: level as ThinkingLevel } : {}),
+      };
+      return { name: model?.name || model?.id || "your agent", spec };
+    },
+    merged: () => run?.merged,
+    onChange: () => app?.render(),
+  });
+  for (const event of [
+    "agent_start",
+    "agent_end",
+    "message_update",
+    "message_end",
+    "tool_execution_start",
+    "tool_execution_end",
+  ] as const) {
+    pi.on(event as "agent_start", (payload) => {
+      mainAgent.apply(payload as unknown as Record<string, unknown>);
+    });
+  }
+
+  // Your main agent's side of a run: plans delivered to it, and its two tools.
+  registerMainChat(pi, {
+    planners: () => run?.agents,
+    submitMerged,
+  });
+
   pi.on("session_start", async (_event, ctx) => {
     hostCtx = ctx;
-    for (const agent of run ? everyone(run) : []) agent.dispose();
+    for (const agent of run?.agents ?? []) agent.dispose();
     run = undefined;
     saved.clear();
+    notifiedPlans.clear();
+    setMainToolsActive(pi, false);
+    mainAgent.reset(ctx.sessionManager.getBranch());
     await loadSettings();
     await applyPendingRuntime(ctx);
     restoreRun(ctx);
@@ -323,7 +447,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   });
 
   pi.on("session_shutdown", () => {
-    for (const agent of run ? everyone(run) : []) agent.dispose();
+    for (const agent of run?.agents ?? []) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
   });
@@ -366,7 +490,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       const render = () => tui.requestRender();
       let page: Component & { typing?: boolean } = undefined as never;
       const ticker = setInterval(() => {
-        if (run && everyone(run).some((agent) => agent.working)) render();
+        if (run?.agents.some((agent) => agent.working)) render();
       }, 250);
       ticker.unref?.();
       const close = () => {
@@ -405,14 +529,20 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           title: "Plan",
           task: () => run?.task ?? "",
           agents: () => run?.agents ?? [],
-          merger: () => mergerPane(),
+          // With two planners, M is your main agent: you can talk to it while they work.
+          merger: () =>
+            run && run.agents.length > 1 ? { agent: mainAgent, name: mainAgent.name, ready: true } : undefined,
           actions: () => laneActions(),
           onAction: (id, text) => onLaneAction(id, text),
-          say: (agent, text) => void agent.say(text, ctx),
-          sayToMerger: (text) => talkToMerger(ctx, text),
+          say: (agent, text) => void run?.agents.find((candidate) => candidate.id === agent.id)?.say(text, ctx),
+          sayToMerger: (text) => {
+            // Like typing in your main editor: a new turn, or a steer while your agent is working.
+            pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "steer" });
+          },
           hide: close,
           stopAll: () => {
-            for (const agent of run ? everyone(run) : []) void agent.stop();
+            for (const agent of run?.agents ?? []) void agent.stop();
+            if (mainAgent.working) ctx.abort();
           },
           rowsAvailable: rows,
           requestRender: render,
@@ -420,94 +550,40 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         return lanesPage;
       };
 
-      // --- The merger -------------------------------------------------------------------------
-
-      /** The merger pane, with two planners: M once you have talked to it, else what it will run on. */
-      const mergerPane = (): MergerPane | undefined => {
-        if (!run || run.agents.length < 2) return undefined;
-        const spec = run.merger?.spec ?? mergerSpec();
-        if (!spec) return undefined;
-        const missing = run.agents.filter((agent) => agent.plan === undefined);
-        const failed = missing.filter((agent) => !agent.working);
-        const ids = (agents: PlannerAgent[]) => agents.map((agent) => agent.id).join(" and ");
-        const waiting = failed.length
-          ? `${ids(failed)} ${failed.some((agent) => agent.status === "failed") ? "failed" : "has no plan"}`
-          : missing.length
-            ? `${ids(missing)} still planning`
-            : undefined;
-        return {
-          agent: run.merger,
-          name: `${catalog.name(spec)}${spec.thinkingLevel ? ` ${spec.thinkingLevel}` : ""}`,
-          ready: run.agents.every((agent) => agent.plan !== undefined),
-          ...(waiting ? { waiting } : {}),
-        };
-      };
-      const mergerSpec = () => draft.merger ?? run?.agents[0]?.spec;
-
-      /**
-       * Talk to the merger. The first message briefs it (both plans and what you told each planner)
-       * and starts its session; later ones carry the plans revised since it last saw them.
-       */
-      const talkToMerger = (context: ExtensionCommandContext, text: string) => {
-        const current = run;
-        if (!current || current.agents.length < 2) return;
-        const sources = current.agents.flatMap((agent): MergerSource[] =>
-          agent.plan ? [{ id: agent.id, label: agent.label, plan: agent.plan, revision: agent.revision }] : [],
-        );
-        if (!current.merger && sources.length < current.agents.length) return;
-        const message = text.trim() || MERGER_COMPARE_MESSAGE;
-        const shown = text.trim() || "Compare the two plans.";
-        let merger = current.merger;
-        let full: string;
-        if (!merger) {
-          const spec = mergerSpec();
-          const base = current.agents[0];
-          if (!spec || !base) return;
-          merger = new PlannerAgent({
-            id: MERGER_ID,
-            spec,
-            name: catalog.name(spec),
-            cwd: context.cwd,
-            access: { ...base.access, systemPrompt: [mergerSystemPrompt()] },
-            timeoutMs: draft.timeLimit * 60_000,
-            wrapUpMessage: MERGER_WRAP_UP_MESSAGE,
-            sessionDir: plannerSessionDir(),
-            seed: current.launch?.seed ?? context.sessionManager.buildSessionProjection().messages,
-            onChange: onAgentChange,
-            ...(dependencies.createSession ? { createSession: dependencies.createSession } : {}),
-          });
-          current.merger = merger;
-          current.mergerSeen.clear();
-          const briefed = sources.map((source) => {
-            const conversation = current.agents.find((agent) => agent.id === source.id)?.conversation();
-            return conversation ? { ...source, conversation } : source;
-          });
-          full = mergerBriefing(current.task, briefed, message);
-        } else {
-          const revised = sources.filter((source) => current.mergerSeen.get(source.id) !== source.revision);
-          if (revised.length > 0) {
-            merger.trace.note(
-              `Sent M the latest ${revised.map((source) => `${source.id} v${source.revision}`).join(" and ")}.`,
-            );
-          }
-          full = mergerMessage(revised, message);
-        }
-        for (const source of sources) current.mergerSeen.set(source.id, source.revision);
-        persistRun();
-        void merger.say(full, context, shown);
-        render();
+      /** Every plan you can implement or export: plan M (your main agent's) first, then A and B. */
+      const sources = (): PlanSource[] => {
+        if (!run) return [];
+        const merged = run.merged;
+        return [
+          ...(merged
+            ? [
+                {
+                  id: MERGED_ID,
+                  name: merged.name,
+                  revision: merged.revision,
+                  plan: merged.plan,
+                  spec: merged.spec ? parseModelSpec(merged.spec) : undefined,
+                },
+              ]
+            : []),
+          ...run.agents.flatMap((agent) =>
+            agent.plan
+              ? [{ id: agent.id, name: agent.name, revision: agent.revision, plan: agent.plan, spec: agent.spec }]
+              : [],
+          ),
+        ];
       };
 
       const laneActions = (): LaneAction[] => {
         const agents = run?.agents ?? [];
         // The merged plan comes first: once there is one, it is usually the one to build.
-        const ready = [...(run?.merger?.plan ? [run.merger] : []), ...agents.filter((agent) => agent.plan)];
+        const ready = sources();
         const actions: LaneAction[] = [];
-        for (const agent of ready) {
+        for (const source of ready) {
           actions.push({
-            id: `implement:${agent.id}`,
-            label: `Implement ${agent.id}…`,
-            description: `Implement ${agent === run?.merger ? "the merged plan M" : `plan ${agent.id}`}${agent.revision > 1 ? ` v${agent.revision}` : ""}: choose the model, effort, and context next.`,
+            id: `implement:${source.id}`,
+            label: `Implement ${source.id}…`,
+            description: `Implement ${source.id === MERGED_ID ? "the merged plan M" : `plan ${source.id}`}${source.revision > 1 ? ` v${source.revision}` : ""}: choose the model, effort, and context next.`,
           });
         }
         if (agents.length === 1) {
@@ -517,11 +593,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             description: "Plan the same task with a second model in parallel; the first keeps its plan and context.",
           });
         }
-        for (const agent of ready) {
+        for (const source of ready) {
           actions.push({
-            id: `export:${agent.id}`,
-            label: `Export ${agent.id}…`,
-            description: `Write plan ${agent.id} to a Markdown file.`,
+            id: `export:${source.id}`,
+            label: `Export ${source.id}…`,
+            description: `Write plan ${source.id} to a Markdown file.`,
             input: { placeholder: "path", initial: configuredPlanExportPath(settings) },
           });
         }
@@ -543,11 +619,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       };
 
       const onLaneAction = (id: string, text?: string) => {
-        const [kind, agentId] = id.split(":");
-        const agent = run ? everyone(run).find((candidate) => candidate.id === agentId) : undefined;
-        if (kind === "implement" && agent?.plan) return show(implementPage(agent));
-        if (kind === "export" && agent?.plan) {
-          const plan = agent.plan;
+        const [kind, sourceId] = id.split(":");
+        const source = sources().find((candidate) => candidate.id === sourceId);
+        if (kind === "implement" && source) return show(implementPage(source));
+        if (kind === "export" && source) {
+          const plan = source.plan;
           void exportPlanToFile(
             plan,
             text || undefined,
@@ -557,8 +633,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             configuredPlanExportPath(settings),
           )
             .then((result) => {
-              ctx.ui.notify(`Plan ${agent.id} exported to ${result.path}.`, "info");
-              hook(ctx, agent);
+              ctx.ui.notify(`Plan ${source.id} exported to ${result.path}.`, "info");
+              hook(ctx, source);
             })
             .catch((error: unknown) => ctx.ui.notify(`Export failed: ${errorText(error)}`, "error"));
           return;
@@ -602,7 +678,6 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       const draft: Draft = {
         task,
         planners: [withEffort(firstPlanner), configured[1] ? withEffort(configured[1]) : undefined],
-        merger: settings.merger ? withEffort(settings.merger) : undefined,
         scouts: Object.fromEntries(
           Object.entries(settings.scoutModelMap ?? {}).map(([key, spec]) => [
             key,
@@ -730,35 +805,6 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           ...plannerRows(0, adding),
           ...plannerRows(1, adding),
           {
-            id: "merger",
-            label: "Merger",
-            value: () => {
-              if (draft.merger) return describe(draft.merger);
-              const first = run?.agents[0]?.spec ?? draft.planners[0];
-              return `${catalog.name(first)} ${theme.fg("dim", "(as planner A)")}`;
-            },
-            cycle: (direction) => {
-              draft.merger = cycleModel(draft.merger, direction, true);
-            },
-            description:
-              'M, a third model: once both plans are in, it talks them over with you and merges them into one when you ask. "as planner A" uses planner A\'s model and effort.',
-            hidden: () => !draft.planners[1],
-          },
-          {
-            id: "merger-effort",
-            label: "  effort",
-            value: () => {
-              const spec = draft.merger;
-              if (!spec) return "";
-              return effortsOf(spec).length ? effortText(theme, spec.thinkingLevel) : theme.fg("dim", "n/a");
-            },
-            cycle: (direction) => {
-              if (draft.merger) draft.merger = cycleEffort(draft.merger, direction);
-            },
-            description: "How hard M, the merger, thinks (its thinking level).",
-            hidden: () => !draft.planners[1] || !draft.merger,
-          },
-          {
             id: "time",
             label: "Time limit",
             value: () => `${draft.timeLimit} min`,
@@ -844,11 +890,6 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           requestRender: render,
           createTextArea,
           onChange: (row) => {
-            if (row.id.startsWith("merger")) {
-              const { merger: _previous, ...rest } = settings;
-              settings = draft.merger ? { ...rest, merger: draft.merger } : rest;
-              saveSettings({ merger: draft.merger ?? null });
-            }
             if (row.id.startsWith("planner") || row.id.startsWith("effort")) {
               const planners = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
               if (!adding) saveSettings({ planners });
@@ -936,15 +977,12 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
       // --- Implement ---------------------------------------------------------------------------
 
-      const implementPage = (first: PlannerAgent) => {
+      const implementPage = (first: PlanSource) => {
         let author = first;
-        const ready = () => [
-          ...(run?.merger?.plan ? [run.merger] : []),
-          ...(run?.agents ?? []).filter((agent) => agent.plan),
-        ];
-        const defaults = (agent: PlannerAgent) => {
-          const mapped = settings.implementationModelMap?.[formatModelKey(agent.spec)];
-          const base = mapped ?? sessionSpec ?? agent.spec;
+        const ready = sources;
+        const defaults = (source: PlanSource) => {
+          const mapped = source.spec ? settings.implementationModelMap?.[formatModelKey(source.spec)] : undefined;
+          const base = mapped ?? sessionSpec ?? source.spec ?? (models[0] as ModelSpec);
           return withEffort(base, mapped?.thinkingLevel);
         };
         let target = defaults(author);
@@ -954,10 +992,10 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             id: "plan",
             label: "Plan",
             value: () =>
-              `${author.id}${author.id === MERGER_ID ? " (merged)" : ""} · ${author.name}${author.revision > 1 ? ` v${author.revision}` : ""}`,
+              `${author.id}${author.id === MERGED_ID ? " (merged)" : ""} · ${author.name}${author.revision > 1 ? ` v${author.revision}` : ""}`,
             cycle: (direction) => {
               const list = ready();
-              const index = list.indexOf(author);
+              const index = list.findIndex((source) => source.id === author.id);
               author = list[(index + direction + list.length) % list.length] ?? author;
               target = defaults(author);
             },
@@ -1024,9 +1062,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           createdAt: Date.now(),
           task: draft.task,
           agents: [],
-          mergerSeen: new Map(),
+          delivered: new Map(),
+          failuresReported: new Set(),
           launch: { roots: current.roots, others: current.others, seed },
         };
+        setMainToolsActive(pi, true);
         const specs = draft.planners.filter((spec): spec is ModelSpec => spec !== undefined);
         const lanesPage = lanes();
         show(lanesPage);
@@ -1110,25 +1150,25 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
 
   // --- Talking and implementing --------------------------------------------------------------
 
-  function hook(ctx: ExtensionContext, agent: PlannerAgent) {
-    if (!settings.planCompleteCommand || !agent.plan) return;
+  function hook(ctx: ExtensionContext, source: PlanSource) {
+    if (!settings.planCompleteCommand) return;
+    const spec = source.spec ?? (ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined);
     void runPlanCompleteHook({
       command: settings.planCompleteCommand,
-      plan: agent.plan,
+      plan: source.plan,
       cwd: ctx.cwd,
-      model: { provider: agent.spec.provider, modelId: agent.spec.modelId },
-    });
+      ...(spec ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
+    } as Parameters<typeof runPlanCompleteHook>[0]);
   }
 
   async function implement(
     ctx: ExtensionCommandContext,
-    agent: PlannerAgent,
+    source: PlanSource,
     target: ModelSpec,
     context: ImplementationContextChoice,
   ) {
-    const plan = agent.plan;
-    if (!plan) return;
-    hook(ctx, agent);
+    const plan = source.plan;
+    hook(ctx, source);
     disposeRun("implemented");
     if (context === "clear") {
       const parentSession = ctx.sessionManager.getSessionFile();
@@ -1201,11 +1241,6 @@ function storeAccess(access: PlannerAccessConfig): StoredAccess {
   };
 }
 
-/** The planners, then the merger once it has started. */
-function everyone(run: PlanRun): PlannerAgent[] {
-  return run.merger ? [...run.agents, run.merger] : run.agents;
-}
-
 /** A working turn is saved as interrupted: if the process dies, that is what it was. */
 function turnState(agent: PlannerAgent): TurnState | undefined {
   if (agent.working) return "interrupted";
@@ -1216,7 +1251,27 @@ function savedSignature(agent: PlannerAgent) {
   return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? ""}`;
 }
 
-function storePlanner(agent: PlannerAgent): StoredPlanner {
+/** A plan you can implement or export: a planner's, or M, the one your main agent merged. */
+interface PlanSource {
+  id: string;
+  name: string;
+  revision: number;
+  plan: string;
+  /** The model that wrote it; for M, your session's model when it was recorded. */
+  spec: ModelSpec | undefined;
+}
+
+/** How another planner stands, for a delivery message. */
+function otherPlannerLine(agent: PlannerAgent) {
+  if (agent.status === "asking") return `Planner ${agent.id} is waiting for the user's answers to its questions.`;
+  if (agent.working) return `Planner ${agent.id} is still planning.`;
+  if (agent.status === "failed") return `Planner ${agent.id} failed${agent.error ? `: ${agent.error}` : ""}.`;
+  if (agent.plan)
+    return `Planner ${agent.id}'s plan${agent.revision > 1 ? ` v${agent.revision}` : ""} is earlier in this conversation.`;
+  return `Planner ${agent.id} has no plan yet.`;
+}
+
+function storePlanner(agent: PlannerAgent, delivered: Delivered | undefined): StoredPlanner {
   const turn = turnState(agent);
   return {
     id: agent.id,
@@ -1226,22 +1281,19 @@ function storePlanner(agent: PlannerAgent): StoredPlanner {
     ...(agent.sessionFile ? { sessionFile: agent.sessionFile } : {}),
     ...(agent.plan ? { plan: agent.plan, revision: agent.revision } : {}),
     ...(turn ? { turn } : {}),
+    ...(delivered ? { delivered } : {}),
   };
 }
 
 /** A restored planner's tools; without a record (older runs), it may read, search and run safe commands. */
-function restoreAccess(
-  stored: StoredAccess | undefined,
-  settings: PlanModeSettings,
-  role: "planner" | "merger" = "planner",
-): PlannerAccessConfig {
+function restoreAccess(stored: StoredAccess | undefined, settings: PlanModeSettings): PlannerAccessConfig {
   const tools = stored?.tools ?? ["read", "grep", "find", "ls", "bash", "plan_mode_question", "plan_mode_complete"];
   const scoutSpec = stored?.scouts ? parseModelSpec(stored.scouts.spec) : undefined;
   return {
     tools,
     extensions: stored?.extensions ?? [],
     skills: stored?.skills ?? [],
-    systemPrompt: [role === "merger" ? mergerSystemPrompt() : plannerSystemPrompt()],
+    systemPrompt: [plannerSystemPrompt()],
     policy: {
       tools: new Set(tools),
       ...(stored?.mcpAllow ? { mcpAllow: stored.mcpAllow } : {}),

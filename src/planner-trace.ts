@@ -5,8 +5,8 @@ export type TraceEntry =
   | { kind: "thinking"; text: string }
   | { kind: "tool"; id: string; name: string; summary: string; status: "running" | "ok" | "error"; result?: string }
   | { kind: "note"; text: string; tone: "info" | "warning" | "error" }
-  /** Something you said to this planner. */
-  | { kind: "user"; text: string };
+  /** Something said to this planner: by you, or (`from`) by someone else such as your main agent. */
+  | { kind: "user"; text: string; from?: string };
 
 const MAX_ENTRIES = 1_500;
 const MAX_TEXT_CHARS = 24_000;
@@ -23,9 +23,15 @@ export class PlannerTrace {
     this.push({ kind: "note", text, tone });
   }
 
-  user(text: string) {
+  /** A whole reply at once (e.g. from history), as if it had streamed. */
+  text(text: string) {
     this.streaming = undefined;
-    this.push({ kind: "user", text });
+    this.push({ kind: "text", text });
+  }
+
+  user(text: string, from?: string) {
+    this.streaming = undefined;
+    this.push(from ? { kind: "user", text, from } : { kind: "user", text });
   }
 
   /** Apply one Pi JSON/RPC session event. */

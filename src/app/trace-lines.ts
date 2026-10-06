@@ -29,7 +29,9 @@ export class TraceRenderer {
         rendered = wrap(`${icon} ${entry.summary}`, width).map((line) => theme.fg(color, line));
         if (entry.result) rendered.push(theme.fg("dim", truncateToWidth(`  ${entry.result}`, width)));
       } else if (entry.kind === "user") {
-        rendered = ["", ...wrap(`you › ${entry.text.trim()}`, width).map((line) => theme.fg("accent", line)), ""];
+        const who = entry.from ?? "you";
+        const color = entry.from ? "warning" : "accent";
+        rendered = ["", ...wrap(`${who} › ${entry.text.trim()}`, width).map((line) => theme.fg(color, line)), ""];
       } else {
         const color = entry.tone === "error" ? "error" : entry.tone === "warning" ? "warning" : "muted";
         rendered = wrap(`• ${entry.text}`, width).map((line) => theme.fg(color, line));

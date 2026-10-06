@@ -9,11 +9,12 @@
   each in its own lane (both at once), answer its questions there, add a second planner at any
   point, and implement with a chosen model, effort, and context. Your main session no longer enters
   a plan mode.
-- With two plans, M (the merger) replaces Merge into A / Merge into B: a third model in a pane
-  below the lanes that sees both plans and what you told each planner, talks them over with you,
-  and writes the merged plan when you ask. You can still pick A or B, and keep talking to either;
-  plans they revise reach M with your next message. `merger` in settings picks its model (default:
-  planner A's).
+- With two plans, M, the pane below the lanes, replaces Merge into A / Merge into B, and M is your
+  main agent: what you type there goes to your main session (also while the planners work), and
+  the pane shows its replies. Each plan and revision lands in your main conversation in full (with
+  what you and the planner said since its previous version), and while a run is active your agent
+  can question a planner (`plan_ask_planner`) and record the merged plan as plan M
+  (`plan_submit_merged`) when you ask. You can still pick A or B, and keep talking to either.
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
   planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the
@@ -28,9 +29,9 @@
 - A planner's questions can be revisited before they are sent: ←/→ (or Backspace) on an empty
   answer line move between them, earlier answers stay selected, and dots on the question's rule
   show which are answered.
-- Restoring a run (after `/reload`, a restart, or resuming the session) resumes the planners and
-  merger whose turn was cut off or had failed, instead of leaving them waiting for "continue".
-- The planning screen shows a live stats row per planner (and the merger) above the lanes again:
+- Restoring a run (after `/reload`, a restart, or resuming the session) resumes the planners whose
+  turn was cut off or had failed, instead of leaving them waiting for "continue".
+- The planning screen shows a live stats row per planner (and M) above the lanes again:
   state, turn time, tool calls, subagent tasks, tokens, cost, and current activity.
 - Each planner's subagents have their own effort row on the Settings step, separate from their
   model (saved in `scoutModelMap`).

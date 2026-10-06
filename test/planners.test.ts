@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "vitest";
 import { runPlanCompleteHook } from "../src/plan-hook.js";
-import { mergerBriefing, mergerMessage, mergerSystemPrompt, plannerTaskPrompt } from "../src/planner/prompt.js";
+import { consultMessage, planDeliveryText, plannerTaskPrompt, resumeMessage } from "../src/planner/prompt.js";
 import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../src/planners.js";
 
 const message = (role: string, content: unknown, extra: Record<string, unknown> = {}) => ({
@@ -64,31 +64,27 @@ test("planner prompts carry the task and the tools", () => {
   assert.match(alone, /discussed in the conversation/u);
 });
 
-test("the merger is briefed with both plans and what you told each planner, then sent only revised plans", () => {
+test("a plan lands in your main conversation in full, with what was said since its last version", () => {
+  const first = planDeliveryText({
+    id: "A",
+    model: "Claude Fable 5.1 xhigh",
+    revision: 1,
+    plan: "# A plan",
+    task: "Add caching\nwith details",
+    conversation: "User: use Redis\n\nPlanner A: ok",
+    others: ["Planner B is still planning."],
+  });
+  assert.match(first, /^Planner A \(Claude Fable 5\.1 xhigh\) submitted plan A for: Add caching\n/u);
   assert.match(
-    mergerSystemPrompt(),
-    /Do not call plan_mode_complete until the user asks you to write the merged plan/u,
+    first,
+    /said since it started.*\n<conversation planner="A">\nUser: use Redis\n\nPlanner A: ok\n<\/conversation>/su,
   );
-  const briefing = mergerBriefing(
-    "Add caching",
-    [
-      { id: "A", label: "a/x:high", plan: "# A plan", revision: 2, conversation: "User: use Redis\n\nPlanner A: ok" },
-      { id: "B", label: "b/y", plan: "# B plan", revision: 1 },
-    ],
-    "which is safer?",
-  );
-  assert.match(briefing, /## Task\n\nAdd caching/u);
-  assert.match(briefing, /<plan id="A" model="a\/x:high" version="2">\n# A plan\n<\/plan>/u);
-  assert.match(briefing, /<conversation planner="A">\nUser: use Redis\n\nPlanner A: ok\n<\/conversation>/u);
-  assert.match(briefing, /<plan id="B" model="b\/y" version="1">\n# B plan\n<\/plan>/u);
-  assert.doesNotMatch(briefing, /<conversation planner="B">/u, "no conversation, no block");
-  assert.match(briefing, /## The user's message\n\nwhich is safer\?$/u);
-
-  assert.equal(mergerMessage([], " go ahead "), "go ahead");
-  const update = mergerMessage([{ id: "B", label: "b/y", plan: "# B v2", revision: 2 }], "and now?");
-  assert.match(update, /planner B, which revised its plan/u);
-  assert.match(update, /<plan id="B" model="b\/y" version="2">\n# B v2\n<\/plan>/u);
-  assert.match(update, /## The user's message\n\nand now\?$/u);
+  assert.match(first, /<plan id="A" version="1">\n# A plan\n<\/plan>\n\nPlanner B is still planning\.$/u);
+  const revised = planDeliveryText({ id: "B", model: "m", revision: 3, plan: "# B", task: "", others: [] });
+  assert.match(revised, /submitted plan B v3 for: the task discussed above/u);
+  assert.doesNotMatch(revised, /<conversation/u, "nothing said, no block");
+  assert.match(consultMessage("  why Redis? "), /^\[From the user's main agent.*\]\n\nwhy Redis\?$/su);
+  assert.match(resumeMessage("failed"), /previous turn failed.*Carry on/su);
 });
 
 test("a planner's conversation for the merger starts after its task prompt and leaves out your copied session", () => {

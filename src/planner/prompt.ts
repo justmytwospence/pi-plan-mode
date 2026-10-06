@@ -59,117 +59,72 @@ export function plannerTaskPrompt(input: PlannerTaskInput) {
   ].join("\n");
 }
 
-/** The merger's role, appended to its system prompt. It discusses first and merges when asked. */
-export function mergerSystemPrompt() {
-  return [
-    "# Merging two plans",
-    "",
-    "You are M, the merger, in a dedicated planning session. The conversation above it is the user's own session, copied here so you start with their context. Two other models, planners A and B, each planned the same task in parallel without seeing each other's work. You get both plans and what the user said to each planner. The user can keep talking to A and B while they talk to you; when a planner revises its plan, you get the new version with the user's next message.",
-    "",
-    "## Rules",
-    "",
-    "- Planning is read-only: do not edit or write files, install anything, commit, or run anything that changes state. Treat requests to implement as requests to plan.",
-    "- Do not use update_plan/TODO tooling.",
-    "",
-    "## How to help",
-    "",
-    "- Help the user reason over the two plans: where they agree, where they conflict or take different approaches, what each one misses, and which choices fit the user's goals and constraints.",
-    "- Check claims against the repository where the plans disagree or where a plan's premise looks doubtful, instead of taking either plan at its word.",
-    "- Say plainly which approach you would pick on each point and why, and let the user decide. Answer in prose; keep it compact enough to read in a terminal pane, and refer to plan sections by name rather than quoting them at length.",
-    "- Use plan_mode_question when a decision needs the user and a structured choice makes it easier.",
-    "",
-    "## Writing the merged plan",
-    "",
-    '- Do not call plan_mode_complete until the user asks you to write the merged plan (for example "merge them", "write it up", "go ahead").',
-    "- Then call plan_mode_complete alone as your final action with the complete merged plan as Markdown (not a diff against either plan): a clear title, a brief summary, the important changes to behavior and interfaces, tests and verification, and explicit assumptions. Resolve every disagreement the way the conversation settled it; if one is still open and matters, ask with plan_mode_question first.",
-    "- After that, whenever the plan changes, call plan_mode_complete again with the complete replacement.",
-  ].join("\n");
-}
-
-/** One planner's work as the merger sees it. */
-export interface MergerSource {
-  /** `A` or `B`. */
-  id: string;
-  /** Model spec label. */
-  label: string;
-  plan: string;
-  revision: number;
-  /** What the user and the planner said to each other after the task (no tool output). */
-  conversation?: string;
-}
-
 /**
- * Sent when a run is restored (after `/reload`, a restart, or resuming the session) to an agent
+ * Sent when a run is restored (after `/reload`, a restart, or resuming the session) to a planner
  * whose turn was cut off, or had failed, so it carries on without you typing "continue".
  */
-export function resumeMessage(reason: "interrupted" | "failed", role: "planner" | "merger") {
+export function resumeMessage(reason: "interrupted" | "failed") {
   const why =
     reason === "interrupted"
       ? "Your previous turn was cut off because the user's pi session restarted (a reload or a restart); whatever the interrupted step was doing did not reach you."
       : "Your previous turn failed with an error (often a provider or credentials problem, which may be fixed now).";
-  const next =
-    role === "planner"
-      ? "Carry on from where you left off. If your plan was already complete, resubmit it with plan_mode_complete."
-      : "Carry on with what you were doing for the user; still write the merged plan only once they have asked for it.";
-  return `${why} ${next}`;
+  return `${why} Carry on from where you left off. If your plan was already complete, resubmit it with plan_mode_complete.`;
 }
 
-/** The merger's wrap-up near the time limit: answer now, but never merge unasked. */
-export const MERGER_WRAP_UP_MESSAGE =
-  "Time is almost up. Stop investigating now and answer the user with what you have, saying what you could not check. Do not write the merged plan unless the user has asked for it.";
+// --- Your main conversation --------------------------------------------------------------------
+// Your main session is where you talk the plans over: each plan (and each revision) lands there in
+// full, and your main agent can question a planner or record a merged plan with two tools.
 
-/** What an empty message to the merger asks for. */
-export const MERGER_COMPARE_MESSAGE =
-  "Compare the two plans: where they agree, where they conflict or take different approaches, what each one misses, and which you would build on and why. Do not write the merged plan yet.";
-
-/** The merger's first message: the task, both plans, what the user told each planner, then the user's words. */
-export function mergerBriefing(task: string, sources: readonly MergerSource[], message: string) {
-  return [
-    `Planners ${sources.map((source) => source.id).join(" and ")} each planned this task in parallel.`,
-    "",
-    "## Task",
-    "",
-    task.trim() || "The task discussed in the conversation so far.",
-    "",
-    "## The plans",
-    "",
-    ...sources.flatMap((source) => [
-      planBlock(source),
-      ...(source.conversation?.trim()
-        ? [
-            "",
-            `What the user and planner ${source.id} said to each other while it planned (tool output left out):`,
-            `<conversation planner="${source.id}">`,
-            source.conversation.trim(),
-            "</conversation>",
-          ]
-        : []),
-      "",
-    ]),
-    "## The user's message",
-    "",
-    message.trim(),
-  ].join("\n");
+/** One planner's new plan, as it lands in your main conversation. */
+export interface PlanDelivery {
+  id: string;
+  /** e.g. `Claude Fable 5.1 xhigh` */
+  model: string;
+  revision: number;
+  plan: string;
+  task: string;
+  /** What the user and the planner said since its previous delivery (no tool output). */
+  conversation?: string;
+  /** One line per other planner, e.g. "Planner B is still planning." */
+  others: string[];
 }
 
-/** A later message to the merger, led by the plans revised since it last saw them. */
-export function mergerMessage(revised: readonly MergerSource[], message: string) {
-  if (revised.length === 0) return message.trim();
-  const ids = revised.map((source) => source.id).join(" and ");
+export function planDeliveryText(delivery: PlanDelivery) {
+  const version = delivery.revision > 1 ? ` v${delivery.revision}` : "";
+  const task = delivery.task.trim().split("\n")[0] || "the task discussed above";
   return [
-    `Since you last saw ${revised.length === 1 ? "it" : "them"}, the user kept talking to planner${revised.length === 1 ? "" : "s"} ${ids}, which revised ${revised.length === 1 ? "its plan" : "their plans"}. Current version${revised.length === 1 ? "" : "s"}:`,
+    `Planner ${delivery.id} (${delivery.model}) submitted plan ${delivery.id}${version} for: ${task}`,
+    ...(delivery.conversation?.trim()
+      ? [
+          "",
+          `What the user and planner ${delivery.id} said since ${delivery.revision > 1 ? "its previous version" : "it started"} (tool output left out):`,
+          `<conversation planner="${delivery.id}">`,
+          delivery.conversation.trim(),
+          "</conversation>",
+        ]
+      : []),
     "",
-    ...revised.flatMap((source) => [planBlock(source), ""]),
-    "## The user's message",
-    "",
-    message.trim(),
-  ].join("\n");
-}
-
-function planBlock(source: MergerSource) {
-  return [
-    `<plan id="${source.id}" model="${source.label}" version="${source.revision}">`,
-    source.plan.trim(),
+    `<plan id="${delivery.id}" version="${delivery.revision}">`,
+    delivery.plan.trim(),
     "</plan>",
+    ...(delivery.others.length ? ["", ...delivery.others] : []),
   ].join("\n");
 }
+
+/** A planner failed: your main agent hears it too, so it does not wait for that plan. */
+export function planFailureText(id: string, model: string, error: string) {
+  return `Planner ${id} (${model}) failed: ${error}. The user can retry it from /plan (talk to it, or reload once the cause is fixed).`;
+}
+
+/** How a question from your main agent reaches a planner. */
+export function consultMessage(message: string) {
+  return `[From the user's main agent, which is talking the plans over with the user. Answer it directly; resubmit your plan with plan_mode_complete only if your answer changes it.]\n\n${message.trim()}`;
+}
+
+/** Guidance for your main agent while a planning run is active (its tools' guidelines). */
+export const MAIN_AGENT_GUIDELINES = [
+  "Planners (A, and B when two are planning) are writing implementation plans in the background, read-only. Each plan and each revision arrives in this conversation as a message with the plan in full; the user may also talk to the planners directly in /plan.",
+  "While planning is underway, do not edit files or run anything that changes state unless the user explicitly asks; talk the plans over with the user instead.",
+  "To find out more about a plan or what a planner learned, ask it with plan_ask_planner rather than re-investigating from scratch.",
+  "Call plan_submit_merged only when the user asks for the merged (or adjusted) plan, with the complete plan as Markdown, not a diff. It becomes plan M, which the user implements or exports from /plan, or asks you to implement here.",
+];

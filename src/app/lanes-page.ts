@@ -15,6 +15,25 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { PlannerAgent } from "../planner/agent.js";
+
+/** What a lane shows of an agent: a planner, or M, your main agent seen through the same lens. */
+export type LaneAgent = Pick<
+  PlannerAgent,
+  | "id"
+  | "name"
+  | "spec"
+  | "trace"
+  | "subagents"
+  | "status"
+  | "working"
+  | "stats"
+  | "plan"
+  | "revision"
+  | "pending"
+  | "error"
+  | "answer"
+>;
+
 import { formatCost, formatDuration, formatTokens } from "../planners.js";
 import type { PlanModeQuestionAnswer } from "../question-tool.js";
 import {
@@ -45,7 +64,7 @@ export interface LaneAction {
 /** The merger pane, shown with two planners. */
 export interface MergerPane {
   /** The merger, once you have talked to it. */
-  agent: PlannerAgent | undefined;
+  agent: LaneAgent | undefined;
   /** Its model (and effort), shown before it starts. */
   name: string;
   /** Both plans are in, so it can start. */
@@ -57,12 +76,12 @@ export interface MergerPane {
 export interface LanesPageOptions {
   title: string;
   task: () => string;
-  agents(): readonly PlannerAgent[];
+  agents(): readonly LaneAgent[];
   /** The merger pane below the lanes, or undefined (one planner). */
   merger?(): MergerPane | undefined;
   actions(): LaneAction[];
   onAction(id: string, text?: string): void;
-  say(agent: PlannerAgent, text: string): void;
+  say(agent: LaneAgent, text: string): void;
   /** Talk to the merger (starting it on the first message); empty text asks it to compare the plans. */
   sayToMerger?(text: string): void;
   /** Esc: hide the screen (planners keep going), or stop every working planner. */
@@ -74,7 +93,7 @@ export interface LanesPageOptions {
 
 interface QuestionCursor {
   /** The question set this cursor belongs to; a new set starts a new cursor. */
-  of: PlannerAgent["pending"];
+  of: LaneAgent["pending"];
   question: number;
   option: number;
   /** Answers by question index; going back and answering again replaces one. */
@@ -84,7 +103,7 @@ interface QuestionCursor {
 type Modal = { kind: "escape"; choice: number } | { kind: "input"; action: LaneAction; input: Input };
 
 /** What Tab moves between: the lanes, the merger pane, and the actions bar. */
-type Target = { kind: "lane"; agent: PlannerAgent } | { kind: "merger"; pane: MergerPane } | { kind: "actions" };
+type Target = { kind: "lane"; agent: LaneAgent } | { kind: "merger"; pane: MergerPane } | { kind: "actions" };
 
 const MAX_SUBAGENT_LINES = 3;
 const MERGER_ID = "M";
@@ -111,7 +130,7 @@ export class LanesPage {
   private readonly seenRevision = new Map<string, number>();
   private readonly laneHeights = new Map<string, number>();
   private laneTop = 0;
-  private laneLayout: Array<{ x: number; width: number; agent: PlannerAgent }> = [];
+  private laneLayout: Array<{ x: number; width: number; agent: LaneAgent }> = [];
   private mergerTop = 0;
   private actionsTop = 0;
 
@@ -164,7 +183,7 @@ export class LanesPage {
     return [...this.options.agents(), ...(merger ? [merger] : [])];
   }
 
-  private input(agent: PlannerAgent) {
+  private input(agent: LaneAgent) {
     return this.inputFor(agent.id);
   }
 
@@ -177,11 +196,11 @@ export class LanesPage {
     return input;
   }
 
-  private viewKey(agent: PlannerAgent) {
+  private viewKey(agent: LaneAgent) {
     return `${agent.id}:${this.showsPlan(agent) ? "plan" : "trace"}`;
   }
 
-  private showsPlan(agent: PlannerAgent) {
+  private showsPlan(agent: LaneAgent) {
     return agent.plan !== undefined && !this.showTrace.has(agent.id);
   }
 
@@ -302,7 +321,7 @@ export class LanesPage {
     this.options.requestRender();
   }
 
-  private questionCursor(agent: PlannerAgent): QuestionCursor {
+  private questionCursor(agent: LaneAgent): QuestionCursor {
     let cursor = this.questions.get(agent.id);
     if (!cursor || !agent.pending || cursor.of !== agent.pending) {
       cursor = { of: agent.pending, question: 0, option: 0, answers: [] };
@@ -315,7 +334,7 @@ export class LanesPage {
    * Show another question with its earlier answer selected: an option, or your own words as a row
    * of their own (so the line stays empty and ←/→ keep moving between questions).
    */
-  private moveToQuestion(agent: PlannerAgent, cursor: QuestionCursor, index: number) {
+  private moveToQuestion(agent: LaneAgent, cursor: QuestionCursor, index: number) {
     cursor.question = index;
     const previous = cursor.answers[index];
     const question = agent.pending?.questions[index];
@@ -332,7 +351,7 @@ export class LanesPage {
   }
 
   /** Enter in a lane or the merger pane: answer its question, or send what you typed. */
-  private submit(agent: PlannerAgent, merger = false) {
+  private submit(agent: LaneAgent, merger = false) {
     const input = this.input(agent);
     const text = input.getValue().trim();
     const pending = agent.pending;
@@ -379,7 +398,7 @@ export class LanesPage {
     else this.options.say(agent, text);
   }
 
-  private scrollLane(agent: PlannerAgent, delta: number) {
+  private scrollLane(agent: LaneAgent, delta: number) {
     const key = this.viewKey(agent);
     this.scroll.scrollBy(key, delta, this.lineCounts.get(key) ?? 0, this.laneHeights.get(agent.id) ?? 10);
   }
@@ -456,19 +475,19 @@ export class LanesPage {
     return [...above, ...footer].map((line) => truncateToWidth(line, width));
   }
 
-  private context(agents: readonly PlannerAgent[], pane: MergerPane | undefined) {
+  private context(agents: readonly LaneAgent[], pane: MergerPane | undefined) {
     const all = [...agents, ...(pane?.agent ? [pane.agent] : [])];
     const tokens = all.reduce((sum, agent) => sum + agent.stats.totalTokens, 0);
     const cost = all.reduce((sum, agent) => sum + agent.stats.costUsd, 0);
     return [
       agents.length === 1 ? "1 planner" : `${agents.length} planners`,
-      ...(pane?.agent ? ["merger"] : []),
+      ...(pane?.agent ? ["main agent"] : []),
       ...(tokens ? [`${formatTokens(tokens)} tok`] : []),
       ...(cost ? [formatCost(cost)] : []),
     ].join(" · ");
   }
 
-  private renderLanes(agents: readonly PlannerAgent[], width: number, rows: number, target: Target): string[] {
+  private renderLanes(agents: readonly LaneAgent[], width: number, rows: number, target: Target): string[] {
     const gap = " │ ";
     const count = Math.max(1, agents.length);
     const laneWidth = Math.max(20, Math.floor((width - gap.length * (count - 1)) / count));
@@ -524,16 +543,16 @@ export class LanesPage {
   }
 
   /** A new plan version is shown from its top, in place of the trace. */
-  private syncRevision(agent: PlannerAgent) {
+  private syncRevision(agent: LaneAgent) {
     if (agent.plan === undefined || this.seenRevision.get(agent.id) === agent.revision) return;
     this.seenRevision.set(agent.id, agent.revision);
     this.showTrace.delete(agent.id);
     this.scroll.toTop(`${agent.id}:plan`);
   }
 
-  private lane(agent: PlannerAgent, width: number, rows: number, focused: boolean, merger = false): string[] {
+  private lane(agent: LaneAgent, width: number, rows: number, focused: boolean, merger = false): string[] {
     const theme = this.theme;
-    const title = `${agent.id}${merger ? " · merger" : ""} · ${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}${
+    const title = `${agent.id}${merger ? " · main agent" : ""} · ${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}${
       agent.revision > 1 ? ` · v${agent.revision}` : ""
     }`;
     const traceLabel = merger ? "chat" : "trace";
@@ -588,7 +607,7 @@ export class LanesPage {
    * One live row per planner (and the merger once it has started): its state, model, how long its
    * turn has run, and the tools, subagent tasks, tokens and cost it has used so far.
    */
-  private statsLines(width: number, agents: readonly PlannerAgent[], pane: MergerPane | undefined): string[] {
+  private statsLines(width: number, agents: readonly LaneAgent[], pane: MergerPane | undefined): string[] {
     const theme = this.theme;
     const rows = [...agents, ...(pane?.agent ? [pane.agent] : [])];
     if (rows.length === 0) return [];
@@ -601,7 +620,7 @@ export class LanesPage {
         {
           header: "",
           get: (agent) =>
-            `${this.stateIcon(agent)} ${theme.bold(agent.id)} ${theme.fg("muted", `${agent === pane?.agent ? "merger · " : ""}${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}`)}`,
+            `${this.stateIcon(agent)} ${theme.bold(agent.id)} ${theme.fg("muted", `${agent === pane?.agent ? "main agent · " : ""}${agent.name}${agent.spec.thinkingLevel ? ` ${agent.spec.thinkingLevel}` : ""}`)}`,
           flex: true,
           min: 12,
         },
@@ -633,7 +652,7 @@ export class LanesPage {
     return table.lines.map((line) => truncateToWidth(` ${line}`, width));
   }
 
-  private stateIcon(agent: PlannerAgent) {
+  private stateIcon(agent: LaneAgent) {
     const theme = this.theme;
     switch (agent.status) {
       case "starting":
@@ -651,7 +670,7 @@ export class LanesPage {
   }
 
   /** What an agent is doing right now, in a few words. */
-  private activity(agent: PlannerAgent) {
+  private activity(agent: LaneAgent) {
     const theme = this.theme;
     switch (agent.status) {
       case "starting":
@@ -673,7 +692,7 @@ export class LanesPage {
     }
   }
 
-  private status(agent: PlannerAgent) {
+  private status(agent: LaneAgent) {
     const theme = this.theme;
     const elapsed = formatDuration((agent.stats.endedAt ?? Date.now()) - agent.stats.startedAt);
     const parts: string[] = [];
@@ -703,7 +722,7 @@ export class LanesPage {
     return parts.join(theme.fg("dim", " · "));
   }
 
-  private questionLines(agent: PlannerAgent, width: number): string[] {
+  private questionLines(agent: LaneAgent, width: number): string[] {
     const pending = agent.pending;
     if (!pending) return [];
     const theme = this.theme;

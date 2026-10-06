@@ -303,7 +303,10 @@ test("the top of the planning screen shows each planner's live stats, and M's on
 
   pane.agent = fakeAgent("M", { status: "asking", working: true } as never);
   lines = page.render(140);
-  assert.match(lines.find((line) => line.includes("? M merger")) ?? "", /\? M merger · Model M high.*asking you/u);
+  assert.match(
+    lines.find((line) => line.includes("? M main agent")) ?? "",
+    /\? M main agent · Model M high.*asking you/u,
+  );
   assert.equal(lines.length, 30);
 });
 

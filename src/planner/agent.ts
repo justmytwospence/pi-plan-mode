@@ -4,7 +4,7 @@
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
-import { buildPlannerConversation } from "../planners.js";
+import { buildPlannerConversation, buildPlannerTranscript } from "../planners.js";
 import type { PlanModeQuestion, PlanModeQuestionAnswer } from "../question-tool.js";
 import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.js";
 import { SubagentTracker } from "../subagent-progress.js";
@@ -61,7 +61,7 @@ export interface PlannerAccessConfig {
 }
 
 export interface PlannerAgentOptions {
-  /** `A` or `B`, or `M` for the merger. */
+  /** `A` or `B`. */
   id: string;
   spec: ModelSpec;
   /** Display name, e.g. `Claude Fable 5.1`. */
@@ -70,8 +70,6 @@ export interface PlannerAgentOptions {
   access: PlannerAccessConfig;
   /** Per turn: at 80% the planner is asked to wrap up, at the limit it is stopped. */
   timeoutMs: number;
-  /** What it is told at 80% of the limit (default: submit the best plan now). */
-  wrapUpMessage?: string;
   /** Where new planner sessions are stored. */
   sessionDir: string;
   /** Messages of your conversation, so the planner starts with your context. */
@@ -109,6 +107,8 @@ export class PlannerAgent {
   private softTimer: ReturnType<typeof setTimeout> | undefined;
   private hardTimer: ReturnType<typeof setTimeout> | undefined;
   private disposed = false;
+  /** Called when the current turn settles (or fails): consult() waits on them. */
+  private settleWaiters: Array<() => void> = [];
 
   constructor(private readonly options: PlannerAgentOptions) {
     this.id = options.id;
@@ -123,7 +123,7 @@ export class PlannerAgent {
       this.stats.endedAt = this.stats.startedAt;
       this.trace.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
     } else if (options.sessionFile) {
-      // Restored without a plan (e.g. the merger mid-conversation): it waits for you, not starting.
+      // Restored without a plan (e.g. mid-conversation): it waits for you, not starting.
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
       this.trace.note(`${this.id} restored.`);
@@ -152,12 +152,13 @@ export class PlannerAgent {
 
   /**
    * Say something to the planner: steers a working turn, or starts a new one. `shown` is what the
-   * trace shows as yours when the message carries more (e.g. the merger's briefing).
+   * trace shows when the message carries more than you typed; `from` names who said it when it was
+   * not you (e.g. your main agent).
    */
-  async say(text: string, host: ExtensionContext, shown?: string) {
+  async say(text: string, host: ExtensionContext, shown?: string, from?: string) {
     const message = text.trim();
     if (!message || this.disposed) return;
-    this.trace.user(shown?.trim() || message);
+    this.trace.user(shown?.trim() || message, from);
     this.changed();
     const handle = await this.open(host);
     if (!handle) return;
@@ -168,16 +169,52 @@ export class PlannerAgent {
     this.send(message);
   }
 
-  /** What you and this planner said to each other after its task (no tool output), for the merger. */
-  conversation(): string {
+  /**
+   * Ask the idle planner something and wait for its turn to end: its reply, and whether it
+   * resubmitted its plan. `from` labels the message in its lane (e.g. "main agent"), which shows
+   * `shown` (the question without the framing the planner gets).
+   */
+  async consult(
+    message: string,
+    host: ExtensionContext,
+    from: string,
+    signal?: AbortSignal,
+    shown?: string,
+  ): Promise<{ reply: string; revised: boolean; error?: string }> {
+    if (this.disposed) return { reply: "", revised: false, error: "the planner is closed" };
+    const before = this.revision;
+    this.lastReply = "";
+    const settled = new Promise<void>((resolve) => {
+      this.settleWaiters.push(resolve);
+      signal?.addEventListener("abort", () => resolve(), { once: true });
+    });
+    await this.say(message, host, shown ?? message, from);
+    await settled;
+    return {
+      reply: this.lastReply,
+      revised: this.revision > before,
+      ...(this.status === "failed" && this.error ? { error: this.error } : {}),
+    };
+  }
+
+  /**
+   * What you and this planner said to each other (no tool output) since `since`, an entry count an
+   * earlier call returned; from 0, it starts after the planner's task. `mark` is where to pick up.
+   */
+  conversation(since = 0): { text: string; mark: number } {
     let entries: readonly unknown[] = [];
     try {
       entries =
         this.handle?.entries?.() ?? (this.sessionFile ? readSessionEntries(this.sessionFile, this.options.cwd) : []);
     } catch {
-      return "";
+      return { text: "", mark: since };
     }
-    return buildPlannerConversation(entries, this.id, { skipUser: (text) => text === WRAP_UP_MESSAGE });
+    const skipUser = (text: string) => text === WRAP_UP_MESSAGE;
+    const text =
+      since === 0
+        ? buildPlannerConversation(entries, this.id, { skipUser })
+        : buildPlannerTranscript(entries.slice(since), undefined, `Planner ${this.id}`, skipUser);
+    return { text, mark: entries.length };
   }
 
   /** Answer the pending questions (or skip them with undefined). */
@@ -207,6 +244,7 @@ export class PlannerAgent {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.settle();
     this.clearTimers();
     this.pending?.resolve(undefined);
     this.pending = undefined;
@@ -326,7 +364,7 @@ export class PlannerAgent {
         this.stats.wrappingUp = true;
         this.stats.lastActivity = "asked to wrap up";
         this.trace.note("Time is almost up: asked the planner to finish now.", "warning");
-        void session.steer(this.options.wrapUpMessage ?? WRAP_UP_MESSAGE).catch(() => undefined);
+        void session.steer(WRAP_UP_MESSAGE).catch(() => undefined);
         this.changed();
       },
       Math.max(1, Math.floor(limit * SOFT_DEADLINE_FRACTION)),
@@ -399,6 +437,7 @@ export class PlannerAgent {
         if (this.status !== "asking") this.status = this.error && !this.plan ? "failed" : "idle";
         this.stats.endedAt = Date.now();
         this.stats.lastActivity = this.plan ? "plan ready" : this.error ? "failed" : "waiting for you";
+        this.settle();
         break;
       default:
         break;
@@ -419,6 +458,13 @@ export class PlannerAgent {
     this.stats.endedAt = Date.now();
     this.trace.note(`Failed: ${this.error}`, "error");
     this.changed();
+    this.settle();
+  }
+
+  private settle() {
+    const waiters = this.settleWaiters;
+    this.settleWaiters = [];
+    for (const resolve of waiters) resolve();
   }
 
   private changed() {

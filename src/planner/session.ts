@@ -43,7 +43,7 @@ export interface PlannerSessionHandle {
   session: AgentSession;
   /** The session file, to continue after a reload. */
   file: string | undefined;
-  /** The session's entries on its current branch (the merger reads what you said to a planner). */
+  /** The session's entries on its current branch (what you said to a planner goes to your main conversation). */
   entries?(): readonly unknown[];
   subscribe(listener: (event: AgentSessionEvent) => void): () => void;
   dispose(): void;

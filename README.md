@@ -1,8 +1,9 @@
 # 🧭 pi-plan-mode — Plan Before Pi Edits Code
 
 A [Pi](https://pi.dev) extension: `/plan` opens a full-screen planner. One or two models plan your
-task read-only while you watch, answer their questions, and talk to them; with two, a third model
-can talk the plans over with you and merge them. Then you implement the plan you like, with the
+task read-only while you watch, answer their questions, and talk to them. With two, the pane below
+them is your own main agent, which gets every plan, talks them over with you, questions the
+planners, and writes the merged plan when you ask. Then you implement the plan you like, with the
 model, effort, and context you choose.
 
 Started as a fork of [`@narumitw/pi-plan-mode`](https://github.com/narumiruna/pi-extensions/tree/main/packages/pi-plan-mode)
@@ -40,8 +41,6 @@ covers the whole terminal. A step bar at the top right shows where you are:
      with their own **effort**; new subagent models start at `medium`).
    - **Planner B**: `none` plans with one model; pick a model to plan the same task with two in
      parallel. Two is the maximum.
-   - **Merger** and its **effort** (with two planners): the model M, the merger, runs on. `as
-     planner A` uses planner A's model and effort.
    - **Time limit** per planner turn (it is asked to wrap up at 80%, stopped at the limit).
    - Preferences: whether Jev picks tools, where implementation starts by default, the export path,
      and the shortcut that opens the planner.
@@ -56,7 +55,7 @@ covers the whole terminal. A step bar at the top right shows where you are:
    judgments) are always preselected and marked `always`: Jev scores them but never turns them
    off. Enter asks
    `Start planning with N planners?`; Enter again starts.
-3. **Planning.** Above the lanes, one live row per planner (and the merger, once it starts) shows
+3. **Planning.** Above the lanes, one live row per planner (and M, your main agent) shows
    its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it
    is doing now. One lane per planner, side by side. Each shows what its planner is doing (or its
    plan, once it has one), the subagents it has running, and a line to talk to it. Type and press
@@ -64,17 +63,22 @@ covers the whole terminal. A step bar at the top right shows where you are:
    working on your messages at once. When a planner asks a question, the lane shows it with its
    options: ↑/↓ and Enter pick one, or type your own answer. With several questions, ←/→ (or
    Backspace) on an empty answer line move between them to change an earlier answer; nothing is sent
-   until all are answered. Tab moves between the lanes, the
-   merger pane (once both plans are in), and the actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
+   until all are answered. Tab moves between the lanes, the M pane (with two planners), and the
+   actions; ctrl+u/ctrl+d (or the wheel) scroll a lane; ctrl+o switches a lane between its plan and
    its trace.
-4. **Review.** With two planners, a full-width pane below the lanes talks to **M, the merger**: a
-   third model that sees both plans and what you told each planner, and can read the repository to
-   settle where they disagree. Until both plans are in, its pane says what it is waiting for (e.g. a
-   failed planner) and Tab skips it. It starts when you first talk to it (Enter on
-   an empty line asks it to compare them). Talk the plans over; when you are ready, ask it to write
-   the merged plan, and its pane shows it (ctrl+o switches between its plan and the chat). You can
-   keep talking to A and B too: a plan they revise reaches M with your next message. The focused
-   pane gets the room: M grows while you talk to it and shrinks to a few lines otherwise.
+4. **Review.** With two planners, the full-width pane below the lanes is **M, your main agent**:
+   the agent of the session you started `/plan` from, so it has all your context. What you type
+   there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they
+   stream; you can talk to it while A and B are still working. Each plan, and each revision, lands
+   in your main conversation in full as it arrives, with what you and that planner said since its
+   previous version. While a run is active your agent has two tools:
+   - `plan_ask_planner`: ask planner A or B about its plan or what it found; the planner answers
+     from its own research (the question shows in its lane as `main agent › …`).
+   - `plan_submit_merged`: when you ask for it, record the merged (or adjusted) plan as **plan M**;
+     the M pane shows it (ctrl+o switches between the plan and the chat).
+
+   It is asked, not forced, to leave files alone while planning is underway. The focused pane gets
+   the room: M takes the bottom third while you talk to it and shrinks to a few lines otherwise.
 
    Once plans are in, the actions below are:
    - **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one)
@@ -91,10 +95,10 @@ covers the whole terminal. A step bar at the top right shows where you are:
    Enter closes the planner and starts implementing.
 
 **Esc** asks before leaving: **Hide** keeps the planners working in the background (the footer
-shows `plan: A working · B ready (/plan)`, and you are notified when one asks something or a plan
-is ready), **Stop planning** stops the working planners, **Back** returns. `/plan` reopens the
+shows `plan: A working · B ready (/plan)`, and you are notified once when one asks something or a
+new plan version is ready), **Stop planning** stops the working planners, **Back** returns. `/plan` reopens the
 screen where you left it, also after `/reload` or resuming the session: planners keep their sessions
-on disk, so you can keep talking to them. A planner (or the merger) whose turn the reload or restart
+on disk, so you can keep talking to them. A planner whose turn the reload or restart
 cut off, or whose last turn failed, resumes by itself; its lane shows `continue (resumed …)`.
 
 ## 🧠 How it works
@@ -114,13 +118,14 @@ pi-subagents do), so one planner and two planners are the same thing:
   start without your extensions, so the one a provider needs (e.g. pi-anthropic-auth, which keeps a
   Claude subscription paying) is passed to them; `providerExtensions` overrides this per provider.
 
-The merger is the same kind of session with the same tools, briefed differently: on your first
-message it gets both plans and what you and each planner said to each other (your messages, their
-replies, your answers; no tool output, which could overflow its context), and its prompt keeps it
-from writing the merged plan until you ask.
+M is not another session: the M pane shows your main session's own events and sends what you
+type to it. Each plan is added to that session as a message (without starting a turn; your agent
+reads it on its next turn; in your main chat it shows collapsed, ctrl+o expands it), the run's two
+tools are active only while a run is, and their guidelines tell your agent how to use them and to
+change nothing while planning is underway. Implementing "in this conversation" then builds the
+plan in the session that discussed it.
 
-Your main session is untouched until you implement: then it (or a fresh session) receives the plan.
-Planner and merger sessions are stored under `~/.pi/agent/plan-mode/planners/`.
+Planner sessions are stored under `~/.pi/agent/plan-mode/planners/`.
 
 ## ⚙️ Settings
 
@@ -175,8 +180,6 @@ edits the common ones; the rest are JSON-only:
 
 - Model specs are `provider/modelId`, optionally with `:off|minimal|low|medium|high|xhigh|max`.
 - `planners`: planner A and (optionally) B, preselected on the Settings step.
-- `merger` (optional): the model M, the merger, runs on, e.g. `"anthropic/claude-fable-5-1:xhigh"`;
-  unset, it uses planner A's.
 - `scoutModelMap`: planner model → the model its subagents run on.
 - `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP
   server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group
@@ -204,6 +207,7 @@ as working. Outside Herdr nothing listens and the events do nothing.
 src/
 ├── index.ts            # entry: the planner app, or the MCP guard inside a scout
 ├── plan.ts             # /plan: settings, tools, runs, implement, export, restore
+├── main-chat.ts        # your main agent as M: delivered plans, the run tools, the M pane's view
 ├── app/                # the full-screen pages: options rows, lanes, frame
 ├── planner/            # in-process planner sessions: agent, session, policy extension, access, prompts
 ├── tool-tree*.ts       # the tools tree and its screen

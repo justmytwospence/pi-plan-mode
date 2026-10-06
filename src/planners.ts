@@ -224,7 +224,7 @@ export function buildPlannerTranscript(
 
 /**
  * What you and a planner said to each other after its task prompt: your messages, its replies, and
- * your answers to its questions (no tool output), for the merger. The copy of your own conversation
+ * your answers to its questions (no tool output), for your main conversation. The copy of your own conversation
  * a planner starts with is left out; sessions from before the seed marker fall back to starting
  * after the task prompt.
  */

@@ -79,6 +79,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
 
    It is asked, not forced, to leave files alone while planning is underway. The focused pane gets
    the room: M takes the bottom third while you talk to it and shrinks to a few lines otherwise.
+   To choose the split yourself, drag M's title rule (the divider) with the mouse, or press
+   shift+↑/↓ to move it a row; that size then holds (for the rest of the pi session), and a
+   double-click on the divider goes back to the automatic sizing.
 
    Once plans are in, the actions below are:
    - **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one)

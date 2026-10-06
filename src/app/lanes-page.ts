@@ -88,6 +88,11 @@ export interface LanesPageOptions {
   hide(): void;
   stopAll(): void;
   rowsAvailable(): number;
+  /**
+   * The share of the space below the header you dragged the M pane to (0-1), kept by the caller so
+   * it outlives this page; undefined sizes it automatically (small, or a third while focused).
+   */
+  mergerShare?: { get(): number | undefined; set(share: number | undefined): void };
   requestRender(): void;
 }
 
@@ -133,6 +138,10 @@ export class LanesPage {
   private laneLayout: Array<{ x: number; width: number; agent: LaneAgent }> = [];
   private mergerTop = 0;
   private actionsTop = 0;
+  /** The last layout: rows below the header, and the M pane's rows (for resizing it). */
+  private lastAvailable = 0;
+  private lastMergerRows = 0;
+  private draggingDivider = false;
 
   constructor(
     private readonly theme: Theme,
@@ -222,6 +231,11 @@ export class LanesPage {
     }
     if (is("escape")) {
       this.modal = { kind: "escape", choice: 0 };
+      return this.options.requestRender();
+    }
+    if (this.pane() && is("shift+up", "shift+down")) {
+      // Move the divider between the lanes and M by a row.
+      this.resizeMerger(this.lastMergerRows + (is("shift+up") ? 1 : -1));
       return this.options.requestRender();
     }
     if (is("tab") || is("shift+tab")) {
@@ -403,7 +417,38 @@ export class LanesPage {
     this.scroll.scrollBy(key, delta, this.lineCounts.get(key) ?? 0, this.laneHeights.get(agent.id) ?? 10);
   }
 
+  /** Size the M pane to `rows` (kept within both panes' minimums) and remember it as a share. */
+  private resizeMerger(rows: number) {
+    if (!this.options.mergerShare || this.lastAvailable <= 0) return;
+    const clamped = Math.max(MERGER_MIN_ROWS, Math.min(this.lastAvailable - MIN_LANE_ROWS, rows));
+    this.lastMergerRows = clamped;
+    this.options.mergerShare.set(clamped / this.lastAvailable);
+  }
+
   handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+    // The M pane's title rule is the divider: drag it to resize; double-click it to size M
+    // automatically again.
+    const onDivider = this.pane() !== undefined && this.lastMergerRows > 0 && event.y === this.mergerTop;
+    if (this.draggingDivider) {
+      if (event.type === "drag" || event.type === "move") {
+        this.resizeMerger(this.actionsTop - event.y);
+        this.options.requestRender();
+        return { capture: true };
+      }
+      if (event.type === "release") {
+        this.draggingDivider = false;
+        return { handled: true };
+      }
+    }
+    if (onDivider && event.type === "press" && event.button === "left") {
+      this.draggingDivider = true;
+      return { capture: true };
+    }
+    if (onDivider && event.type === "click" && (event.clickCount ?? 1) >= 2) {
+      this.options.mergerShare?.set(undefined);
+      this.options.requestRender();
+      return { handled: true };
+    }
     const lane =
       event.y >= this.laneTop && event.y < this.mergerTop
         ? this.laneLayout.find((candidate) => event.x >= candidate.x && event.x < candidate.x + candidate.width + 1)
@@ -448,17 +493,16 @@ export class LanesPage {
     const top = room - stats.length >= MIN_LANE_ROWS + mergerMin ? [...base, ...stats] : base;
     const available = Math.max(1, height - top.length - footer.length);
     const showMerger = pane !== undefined && (mergerFocused || available >= MIN_LANE_ROWS + MERGER_MIN_ROWS);
-    const mergerRows = showMerger
-      ? Math.max(
-          MERGER_MIN_ROWS,
-          Math.min(
-            available - MIN_LANE_ROWS,
-            mergerFocused || pane?.agent?.pending
-              ? Math.floor(available * MERGER_FOCUSED_SHARE)
-              : MERGER_COLLAPSED_ROWS,
-          ),
-        )
-      : 0;
+    const share = this.options.mergerShare?.get();
+    const wanted =
+      share !== undefined
+        ? Math.round(available * share)
+        : mergerFocused || pane?.agent?.pending
+          ? Math.floor(available * MERGER_FOCUSED_SHARE)
+          : MERGER_COLLAPSED_ROWS;
+    const mergerRows = showMerger ? Math.max(MERGER_MIN_ROWS, Math.min(available - MIN_LANE_ROWS, wanted)) : 0;
+    this.lastAvailable = available;
+    this.lastMergerRows = mergerRows;
     const laneRows = Math.max(1, available - mergerRows);
     this.laneTop = top.length;
     // The lanes render at least their own minimum; cut them to the rows they were given.
@@ -868,6 +912,7 @@ export class LanesPage {
       ...(agent?.plan !== undefined
         ? [{ key: "^o", label: this.showsPlan(agent) ? (merger ? "chat" : "trace") : "plan" }]
         : []),
+      ...(merger && this.options.mergerShare ? [{ key: "⇧↑↓", label: "resize" }] : []),
       { key: "tab", label: panes > 1 ? "next pane / actions" : "actions" },
       { key: "esc", label: "leave" },
     ];

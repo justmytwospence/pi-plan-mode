@@ -26,6 +26,8 @@
   lists tools that are always preselected and that Jev never deselects (default: web research,
   Context7, and Jev judgments). Subagent models start at
   `medium` effort instead of `high`.
+- The divider between the lanes and M resizes: drag it with the mouse or press shift+↑/↓; a
+  double-click returns to the automatic sizing.
 - A planner's questions can be revisited before they are sent: ←/→ (or Backspace) on an empty
   answer line move between them, earlier answers stay selected, and dots on the question's rule
   show which are answered.

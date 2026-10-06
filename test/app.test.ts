@@ -96,6 +96,7 @@ function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined
   const said: [string, string][] = [];
   const actions: string[] = [];
   let hidden = 0;
+  const share: { value: number | undefined } = { value: undefined };
   const page = new LanesPage(theme, {
     title: "Plan",
     task: () => "add a cache",
@@ -112,8 +113,14 @@ function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined
     stopAll: () => undefined,
     rowsAvailable: () => rows,
     requestRender: () => undefined,
+    mergerShare: {
+      get: () => share.value,
+      set: (value) => {
+        share.value = value;
+      },
+    },
   });
-  return { page, said, actions, hidden: () => hidden };
+  return { page, said, actions, hidden: () => hidden, share };
 }
 
 test("lanes sit side by side, and what you type goes to the focused planner", () => {
@@ -499,4 +506,70 @@ test("with text typed, ←/→ edit the answer instead of moving between questio
   );
   page.handleInput(KEY.enter);
   assert.equal((answers[0] as Array<{ answer: string }>)[1]?.answer, "abc");
+});
+
+test("the divider above M drags to resize it, shift+↑↓ moves it a row, and a double-click resets it", () => {
+  const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
+  const b = fakeAgent("B", { plan: "# Plan B", revision: 1 } as never);
+  const pane: MergerPane = { agent: fakeAgent("M"), name: "Model M high", ready: true };
+  const { page, share } = lanesPage([a, b], () => pane, 45);
+  const layout = () => {
+    const lines = page.render(120);
+    const divider = lines.findIndex((line) => line.includes("M · main agent · Model M high"));
+    const bottom = lines.findIndex((line, index) => index > divider && line.startsWith("› "));
+    return { lines, divider, height: bottom - divider + 1 };
+  };
+  const mouse = (type: string, y: number, extra: Record<string, unknown> = {}) =>
+    page.handleMouse({
+      type,
+      button: "left",
+      x: 10,
+      y,
+      screenX: 10,
+      screenY: y,
+      width: 120,
+      height: 45,
+      shift: false,
+      alt: false,
+      ctrl: false,
+      ...extra,
+    } as never);
+
+  let { divider, height } = layout();
+  assert.equal(height, 6, "collapsed by default");
+  // Drag the divider up five rows: M grows by five, and stays that size after release.
+  assert.deepEqual(mouse("press", divider), { capture: true });
+  mouse("drag", divider - 5);
+  mouse("release", divider - 5);
+  ({ divider, height } = layout());
+  assert.equal(height, 11);
+  assert.ok(share.value !== undefined && share.value > 0.3 && share.value < 0.33, `share ${share.value}`);
+  // Focus no longer changes it: the size you chose holds.
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.tab);
+  assert.equal(layout().height, 11);
+  // shift+↑/↓ move it a row at a time.
+  page.handleInput("\x1b[1;2A");
+  assert.equal(layout().height, 12);
+  page.handleInput("\x1b[1;2B");
+  page.handleInput("\x1b[1;2B");
+  assert.equal(layout().height, 10);
+  // It cannot squeeze the lanes or M below their minimums.
+  mouse("press", layout().divider);
+  mouse("drag", 0);
+  mouse("release", 0);
+  const top = layout();
+  assert.equal(top.lines.length, 45);
+  assert.ok(
+    top.lines.some((line) => line.includes("A · Model A high")),
+    "the lanes keep their minimum",
+  );
+  mouse("press", top.divider);
+  mouse("drag", 44);
+  mouse("release", 44);
+  assert.equal(layout().height, 5, "M keeps its minimum");
+  // A double-click on the divider goes back to automatic sizing.
+  mouse("click", layout().divider, { clickCount: 2 });
+  assert.equal(share.value, undefined);
+  assert.equal(layout().height, 11, "automatic again: a third while M is focused");
 });

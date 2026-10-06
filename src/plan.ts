@@ -160,6 +160,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   let app: { close(): void; render(): void } | undefined;
   let releaseWorking: (() => void) | undefined;
   let hostCtx: ExtensionContext | undefined;
+  /** Where you dragged the divider above M (a share of the space), for the rest of this process. */
+  let mergerShare: number | undefined;
   /** Plan versions and question sets you have been told about (or saw on screen). */
   const notifiedPlans = new Map<string, number>();
   const notifiedQuestions = new WeakSet<object>();
@@ -535,6 +537,12 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           actions: () => laneActions(),
           onAction: (id, text) => onLaneAction(id, text),
           say: (agent, text) => void run?.agents.find((candidate) => candidate.id === agent.id)?.say(text, ctx),
+          mergerShare: {
+            get: () => mergerShare,
+            set: (share) => {
+              mergerShare = share;
+            },
+          },
           sayToMerger: (text) => {
             // Like typing in your main editor: a new turn, or a steer while your agent is working.
             pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "steer" });

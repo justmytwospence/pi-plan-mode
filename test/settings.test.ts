@@ -6,11 +6,13 @@ import { test } from "vitest";
 import { MAX_PENDING_IMPLEMENTATION_MODEL_IDENTIFIER_LENGTH } from "../src/implementation-models.js";
 import {
   awaitPlanModeSettingsWrites,
+  configuredAlwaysOffer,
   configuredImplementationModel,
   configuredImplementationPlanRetention,
   configuredImplementationThinkingLevel,
   configuredPlanExportPath,
   configuredPlanModeToggleShortcut,
+  DEFAULT_ALWAYS_OFFER,
   normalizePlanModeSettings,
   readPlanModeSettings,
   updatePlanModeSettings,
@@ -322,6 +324,12 @@ test("Plan-mode settings read alwaysOffer as a list of tool names", () => {
   assert.deepEqual(normalizePlanModeSettings({ alwaysOffer: [" web ", "jev", "web"] })?.alwaysOffer, ["web", "jev"]);
   assert.equal(normalizePlanModeSettings({ alwaysOffer: "web" }), undefined);
   assert.equal(normalizePlanModeSettings({ alwaysOffer: ["web", ""] }), undefined);
+  // Unset: web research, docs, and Jev judgments; set (even to []), yours replaces it.
+  assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit" }), DEFAULT_ALWAYS_OFFER);
+  assert.ok(DEFAULT_ALWAYS_OFFER.includes("web") && DEFAULT_ALWAYS_OFFER.includes("context7"));
+  assert.ok(DEFAULT_ALWAYS_OFFER.includes("jev"));
+  assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit", alwaysOffer: [] }), []);
+  assert.deepEqual(configuredAlwaysOffer({ thinkingLevel: "inherit", alwaysOffer: ["marimo"] }), ["marimo"]);
 });
 
 test("Plan-mode settings save and clear the merger model", async () => {

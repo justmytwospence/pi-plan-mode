@@ -22,7 +22,8 @@
   multi-line editor, instead of scrolling it on one line.
 - Jev is asked whether a tool would make the plan better informed rather than whether the plan
   depends on it, so web research and docs are no longer left off for most tasks; `alwaysOffer`
-  lists tools that are always preselected and that Jev never deselects. Subagent models start at
+  lists tools that are always preselected and that Jev never deselects (default: web research,
+  Context7, and Jev judgments). Subagent models start at
   `medium` effort instead of `high`.
 - The planning screen shows a live stats row per planner (and the merger) above the lanes again:
   state, turn time, tool calls, subagent tasks, tokens, cost, and current activity.

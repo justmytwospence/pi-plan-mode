@@ -131,7 +131,8 @@ export interface PlanModeSettings {
   /**
    * Tools planners are always offered: preselected, and Jev scores them but never deselects them.
    * Each entry names a toolset, command grant, MCP server, or Other tool by id or name (`web`,
-   * `jev`, `context7`), or one tool in a group (`web/web_search`, `context7/query-docs`).
+   * `jev`, `context7`), or one tool in a group (`web/web_search`, `context7/query-docs`). Unset
+   * means DEFAULT_ALWAYS_OFFER; `[]` leaves every tool to Jev.
    */
   alwaysOffer?: string[];
   /** Jev probability at or above which a tool is preselected (default 0.5). */
@@ -823,6 +824,16 @@ export function configuredImplementationModelMap(settings: PlanModeSettings): Re
 
 export function configuredImplementationContext(settings: PlanModeSettings): ImplementationContextChoice {
   return settings.defaultImplementationContext ?? "keep";
+}
+
+/**
+ * Research tools planners almost always want: web research, library docs (Context7), and Jev
+ * judgments. Names that match nothing in your setup are ignored.
+ */
+export const DEFAULT_ALWAYS_OFFER: readonly string[] = ["web", "web_search", "fetch_content", "context7", "jev"];
+
+export function configuredAlwaysOffer(settings: PlanModeSettings): readonly string[] {
+  return settings.alwaysOffer ?? DEFAULT_ALWAYS_OFFER;
 }
 
 export function configuredPlanners(settings: PlanModeSettings): ModelSpec[] {

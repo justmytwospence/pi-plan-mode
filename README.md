@@ -52,8 +52,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
    Subagents, your toolsets (e.g. web research), MCP servers and their tools, and **Other tools**
    from your other Pi extensions. Jev (TypeSafe) scores every tool for the task while you look,
    including Other tools, and preselects the ones that would make the plan better informed; your
-   own changes win. Tools in `alwaysOffer` (e.g. web research, docs) are always preselected and
-   marked `always`: Jev scores them but never turns them off. Enter asks
+   own changes win. Tools in `alwaysOffer` (by default web research, Context7 docs, and Jev
+   judgments) are always preselected and marked `always`: Jev scores them but never turns them
+   off. Enter asks
    `Start planning with N planners?`; Enter again starts.
 3. **Planning.** Above the lanes, one live row per planner (and the merger, once it starts) shows
    its state, how long its turn has run, its tool calls, subagent tasks, tokens, cost, and what it
@@ -154,14 +155,13 @@ edits the common ones; the rest are JSON-only:
   "commandGrants": {
     "jev": {
       "label": "Jev judgments",
-      "description": "Ask TypeSafe's Jev typed questions.",
+      "description": "Ask TypeSafe's Jev for fast typed judgments mid-research: rank or filter many files or search hits, classify items, check claims against a source, triage long output.",
       "commands": ["~/.local/bin/jev-ask"],
-      "skills": ["~/.agents/skills/typesafe-ai"],
+      "skills": ["~/.agents/skills/jev-judgments"],
       "enabled": false
     }
   },
   "jevToolSelection": true,
-  "alwaysOffer": ["web", "context7", "jev"],
   "jevThreshold": 0.5,
   "jevProvider": "typesafe",
   "jevModel": "jev-latest",
@@ -176,7 +176,9 @@ edits the common ones; the rest are JSON-only:
 - `scoutModelMap`: planner model → the model its subagents run on.
 - `alwaysOffer`: tools planners always get, whatever Jev scores: a toolset, command grant, MCP
   server, or Other tool by id or name (`web`, `jev`, `context7`), or one tool of a group
-  (`web/web_search`, `context7/query-docs`).
+  (`web/web_search`, `context7/query-docs`). Unset, it is
+  `["web", "web_search", "fetch_content", "context7", "jev"]` (names your setup lacks are
+  ignored); set it to replace that, or to `[]` to leave every tool to Jev.
 - `plannerToolsets`: named bundles of extensions and tools; `mcp: true` expands into your MCP
   servers. `commandGrants`: extra commands bash may run (one per call), with skills that explain them.
 - `planCompleteCommand` runs when you implement or export a plan, with Claude Code

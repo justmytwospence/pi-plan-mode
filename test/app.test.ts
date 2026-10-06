@@ -92,7 +92,7 @@ function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent 
   } as unknown as PlannerAgent;
 }
 
-function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined) {
+function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined, rows = 30) {
   const said: [string, string][] = [];
   const actions: string[] = [];
   let hidden = 0;
@@ -110,7 +110,7 @@ function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined
     say: (agent, text) => said.push([agent.id, text]),
     hide: () => hidden++,
     stopAll: () => undefined,
-    rowsAvailable: () => 30,
+    rowsAvailable: () => rows,
     requestRender: () => undefined,
   });
   return { page, said, actions, hidden: () => hidden };
@@ -199,22 +199,23 @@ test("with two planners, M's pane sits below the lanes: Tab reaches it, and it g
   const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
   const b = fakeAgent("B", { status: "working", working: true } as never);
   const pane: MergerPane = { agent: undefined, name: "Model M high", ready: false };
-  const { page, said } = lanesPage([a, b], () => pane);
+  const { page, said } = lanesPage([a, b], () => pane, 45);
   const mergerHeight = (lines: string[]) => {
     const top = lines.findIndex((line) => line.includes("M · merger · Model M high"));
     const bottom = lines.findIndex((line, index) => index > top && line.startsWith("› "));
     return bottom - top + 1;
   };
   let lines = page.render(120);
-  assert.equal(lines.length, 30);
+  assert.equal(lines.length, 45);
   assert.ok(lines.some((line) => line.includes("waiting for both plans")));
   assert.equal(mergerHeight(lines), 6, "collapsed while you are in a lane");
 
   page.handleInput(KEY.tab);
   page.handleInput(KEY.tab);
   lines = page.render(120);
-  assert.equal(lines.length, 30);
-  assert.ok(mergerHeight(lines) > 6, "grows while focused");
+  assert.equal(lines.length, 45);
+  // 45 rows: header 3, task 1, stats 2, footer 4 leave 35; M takes a third of them.
+  assert.equal(mergerHeight(lines), 11, "grows to the bottom third while focused");
   page.handleInput(KEY.enter);
   assert.deepEqual(said, [], "nothing to merge until both plans are in");
 

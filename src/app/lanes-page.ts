@@ -86,7 +86,7 @@ const MERGER_ID = "M";
 /** Rows of the merger pane while you are elsewhere: its title, a few lines, and its input. */
 const MERGER_COLLAPSED_ROWS = 6;
 /** Share of the space below the header the merger pane takes while you talk to it. */
-const MERGER_FOCUSED_SHARE = 0.55;
+const MERGER_FOCUSED_SHARE = 1 / 3;
 const MIN_LANE_ROWS = 6;
 /** The merger pane's smallest useful size: its title, a line, its rule, and its input. */
 const MERGER_MIN_ROWS = 5;

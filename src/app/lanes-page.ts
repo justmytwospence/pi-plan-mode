@@ -43,6 +43,7 @@ import {
   labeledRule,
   padLines,
   padVisible,
+  placeholderStyle,
   renderTable,
   rule,
   ScrollState,
@@ -199,7 +200,7 @@ export class LanesPage {
   private inputFor(id: string) {
     let input = this.inputs.get(id);
     if (!input) {
-      input = new Input({ prompt: "", placeholder: `talk to ${id}…` });
+      input = new Input({ prompt: "", placeholder: `talk to ${id}…`, placeholderStyle: placeholderStyle(this.theme) });
       this.inputs.set(id, input);
     }
     return input;
@@ -326,7 +327,11 @@ export class LanesPage {
       const action = actions[this.actionIndex];
       if (!action) return;
       if (action.input) {
-        const input = new Input({ prompt: "", placeholder: action.input.placeholder });
+        const input = new Input({
+          prompt: "",
+          placeholder: action.input.placeholder,
+          placeholderStyle: placeholderStyle(this.theme),
+        });
         input.setValue(action.input.initial);
         input.focused = true;
         this.modal = { kind: "input", action, input };

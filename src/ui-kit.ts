@@ -182,6 +182,11 @@ export function padVisible(text: string, width: number) {
   return visible >= width ? truncateToWidth(text, width) : text + " ".repeat(width - visible);
 }
 
+/** Placeholder text in an input: lighter than what you type, but still easy to read. */
+export function placeholderStyle(theme: Theme) {
+  return (text: string) => theme.fg("muted", text);
+}
+
 export function padLines(lines: readonly string[], height: number) {
   return lines.length >= height ? lines.slice(0, height) : [...lines, ...Array(height - lines.length).fill("")];
 }

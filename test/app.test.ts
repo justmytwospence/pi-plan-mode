@@ -144,6 +144,52 @@ test("the task under the header wraps onto a few lines, and shrinks on short scr
   assert.equal(lines.length, 16);
 });
 
+test("ctrl+n/ctrl+p walk a lane through its subagents, and Esc goes back to the planner", () => {
+  const a = fakeAgent("A");
+  const scout = (index: number, label: string, state: string) => ({
+    index,
+    label,
+    model: "haiku",
+    task: `look into ${label}`,
+    state,
+    startedAt: 0,
+  });
+  a.subagents.apply("call", {
+    kind: "plan-subagents-progress",
+    version: 1,
+    scouts: [scout(0, "auth", "done"), scout(1, "cache", "running")],
+    events: [
+      {
+        scout: 0,
+        record: {
+          type: "message_update",
+          assistantMessageEvent: { type: "text_delta", delta: "auth lives in src/auth.ts" },
+        },
+      },
+    ],
+  });
+  const { page, hidden } = lanesPage([a], undefined, 30);
+  const screen = () => page.render(100).join("\n");
+  assert.match(screen(), /\^n\/\^p subagents/u);
+  assert.doesNotMatch(screen(), /look into auth/u);
+  page.handleInput(ctrl("n"));
+  assert.match(screen(), /› ✓ A1 auth · haiku · done/u);
+  assert.match(screen(), /auth: look into auth/u, "the subagent's task heads its trace");
+  assert.match(screen(), /A1 trace/u);
+  page.handleInput(ctrl("n"));
+  assert.match(screen(), /› .* A2 cache/u);
+  page.handleInput(ctrl("n"));
+  assert.doesNotMatch(screen(), /› .* A\d /u, "past the last subagent, back to the planner");
+  page.handleInput(ctrl("p"));
+  assert.match(screen(), /› .* A2 cache/u);
+  page.handleInput(KEY.escape);
+  assert.doesNotMatch(screen(), /A2 trace/u, "Esc leaves the subagent");
+  assert.doesNotMatch(screen(), /Leave planning\?/u, "and does not offer to leave yet");
+  page.handleInput(KEY.escape);
+  assert.match(screen(), /Leave planning\?/u);
+  assert.equal(hidden(), 0);
+});
+
 test("lanes sit side by side, and what you type goes to the focused planner", () => {
   const a = fakeAgent("A", { plan: "# Plan A\n\nDo it.", revision: 1 } as never);
   const b = fakeAgent("B", { status: "working", working: true } as never);

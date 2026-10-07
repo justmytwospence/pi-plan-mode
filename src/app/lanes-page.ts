@@ -3,7 +3,8 @@
 // talk to it; you can talk to both at once. With two planners, a full-width pane below the lanes
 // talks to M, the merger: a third model that sees both plans and helps you merge them. The focused
 // pane gets the room: M grows while you talk to it and shrinks to a few lines otherwise. Below
-// everything, the actions for the plans.
+// everything, the actions for the plans. ctrl+n/ctrl+p walk a lane through its planner's subagents,
+// showing each one's task and trace in place of the planner's.
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   Input,
@@ -15,6 +16,7 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import type { PlannerAgent } from "../planner/agent.js";
+import type { SubagentView } from "../subagent-progress.js";
 
 /** What a lane shows of an agent: a planner, or M, your main agent seen through the same lens. */
 export type LaneAgent = Pick<
@@ -130,6 +132,8 @@ export class LanesPage {
   private modal: Modal | undefined;
   private readonly inputs = new Map<string, Input>();
   private readonly showTrace = new Set<string>();
+  /** The subagent each lane shows instead of its planner, by agent id. */
+  private readonly subFocus = new Map<string, string>();
   private readonly questions = new Map<string, QuestionCursor>();
   private readonly scroll = new ScrollState();
   private readonly renderer: TraceRenderer;
@@ -209,7 +213,26 @@ export class LanesPage {
   }
 
   private viewKey(agent: LaneAgent) {
+    const sub = this.selectedSub(agent);
+    if (sub) return `${agent.id}:sub:${sub.id}`;
     return `${agent.id}:${this.showsPlan(agent) ? "plan" : "trace"}`;
+  }
+
+  /** The subagent a lane shows, if you moved to one. */
+  private selectedSub(agent: LaneAgent): SubagentView | undefined {
+    const id = this.subFocus.get(agent.id);
+    return id === undefined ? undefined : agent.subagents.agents.find((sub) => sub.id === id);
+  }
+
+  /** ctrl+n/ctrl+p: the next or previous subagent, and past either end back to the planner. */
+  private stepSub(agent: LaneAgent, step: 1 | -1) {
+    const subs = agent.subagents.agents;
+    if (subs.length === 0) return;
+    const current = this.selectedSub(agent);
+    const index = current ? subs.indexOf(current) : step === 1 ? -1 : subs.length;
+    const next = subs[index + step];
+    if (next) this.subFocus.set(agent.id, next.id);
+    else this.subFocus.delete(agent.id);
   }
 
   private showsPlan(agent: LaneAgent) {
@@ -232,8 +255,17 @@ export class LanesPage {
       } else modal.input.handleInput(data);
       return this.options.requestRender();
     }
+    const focused = targets[this.focus];
+    const laneAgent =
+      focused?.kind === "lane" ? focused.agent : focused?.kind === "merger" ? focused.pane.agent : undefined;
+    if (laneAgent && is("ctrl+n", "ctrl+p")) {
+      this.stepSub(laneAgent, is("ctrl+n") ? 1 : -1);
+      return this.options.requestRender();
+    }
     if (is("escape")) {
-      this.modal = { kind: "escape", choice: 0 };
+      // Out of a subagent first, back to its planner; then the leave menu.
+      if (laneAgent && this.selectedSub(laneAgent)) this.subFocus.delete(laneAgent.id);
+      else this.modal = { kind: "escape", choice: 0 };
       return this.options.requestRender();
     }
     if (this.pane() && is("shift+up", "shift+down")) {
@@ -260,6 +292,7 @@ export class LanesPage {
     if (is("ctrl+u")) this.scrollLane(agent, -half);
     else if (is("ctrl+d")) this.scrollLane(agent, half);
     else if (is("ctrl+o")) {
+      this.subFocus.delete(agent.id);
       if (agent.plan !== undefined) {
         if (this.showTrace.has(agent.id)) this.showTrace.delete(agent.id);
         else this.showTrace.add(agent.id);
@@ -634,13 +667,8 @@ export class LanesPage {
       this.status(agent),
       focused ? "borderAccent" : "borderMuted",
     );
-    // A pane too short for them (the merger, collapsed) leaves out the running subagents.
-    const subagents = (rows < 10 ? [] : agent.subagents.agents)
-      .filter((sub) => sub.stats.state === "running" || sub.stats.state === "starting")
-      .slice(0, MAX_SUBAGENT_LINES)
-      .map((sub) =>
-        truncateToWidth(theme.fg("dim", `  ↳ ${sub.id} ${sub.label} · ${sub.stats.lastActivity ?? "starting"}`), width),
-      );
+    const selected = this.selectedSub(agent);
+    const subagents = this.subagentLines(agent, selected, width, rows);
     const question = this.questionLines(agent, width);
     const input = this.input(agent);
     input.focused = focused && this.modal === undefined;
@@ -650,20 +678,24 @@ export class LanesPage {
     const bodyHeight = Math.max(2, rows - 1 - subagents.length - question.length - 2);
     this.laneHeights.set(agent.id, bodyHeight);
     const key = this.viewKey(agent);
-    const all = this.showsPlan(agent)
-      ? this.renderer.planLines(`${agent.id}:${agent.revision}`, agent.plan ?? "", width)
-      : this.renderer.lines(agent.trace, width);
+    const all = selected
+      ? [
+          ...wrap(`${selected.label}: ${selected.task}`, width).map((line) => theme.fg("muted", line)),
+          "",
+          ...this.renderer.lines(selected.trace, width),
+        ]
+      : this.showsPlan(agent)
+        ? this.renderer.planLines(`${agent.id}:${agent.revision}`, agent.plan ?? "", width)
+        : this.renderer.lines(agent.trace, width);
     this.lineCounts.set(key, all.length);
     const view = this.scroll.window(key, all, bodyHeight);
     const empty = agent.status === "starting" ? `${spinner()} starting…` : "(nothing yet)";
     const body = all.length === 0 ? [theme.fg("dim", empty)] : view.lines;
+    const viewLabel = selected ? `${selected.id} trace` : this.showsPlan(agent) ? "plan" : traceLabel;
     const position =
       view.below > 0 || view.start > 0
-        ? theme.fg(
-            "dim",
-            `${this.showsPlan(agent) ? "plan" : traceLabel} ${view.start + 1}–${view.start + view.lines.length}/${all.length}`,
-          )
-        : theme.fg("dim", this.showsPlan(agent) ? "plan" : traceLabel);
+        ? theme.fg("dim", `${viewLabel} ${view.start + 1}–${view.start + view.lines.length}/${all.length}`)
+        : theme.fg("dim", viewLabel);
     return [
       head,
       ...subagents,
@@ -672,6 +704,35 @@ export class LanesPage {
       labeledRule(theme, width, position, "", focused ? "borderAccent" : "borderMuted"),
       truncateToWidth(inputLine, width),
     ];
+  }
+
+  /**
+   * The subagent rows under a lane's title: while you look at one, a window of all of them around it
+   * (the one you are on highlighted); otherwise the ones still running. A pane too short for them
+   * (the merger, collapsed) leaves the running ones out.
+   */
+  private subagentLines(agent: LaneAgent, selected: SubagentView | undefined, width: number, rows: number) {
+    const theme = this.theme;
+    const subs = agent.subagents.agents;
+    const line = (sub: SubagentView, current: boolean) => {
+      const running = sub.stats.state === "running" || sub.stats.state === "starting";
+      const state = running ? (sub.stats.lastActivity ?? "starting") : sub.stats.state;
+      const text = truncateToWidth(
+        `${current ? theme.fg("accent", "› ") : "  "}${subIcon(theme, sub)} ${sub.id} ${sub.label} · ${sub.model} · ${state}`,
+        width,
+      );
+      return current ? selectedRow(theme, width, text) : theme.fg("dim", text);
+    };
+    if (selected) {
+      const index = subs.indexOf(selected);
+      const start = Math.max(0, Math.min(index - 1, subs.length - MAX_SUBAGENT_LINES));
+      return subs.slice(start, start + MAX_SUBAGENT_LINES).map((sub) => line(sub, sub === selected));
+    }
+    if (rows < 10) return [];
+    return subs
+      .filter((sub) => sub.stats.state === "running" || sub.stats.state === "starting")
+      .slice(0, MAX_SUBAGENT_LINES)
+      .map((sub) => line(sub, false));
   }
 
   /**
@@ -898,6 +959,10 @@ export class LanesPage {
     const merger = target.kind === "merger";
     const agent = target.kind === "lane" ? target.agent : target.pane.agent;
     if (!agent) return "";
+    const sub = this.selectedSub(agent);
+    if (sub) {
+      return `Subagent ${sub.id} of ${agent.id}, on ${sub.model}. ^n/^p other subagents · esc back to ${agent.id} · typing talks to ${agent.id}.`;
+    }
     if (agent.pending) {
       const several = agent.pending.questions.length > 1;
       return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.${several ? " ←→ (with nothing typed) move between its questions to change an answer." : ""}`;
@@ -936,13 +1001,31 @@ export class LanesPage {
           ? [{ key: "↑↓", label: "scroll" }]
           : []),
       ...(agent ? [{ key: "^u/^d", label: "page" }] : []),
+      ...(agent && agent.subagents.agents.length > 0
+        ? [{ key: "^n/^p", label: this.selectedSub(agent) ? "subagent" : "subagents" }]
+        : []),
       ...(agent?.plan !== undefined
         ? [{ key: "^o", label: this.showsPlan(agent) ? (merger ? "chat" : "trace") : "plan" }]
         : []),
       ...(merger && this.options.mergerShare ? [{ key: "⇧↑↓", label: "resize" }] : []),
       { key: "tab", label: panes > 1 ? "next pane / actions" : "actions" },
-      { key: "esc", label: "leave" },
+      { key: "esc", label: agent && this.selectedSub(agent) ? `back to ${agent.id}` : "leave" },
     ];
+  }
+}
+
+function subIcon(theme: Theme, sub: SubagentView) {
+  switch (sub.stats.state) {
+    case "starting":
+    case "running":
+      return theme.fg("accent", spinner());
+    case "done":
+      return theme.fg("success", "✓");
+    case "failed":
+    case "timeout":
+      return theme.fg("error", "✗");
+    default:
+      return theme.fg("dim", "–");
   }
 }
 

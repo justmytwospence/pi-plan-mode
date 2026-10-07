@@ -92,14 +92,14 @@ function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent 
   } as unknown as PlannerAgent;
 }
 
-function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined, rows = 30) {
+function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined, rows = 30, task = "add a cache") {
   const said: [string, string][] = [];
   const actions: string[] = [];
   let hidden = 0;
   const share: { value: number | undefined } = { value: undefined };
   const page = new LanesPage(theme, {
     title: "Plan",
-    task: () => "add a cache",
+    task: () => task,
     agents: () => agents,
     ...(merger ? { merger } : {}),
     sayToMerger: (text) => said.push(["M", text]),
@@ -122,6 +122,27 @@ function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined
   });
   return { page, said, actions, hidden: () => hidden, share };
 }
+
+test("the task under the header wraps onto a few lines, and shrinks on short screens", () => {
+  const task = Array.from({ length: 10 }, (_unused, index) => `step ${index + 1} ${"word ".repeat(20)}`).join("\n");
+  const taskRows = (lines: string[]) => {
+    const start = lines.findIndex((line) => line.startsWith(" Task"));
+    let end = start + 1;
+    while (lines[end]?.startsWith("       ")) end += 1;
+    return lines.slice(start, end);
+  };
+  let lines = lanesPage([fakeAgent("A")], undefined, 40, task).page.render(100);
+  let shown = taskRows(lines);
+  assert.equal(shown.length, 6, "up to six lines");
+  assert.match(shown[0] ?? "", /Task {2}step 1 word/u);
+  assert.match(shown.at(-1) ?? "", /… \d+ more lines$/u);
+  lines = lanesPage([fakeAgent("A")], undefined, 40, "add a cache").page.render(100);
+  assert.equal(taskRows(lines).length, 1, "a short task takes one line");
+  lines = lanesPage([fakeAgent("A")], undefined, 16, task).page.render(100);
+  shown = taskRows(lines);
+  assert.ok(shown.length <= 2, "a short screen keeps the lanes");
+  assert.equal(lines.length, 16);
+});
 
 test("lanes sit side by side, and what you type goes to the focused planner", () => {
   const a = fakeAgent("A", { plan: "# Plan A\n\nDo it.", revision: 1 } as never);

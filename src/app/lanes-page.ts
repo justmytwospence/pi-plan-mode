@@ -112,6 +112,8 @@ type Modal = { kind: "escape"; choice: number } | { kind: "input"; action: LaneA
 type Target = { kind: "lane"; agent: LaneAgent } | { kind: "merger"; pane: MergerPane } | { kind: "actions" };
 
 const MAX_SUBAGENT_LINES = 3;
+/** The most lines the task gets under the header (fewer on short screens). */
+const MAX_TASK_LINES = 6;
 const MERGER_ID = "M";
 /** Rows of the merger pane while you are elsewhere: its title, a few lines, and its input. */
 const MERGER_COLLAPSED_ROWS = 6;
@@ -485,16 +487,17 @@ export class LanesPage {
     const pane = this.pane();
     for (const agent of this.everyone()) this.syncRevision(agent);
     const header = pageHeader(theme, width, this.options.title, this.context(agents, pane), this.step());
-    const task = this.options.task().split("\n")[0] ?? "";
-    const taskLine = task ? truncateToWidth(` ${theme.fg("dim", "Task ")} ${task}`, width) : undefined;
     const footer = this.footer(width, target);
-    // Everything fits the screen and the actions bar always shows: when room runs short, the
-    // stats rows go first, then the merger pane (unless you are in it), and the lanes are cut last.
+    // Everything fits the screen and the actions bar always shows: when room runs short, the task
+    // shrinks to one line, then the stats rows go, then the merger pane (unless you are in it), and
+    // the lanes are cut last.
     const mergerFocused = target.kind === "merger";
-    const base = [...header, ...(taskLine ? [taskLine] : [])];
-    const room = height - base.length - footer.length;
     const stats = this.statsLines(width, agents, pane);
     const mergerMin = pane ? MERGER_MIN_ROWS : 0;
+    const fixed = header.length + footer.length + stats.length + MIN_LANE_ROWS + mergerMin;
+    const taskMax = Math.max(1, Math.min(MAX_TASK_LINES, Math.floor(height / 6), height - fixed));
+    const base = [...header, ...this.taskLines(width, taskMax)];
+    const room = height - base.length - footer.length;
     const top = room - stats.length >= MIN_LANE_ROWS + mergerMin ? [...base, ...stats] : base;
     const available = Math.max(1, height - top.length - footer.length);
     const showMerger = pane !== undefined && (mergerFocused || available >= MIN_LANE_ROWS + MERGER_MIN_ROWS);
@@ -522,6 +525,25 @@ export class LanesPage {
     // The footer (actions bar and keys) is never the part that gets cut.
     const above = [...top, ...middle].slice(0, Math.max(0, height - footer.length));
     return [...above, ...footer].map((line) => truncateToWidth(line, width));
+  }
+
+  /** The task under the header: wrapped onto up to `max` lines, cut with a count past that. */
+  private taskLines(width: number, max: number): string[] {
+    const theme = this.theme;
+    const label = ` ${theme.fg("dim", "Task")}  `;
+    const indent = " ".repeat(visibleWidth(label));
+    const lines = wrap(this.options.task().trim(), Math.max(10, width - indent.length)).filter((line) => line.trim());
+    if (lines.length === 0) return [];
+    let shown = lines.slice(0, max);
+    if (lines.length > max) {
+      const hidden = lines.length - max;
+      const more = theme.fg("dim", ` … ${hidden} more line${hidden === 1 ? "" : "s"}`);
+      shown = [
+        ...lines.slice(0, max - 1),
+        `${truncateToWidth(lines[max - 1] ?? "", width - indent.length - visibleWidth(more) - 1, "")}${more}`,
+      ];
+    }
+    return shown.map((line, index) => truncateToWidth(`${index === 0 ? label : indent}${line}`, width));
   }
 
   private context(agents: readonly LaneAgent[], pane: MergerPane | undefined) {

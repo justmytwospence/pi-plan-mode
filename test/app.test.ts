@@ -517,6 +517,51 @@ test("the planning screen fits short terminals and always shows the actions bar"
   assert.ok(roomy.some((line) => line.includes("M · merger")));
 });
 
+test("a planner's question and its options wrap instead of being cut", () => {
+  const long =
+    "Should the cache sit in front of the database for every read, or only for the hot paths we measured last week?";
+  const a = fakeAgent("A", {
+    status: "asking",
+    working: true,
+    pending: {
+      questions: [
+        {
+          id: "where",
+          header: "Cache",
+          question: long,
+          options: [
+            {
+              label: "Every read",
+              description: "Simplest to reason about, but it doubles memory use on the read replicas.",
+            },
+            {
+              label: "Hot paths only",
+              description: "Less memory; each new hot path needs its own wiring and invalidation.",
+            },
+          ],
+        },
+      ],
+      resolve: () => undefined,
+    },
+  } as never);
+  const lines = lanesPage([a, fakeAgent("B")], undefined, 40).page.render(100);
+  const text = lines.join(" ").replace(/[│\s]+/gu, " ");
+  assert.match(text, /last week\?/u, "the whole question shows");
+  assert.match(text, /❯ 1\. Every read/u);
+  assert.match(text, /on the read replicas\./u, "descriptions wrap under their option");
+  assert.match(text, /needs its own wiring and invalidation\./u);
+  const question = lines.slice(lines.findIndex((line) => line.includes("? Cache")));
+  const cut = question.filter((line) => /\w…/u.test(line) && !line.includes("talk to") && !line.includes("Implement"));
+  assert.deepEqual(cut, [], "nothing is cut");
+
+  // A short lane keeps only the highlighted option's description, and still its input line.
+  const short = lanesPage([a, fakeAgent("B")], undefined, 24).page.render(100).join("\n");
+  assert.match(short, /❯ 1\. Every read/u);
+  assert.match(short, /Simplest to reason about/u);
+  assert.doesNotMatch(short, /Less memory/u);
+  assert.match(short, /alk to A…/u, "the input line stays");
+});
+
 test("in a planner's questions, ←/→ (and backspace) move between them to change an earlier answer", () => {
   const answers: unknown[] = [];
   const question = (id: string, header: string, labels: string[]) => ({
@@ -552,11 +597,11 @@ test("in a planner's questions, ←/→ (and backspace) move between them to cha
   // Back to the database: the typed answer is a row of its own, selected, and the line is empty.
   page.handleInput(KEY.left);
   assert.match(shown(), /\? Database \(2\/3\)/u);
-  assert.match(shown(), /› 4\. ✎ your answer: DuckDB/u);
+  assert.match(shown(), /❯ 4\. ✎ your answer: DuckDB/u);
   // Backspace on the empty line goes back again; Node is still selected there.
   page.handleInput("\x7f");
   assert.match(shown(), /\? Language \(1\/3\)/u);
-  assert.match(shown(), /› 2\. Node/u);
+  assert.match(shown(), /❯ 2\. Node ✓/u);
   page.handleInput(KEY.up); // change it to Python
   page.handleInput(KEY.enter);
   // Enter moves on; keep DuckDB as it was, then answer the last one.

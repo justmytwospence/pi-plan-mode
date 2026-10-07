@@ -669,7 +669,8 @@ export class LanesPage {
     );
     const selected = this.selectedSub(agent);
     const subagents = this.subagentLines(agent, selected, width, rows);
-    const question = this.questionLines(agent, width);
+    // The question gets the room it needs, short of the title, two lines of trace, and the input.
+    const question = this.questionLines(agent, width, Math.max(1, rows - 1 - subagents.length - 2 - 2));
     const input = this.input(agent);
     input.focused = focused && this.modal === undefined;
     const inputLine = focused
@@ -854,7 +855,13 @@ export class LanesPage {
     return parts.join(theme.fg("dim", " · "));
   }
 
-  private questionLines(agent: LaneAgent, width: number): string[] {
+  /**
+   * A planner's current question, laid out like the ask_user_question dialog: the question in bold,
+   * then numbered options with their descriptions beneath, every line wrapped (never cut). When the
+   * lane is too short for all of it, only the highlighted option keeps its description, and past
+   * that the block is cut to `max` lines.
+   */
+  private questionLines(agent: LaneAgent, width: number, max: number): string[] {
     const pending = agent.pending;
     if (!pending) return [];
     const theme = this.theme;
@@ -862,7 +869,7 @@ export class LanesPage {
     const question = pending.questions[cursor.question];
     if (!question) return [];
     const count = pending.questions.length > 1 ? ` (${cursor.question + 1}/${pending.questions.length})` : "";
-    // One dot per question: answered, current, still to go.
+    // One mark per question: answered, current, still to go.
     const progress =
       pending.questions.length > 1
         ? pending.questions
@@ -875,23 +882,32 @@ export class LanesPage {
             )
             .join("")
         : "";
-    const lines = [
-      labeledRule(theme, width, theme.fg("warning", theme.bold(`? ${question.header}${count}`)), progress, "warning"),
-      ...wrap(question.question, width).map((line) => theme.bold(line)),
-    ];
     const earlier = cursor.answers[cursor.question];
-    const options = [
-      ...question.options.map((option) => option.label),
-      "Skip (let the planner decide)",
-      ...(earlier?.wasCustom ? [`✎ your answer: ${earlier.answer}`] : []),
+    const rows = [
+      ...question.options.map((option) => ({ label: option.label, description: option.description })),
+      { label: "Skip (let the planner decide)", description: undefined },
+      ...(earlier?.wasCustom ? [{ label: `✎ your answer: ${earlier.answer}`, description: undefined }] : []),
     ];
-    options.forEach((label, index) => {
-      const description = question.options[index]?.description;
-      const text = `${index + 1}. ${label}${description ? theme.fg("dim", ` — ${description}`) : ""}`;
-      const line = truncateToWidth(index === cursor.option ? `${theme.fg("accent", "›")} ${text}` : `  ${text}`, width);
-      lines.push(index === cursor.option ? selectedRow(theme, width, line) : line);
-    });
-    return lines;
+    const build = (descriptions: "all" | "focused") => {
+      const lines = [
+        labeledRule(theme, width, theme.fg("warning", theme.bold(`? ${question.header}${count}`)), progress, "warning"),
+        ...hang(" ", theme.bold(question.question), width),
+      ];
+      rows.forEach((row, index) => {
+        const focused = index === cursor.option;
+        const chosen = !earlier?.wasCustom && earlier?.optionIndex === index + 1;
+        const prefix = ` ${focused ? theme.fg("accent", "❯") : " "} ${theme.fg(focused ? "accent" : "muted", `${index + 1}.`)} `;
+        const label = theme.fg(focused ? "accent" : "text", focused ? theme.bold(row.label) : row.label);
+        lines.push(...hang(prefix, `${label}${chosen ? theme.fg("success", " ✓") : ""}`, width));
+        if (row.description && (descriptions === "all" || focused)) {
+          lines.push(...hang(" ".repeat(visibleWidth(prefix)), theme.fg("muted", row.description), width));
+        }
+      });
+      return lines;
+    };
+    const full = build("all");
+    if (full.length <= max) return full;
+    return build("focused").slice(0, Math.max(1, max));
   }
 
   private footer(width: number, target: Target): string[] {
@@ -1012,6 +1028,13 @@ export class LanesPage {
       { key: "esc", label: agent && this.selectedSub(agent) ? `back to ${agent.id}` : "leave" },
     ];
   }
+}
+
+/** `text` wrapped after `prefix`, continuation lines indented to line up under it. */
+function hang(prefix: string, text: string, width: number): string[] {
+  const indent = visibleWidth(prefix);
+  if (indent >= width - 4) return wrap(prefix + text, width);
+  return wrap(text, width - indent).map((line, index) => (index === 0 ? prefix : " ".repeat(indent)) + line);
 }
 
 function subIcon(theme: Theme, sub: SubagentView) {

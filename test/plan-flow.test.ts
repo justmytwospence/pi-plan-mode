@@ -96,18 +96,19 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.ok(app);
   let screen = app.render().join("\n");
   assert.match(screen, /● Settings/u);
-  assert.match(screen, /Task\s*\n {5}│ add a cache/u, "the task is a block under its label");
+  assert.match(screen, /Task\s*\n {3}─+\n {4}add a cache/u, "the task is a box under its label");
 
-  // Enter edits the task in place in a multi-line editor; Enter saves it.
-  app.handleInput("\r");
+  // Tab moves into the task's multi-line editor and back out.
+  app.handleInput("\t");
   screen = app.render().join("\n");
   assert.match(screen, /shift\+⏎ new line/u);
+  app.handleInput("\u001b[F");
   for (const char of " and its tests") app.handleInput(char);
-  app.handleInput("\r");
+  app.handleInput("\t");
   screen = app.render().join("\n");
-  assert.match(screen, /│ add a cache and its tests/u);
+  assert.match(screen, /\n {4}add a cache and its tests/u);
   assert.doesNotMatch(screen, /shift\+⏎ new line/u, "editing ended");
-  assert.match(screen, /Planner A\s+Claude Sonnet 5\.5/u);
+  assert.match(screen, /Planner A\s+‹ Claude Sonnet 5\.5 ›/u, "the rows have focus again");
   assert.doesNotMatch(screen, /default/u, "efforts are real levels");
 
   // Subagents get their own effort row, under theirs, once they have a model.
@@ -117,7 +118,7 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
     return { subagents: lines[index] ?? "", next: lines[index + 1] ?? "" };
   };
   assert.match(underSubagents().next, /Planner B/u, "no subagent effort without subagents");
-  for (let row = 0; row < 3; row += 1) app.handleInput("\u001b[B");
+  for (let row = 0; row < 2; row += 1) app.handleInput("\u001b[B");
   app.handleInput("\u001b[C");
   let rows = underSubagents();
   assert.match(rows.subagents, /subagents\s+‹ Claude Sonnet 5\.5 ›\s*$/u, "the model row shows only the model");
@@ -128,9 +129,10 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.match(rows.next, /effort\s+‹ low ›/u);
   assert.match(rows.subagents, /Claude Sonnet 5\.5/u, "the effort changes without the model");
   app.handleInput("\u001b[C");
-  for (let row = 0; row < 4; row += 1) app.handleInput("\u001b[A");
+  for (let row = 0; row < 3; row += 1) app.handleInput("\u001b[A");
 
-  app.handleInput("\t");
+  // Enter on a row goes on (Tab would move to the task).
+  app.handleInput("\r");
   screen = app.render().join("\n");
   assert.match(screen, /● Tools/u);
   assert.doesNotMatch(screen, /▶ Start/u, "no start row in the tools");

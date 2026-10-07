@@ -317,9 +317,11 @@ test("the top of the planning screen shows each planner's live stats, and M's on
   assert.equal(lines.length, 30);
 });
 
-test("a multiline text row shows its whole text as a block in the free space, and edits in a text area", () => {
+test("a multiline text row is a box above the rows that Tab moves in and out of", () => {
   let task = Array.from({ length: 12 }, (_unused, index) => `step ${index + 1} ${"word ".repeat(12)}`).join("\n");
-  let rowsAvailable = 40;
+  let rowsAvailable = 60;
+  let next = 0;
+  let back = 0;
   const area: TextArea & { text: string } = {
     focused: false,
     text: "",
@@ -331,10 +333,12 @@ test("a multiline text row shows its whole text as a block in the free space, an
     },
     handleInput(data) {
       if (data === "\r") this.onSubmit?.(this.text);
+      else if (data === "\x1b") this.onEscape?.();
       else this.text += data;
     },
     render: (width) => ["─".repeat(width), `EDITOR ${area.text.slice(-12)}`, "─".repeat(width)],
   };
+  let level = 0;
   const page = new OptionsPage(theme, {
     title: "Plan",
     step: "Settings",
@@ -346,38 +350,63 @@ test("a multiline text row shows its whole text as a block in the free space, an
         text: { get: () => task, set: (value) => (task = value), placeholder: "what to plan", multiline: true },
         description: "task",
       },
-      { id: "a", label: "Planner A", section: "Planners", value: () => "x", cycle: () => undefined, description: "a" },
+      {
+        id: "a",
+        label: "Planner A",
+        section: "Planners",
+        value: () => String(level),
+        cycle: () => level++,
+        description: "a",
+      },
     ],
-    next: { label: "next", run: () => undefined },
-    back: { label: "close", run: () => undefined },
+    next: { label: "next", run: () => next++ },
+    back: { label: "close", run: () => back++ },
     rowsAvailable: () => rowsAvailable,
     requestRender: () => undefined,
     createTextArea: () => area,
   });
   let lines = page.render(80);
-  assert.equal(lines.length, 40);
-  const blockLines = () => lines.filter((line) => line.startsWith("     │ "));
-  assert.ok(blockLines().length >= 12, "every line of the task shows, wrapped");
+  assert.equal(lines.length, 60);
+  const boxLines = () => lines.filter((line) => line.startsWith("    ") && !line.includes("──"));
+  assert.ok(boxLines().length >= 12, "every line of the task shows, wrapped");
   assert.ok(lines.some((line) => line.includes("step 12")));
   assert.ok(lines.some((line) => line.includes("Planner A")));
 
-  rowsAvailable = 18;
+  rowsAvailable = 22;
   lines = page.render(80);
-  assert.equal(lines.length, 18);
-  assert.ok(blockLines().at(-1)?.includes("more lines (⏎ to edit)"), "a long task is cut with a count");
+  assert.equal(lines.length, 22);
+  assert.ok(
+    lines.some((line) => line.includes("more lines (tab to edit)")),
+    "a long task is cut with a count",
+  );
   assert.ok(
     lines.some((line) => line.includes("Planner A")),
     "the other rows still fit",
   );
 
-  page.handleInput(KEY.enter);
+  // The rows start with focus; ←/→ change the highlighted row, not the task.
+  page.handleInput(KEY.right);
+  assert.equal(level, 1);
+  page.handleInput(KEY.tab);
   assert.equal(page.typing, true);
   assert.equal(area.focused, true);
   page.handleInput("!");
-  assert.ok(page.render(80).some((line) => line.includes("EDITOR")));
-  page.handleInput(KEY.enter);
+  assert.match(task, /word !$/u, "the task follows the editor as you type");
+  lines = page.render(80);
+  assert.ok(lines.some((line) => line.includes("EDITOR")));
+  const top = lines.findIndex((line) => line.includes("Task"));
+  const planner = lines.findIndex((line) => line.includes("Planner A"));
+  assert.ok(planner - top > 5, "the box keeps its height while you edit");
+  page.handleInput(KEY.tab);
   assert.equal(page.typing, false);
-  assert.match(task, /word !$/u);
+  assert.equal(area.focused, false);
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.escape);
+  assert.equal(page.typing, false, "Escape the editor does not want leaves the box");
+  assert.equal(back, 0);
+  page.handleInput(KEY.tab);
+  page.handleInput(KEY.enter);
+  assert.equal(next, 1, "Enter in the box goes on");
 });
 
 test("the planning screen fits short terminals and always shows the actions bar", () => {

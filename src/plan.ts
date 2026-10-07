@@ -7,12 +7,13 @@ import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  CustomEditor,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
   getAgentDir,
 } from "@earendil-works/pi-coding-agent";
-import { type Component, Editor, type TUI } from "@earendil-works/pi-tui";
+import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
 import { type LaneAction, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
@@ -487,7 +488,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   // --- The app -----------------------------------------------------------------------------------
 
   async function openApp(ctx: ExtensionCommandContext, task: string) {
-    await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
+    await ctx.ui.custom<void>((tui, theme, keybindings, done) => {
       const rows = () => Math.max(12, (tui as unknown as { terminal?: { rows?: number } }).terminal?.rows ?? 40);
       const render = () => tui.requestRender();
       let page: Component & { typing?: boolean } = undefined as never;
@@ -504,22 +505,31 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
       app = { close, render };
       updateStatus();
 
-      /** The task editor: pi's multi-line editor, wrapping and scrolling inside its borders. */
-      const createTextArea = (): TextArea =>
-        new Editor(
-          tui,
-          {
-            borderColor: (text) => theme.fg("borderAccent", text),
-            selectList: {
-              selectedPrefix: (text) => theme.fg("accent", text),
-              selectedText: (text) => theme.fg("accent", text),
-              description: (text) => theme.fg("muted", text),
-              scrollInfo: (text) => theme.fg("dim", text),
-              noMatch: (text) => theme.fg("dim", text),
-            },
+      /**
+       * The task editor: the one your main editor uses (an extension's, such as pi-vim's), else pi's
+       * own. It wraps and scrolls inside its borders.
+       */
+      const createTextArea = (): TextArea => {
+        const editorTheme: EditorTheme = {
+          borderColor: (text) => theme.fg("borderAccent", text),
+          selectList: {
+            selectedPrefix: (text) => theme.fg("accent", text),
+            selectedText: (text) => theme.fg("accent", text),
+            description: (text) => theme.fg("muted", text),
+            scrollInfo: (text) => theme.fg("dim", text),
+            noMatch: (text) => theme.fg("dim", text),
           },
-          { paddingX: 1 },
-        );
+        };
+        const factory = ctx.ui.getEditorComponent?.();
+        const editor = factory
+          ? factory(tui, editorTheme, keybindings)
+          : new CustomEditor(tui, editorTheme, keybindings, { paddingX: 1 });
+        editor.setPaddingX?.(1);
+        // pi-vim's :q would quit pi; here it leaves the task.
+        const vim = editor as { setQuitFn?(fn: () => void): void; onEscape?: () => void };
+        vim.setQuitFn?.(() => vim.onEscape?.());
+        return editor as unknown as TextArea;
+      };
 
       const show = (next: Component) => {
         page = next;
@@ -803,11 +813,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             text: {
               get: () => draft.task,
               set: (value) => (draft.task = value),
-              placeholder: "(from the conversation) ⏎ to write what to plan",
+              placeholder: "(from the conversation) tab to write what to plan",
               multiline: true,
             },
             description:
-              "What to plan. ⏎ edits it here (shift+⏎ for a new line). Leave it empty to plan what the conversation so far is about.",
+              "What to plan. Tab moves in and out of it; shift+⏎ starts a new line. Leave it empty to plan what the conversation so far is about.",
             hidden: () => adding,
           },
           ...plannerRows(0, adding),

@@ -62,6 +62,8 @@ export interface LaneAction {
   description: string;
   /** Actions that ask for a line of text first (e.g. an export path). */
   input?: { placeholder: string; initial: string };
+  /** Actions that are a message to M: sent to it, with its pane focused on the chat. */
+  toMerger?: string;
 }
 
 /** The merger pane, shown with two planners. */
@@ -328,6 +330,16 @@ export class LanesPage {
     this.options.sayToMerger?.(text);
   }
 
+  /** An action that talks to M: send it, and move to M's pane to watch the reply. */
+  private sendToMerger(text: string) {
+    const index = this.targets().findIndex((target) => target.kind === "merger");
+    if (index === -1) return;
+    this.focus = index;
+    this.scroll.follow(`${MERGER_ID}:trace`);
+    this.showTrace.add(MERGER_ID);
+    this.options.sayToMerger?.(text);
+  }
+
   private handleEscapeModal(_data: string, is: (...keys: KeyId[]) => boolean) {
     const modal = this.modal as Extract<Modal, { kind: "escape" }>;
     const choices = this.escapeChoices();
@@ -370,7 +382,8 @@ export class LanesPage {
         input.setValue(action.input.initial);
         input.focused = true;
         this.modal = { kind: "input", action, input };
-      } else this.options.onAction(action.id);
+      } else if (action.toMerger !== undefined) this.sendToMerger(action.toMerger);
+      else this.options.onAction(action.id);
     } else return;
     this.options.requestRender();
   }
@@ -624,7 +637,7 @@ export class LanesPage {
       color,
     );
     const about = pane.ready
-      ? "Talk the two plans over with M, a third model that sees both of them and what you told each planner. When you are ready, ask it to write the merged plan. Enter on an empty line asks it to compare the plans."
+      ? "Talk the two plans over with M, a third model that sees both of them and what you told each planner. When you are ready, choose Write plan M in the actions. Enter on an empty line asks it to compare the plans."
       : `${pane.waiting ? `${pane.waiting}: M needs both plans, so it cannot start. ` : ""}Once both plans are in, M, a third model that sees both of them and what you told each planner, can talk them over with you and merge them into one. Until then, talk to a planner or Tab to the actions to implement a plan.`;
     const bodyHeight = Math.max(1, rows - 3);
     const body = wrap(about, Math.max(10, width - 2)).map((line) => theme.fg("dim", ` ${line}`));
@@ -969,7 +982,7 @@ export class LanesPage {
     if (target.kind === "actions") return "";
     if (target.kind === "merger" && !target.pane.agent) {
       return target.pane.ready
-        ? "Talk the plans over with M; ⏎ on an empty line asks it to compare them. Ask it to merge them when you are ready."
+        ? "Talk the plans over with M; ⏎ on an empty line asks it to compare them. Write plan M (in the actions) merges them."
         : "M can help once both plans are in.";
     }
     const merger = target.kind === "merger";
@@ -985,9 +998,9 @@ export class LanesPage {
     }
     if (agent.working) return `${agent.id} is working. Type to steer it; it reads your message after its current step.`;
     if (merger && agent.plan) {
-      return "M's merged plan is ready. Talk to M to change it; Tab to the actions to implement it.";
+      return "M's merged plan is ready. Talk to M and choose Revise plan M to change it; Tab to the actions to implement it.";
     }
-    if (merger) return "Talk it through with M; when you are ready, ask it to write the merged plan.";
+    if (merger) return "Talk it through with M; when you are ready, Tab to the actions and choose Write plan M.";
     if (agent.plan) return `${agent.id}'s plan is ready. Talk to it to change it; Tab to the actions to implement it.`;
     return `${agent.id} is waiting for you. Type a message and press ⏎.`;
   }

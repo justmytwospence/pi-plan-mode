@@ -121,6 +121,13 @@ export function consultMessage(message: string) {
   return `[From the user's main agent, which is talking the plans over with the user. Answer it directly; resubmit your plan with plan_mode_complete only if your answer changes it.]\n\n${message.trim()}`;
 }
 
+/** What Write plan M (or Revise plan M, once there is one) asks your main agent to do. */
+export function writeMergedRequest(revise: boolean) {
+  return revise
+    ? "Revise plan M: fold in what we have discussed since you recorded it, and record the complete revised plan with plan_submit_merged."
+    : "Write plan M: merge the planners' plans and what we have decided here into one complete implementation plan. Where they disagree, pick one approach and say why. Record it with plan_submit_merged.";
+}
+
 /** Guidance for your main agent while a planning run is active (its tools' guidelines). */
 export const MAIN_AGENT_GUIDELINES = [
   "Planners (A, and B when two are planning) are writing implementation plans in the background, read-only. Each plan and each revision arrives in this conversation as a message with the plan in full; the user may also talk to the planners directly in /plan.",

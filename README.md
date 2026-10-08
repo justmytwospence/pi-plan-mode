@@ -77,6 +77,10 @@ covers the whole terminal. A step bar at the top right shows where you are:
    - `plan_submit_merged`: when you ask for it, record the merged (or adjusted) plan as **plan M**;
      the M pane shows it (ctrl+o switches between the plan and the chat).
 
+   You do not have to word that request yourself: **Write plan M** in the actions asks M to merge
+   both plans and what you decided into plan M, and once there is one, **Revise plan M** asks it to
+   fold in what you discussed since. Either moves you to M's pane to watch it write.
+
    It is asked, not forced, to leave files alone while planning is underway. The focused pane gets
    the room: M takes the bottom third while you talk to it and shrinks to a few lines otherwise.
    To choose the split yourself, drag M's title rule (the divider) with the mouse, or press
@@ -84,7 +88,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
    double-click on the divider goes back to the automatic sizing.
 
    Once plans are in, the actions below are:
+   - **Write plan M** (with two plans in, until M has one; not while M is working)
    - **Implement M… / Implement A… / Implement B…** (the merged plan first, once there is one)
+   - **Revise plan M** (right after Implement M, once M has a plan)
    - **Add a planner…** (with one): plan the same task with a second model; the first keeps its
      plan and everything it read.
    - **Export M… / Export A… / Export B…**: write that plan to a Markdown file (path prefilled from

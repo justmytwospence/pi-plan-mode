@@ -221,7 +221,16 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   assert.match(screen, /you › which is safer\?/u);
   assert.match(screen, /B's invalidation is safer\./u);
   assert.match(screen, /M main agent · Claude Sonnet 5\.5.*writing/u, "its stats row shows it working");
+  assert.doesNotMatch(screen, /Write plan M/u, "not offered while M is working");
   await mainEvent("agent_end", { messages: [] });
+
+  // With both plans in, Write plan M comes first; it asks M for the merged plan and moves to M.
+  screen = app.render().join("\n");
+  assert.match(screen, /Write plan M · Implement A… · Implement B…/u);
+  app.handleInput("\t");
+  app.handleInput("\r");
+  assert.match(mock.sentUserMessages.at(-1)?.text ?? "", /^Write plan M: merge the planners' plans/u);
+  assert.match(app.render().join("\n"), /Tab to the actions and choose Write plan M/u, "back on M's pane");
 
   // Your main agent asks planner A something; A answers (here it also resubmits), and v2 is delivered.
   const tool = (name: string) =>
@@ -266,7 +275,11 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   screen = app.render().join("\n");
   assert.match(screen, /✓ M main agent · Claude Sonnet 5\.5.*plan ready/u, "M's row shows its merged plan");
   assert.match(screen, /# Merged plan|Merged plan/u, "and its pane shows it");
-  assert.match(screen, /Implement M… · Implement A… · Implement B…/u, "the merged plan comes first");
+  assert.match(
+    screen,
+    /Implement M… · Revise plan M · Implement A… · Implement B…/u,
+    "the merged plan comes first, and M can revise it",
+  );
   assert.match(screen, /Save & close/u);
 
   // Implement the merged plan (focus is on M: one Tab to the actions).

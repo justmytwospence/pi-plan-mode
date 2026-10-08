@@ -48,6 +48,7 @@ import {
   plannerSystemPrompt,
   plannerTaskPrompt,
   resumeMessage,
+  writeMergedRequest,
 } from "./planner/prompt.js";
 import type { PlannerSessionFactory } from "./planner/session.js";
 import { buildPlannerTranscript } from "./planners.js";
@@ -609,6 +610,18 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         // The merged plan comes first: once there is one, it is usually the one to build.
         const ready = sources();
         const actions: LaneAction[] = [];
+        // With two plans in, M can merge them: first in line until it has, then right after Implement M.
+        const merged = run?.merged;
+        const mergeable = agents.length > 1 && agents.filter((agent) => agent.plan).length > 1 && !mainAgent.working;
+        const merge: LaneAction = {
+          id: "merge",
+          label: merged ? "Revise plan M" : "Write plan M",
+          description: merged
+            ? "Ask M to fold what you have discussed since into plan M, as a new version."
+            : "Ask M to merge both plans and what you have discussed into plan M, which you can then implement or export.",
+          toMerger: writeMergedRequest(merged !== undefined),
+        };
+        if (mergeable && !merged) actions.push(merge);
         for (const source of ready) {
           actions.push({
             id: `implement:${source.id}`,
@@ -616,6 +629,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             description: `Implement ${source.id === MERGED_ID ? "the merged plan M" : `plan ${source.id}`}${source.revision > 1 ? ` v${source.revision}` : ""}: choose the model, effort, and context next.`,
           });
         }
+        // Implement M is first once M has a plan; Revise plan M goes right after it.
+        if (mergeable && merged) actions.splice(1, 0, merge);
         if (agents.length === 1) {
           actions.push({
             id: "add",

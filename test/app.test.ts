@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { LanesPage, type MergerPane } from "../src/app/lanes-page.js";
+import { type LaneAction, LanesPage, type MergerPane } from "../src/app/lanes-page.js";
 import { OptionsPage, type TextArea } from "../src/app/options-page.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
@@ -92,7 +92,13 @@ function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent 
   } as unknown as PlannerAgent;
 }
 
-function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined, rows = 30, task = "add a cache") {
+function lanesPage(
+  agents: PlannerAgent[],
+  merger?: () => MergerPane | undefined,
+  rows = 30,
+  task = "add a cache",
+  before: LaneAction[] = [],
+) {
   const said: [string, string][] = [];
   const actions: string[] = [];
   let hidden = 0;
@@ -104,6 +110,7 @@ function lanesPage(agents: PlannerAgent[], merger?: () => MergerPane | undefined
     ...(merger ? { merger } : {}),
     sayToMerger: (text) => said.push(["M", text]),
     actions: () => [
+      ...before,
       { id: "implement:A", label: "Implement A…", description: "implement" },
       { id: "export:A", label: "Export A…", description: "export", input: { placeholder: "path", initial: "PLAN.md" } },
     ],
@@ -555,7 +562,9 @@ test("a planner's question and its options wrap instead of being cut", () => {
   assert.deepEqual(cut, [], "nothing is cut");
 
   // A short lane keeps only the highlighted option's description, and still its input line.
-  const short = lanesPage([a, fakeAgent("B")], undefined, 24).page.render(100).join("\n");
+  const short = lanesPage([a, fakeAgent("B")], undefined, 24)
+    .page.render(100)
+    .join("\n");
   assert.match(short, /❯ 1\. Every read/u);
   assert.match(short, /Simplest to reason about/u);
   assert.doesNotMatch(short, /Less memory/u);
@@ -713,4 +722,26 @@ test("the divider above M drags to resize it, shift+↑↓ moves it a row, and a
   mouse("click", layout().divider, { clickCount: 2 });
   assert.equal(share.value, undefined);
   assert.equal(layout().height, 11, "automatic again: a third while M is focused");
+});
+
+test("an action for M sends its message to M and moves to M's chat", () => {
+  const a = fakeAgent("A", { plan: "# Plan A", revision: 1 } as never);
+  const b = fakeAgent("B", { plan: "# Plan B", revision: 1 } as never);
+  const m = fakeAgent("M", { plan: "# Plan M", revision: 1 } as never);
+  const pane: MergerPane = { agent: m, name: "Model M high", ready: true };
+  const write = { id: "merge", label: "Write plan M", description: "merge", toMerger: "Write plan M now." };
+  const { page, said, actions } = lanesPage([a, b], () => pane, 40, "add a cache", [write]);
+  page.focusActions();
+  let lines = page.render(120);
+  assert.match(lines.join("\n"), /Write plan M\s+·\s+Implement A…/u);
+  assert.ok(
+    lines.some((line) => line.startsWith("# Plan M")),
+    "M shows its plan",
+  );
+  page.handleInput(KEY.enter);
+  assert.deepEqual(said, [["M", "Write plan M now."]]);
+  assert.deepEqual(actions, [], "not handed to onAction");
+  lines = page.render(120);
+  const footer = lines.slice(-2).join("\n");
+  assert.match(footer, /\^o plan/u, "M's pane is focused, on its chat");
 });

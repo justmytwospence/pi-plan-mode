@@ -8,8 +8,8 @@ const SONNET = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude S
 const OPUS = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
 
-/** Planner sessions that submit `# Plan from <model>` for any prompt. */
-function fakeSessions() {
+/** Planner sessions that submit `# Plan from <model>` for any prompt (or, with `ask`, ask first). */
+function fakeSessions(ask = false) {
   const prompts: Array<{ model: string; text: string }> = [];
   const factory: PlannerSessionFactory = async (_host, options) => {
     const tools = new Map<string, { execute(...args: unknown[]): Promise<unknown> }>();
@@ -29,6 +29,21 @@ function fakeSessions() {
         prompt: async (text: string) => {
           prompts.push({ model: options.spec.modelId, text });
           emit({ type: "agent_start" });
+          if (ask) {
+            await tools.get("plan_mode_question")?.execute("q", {
+              questions: [
+                {
+                  id: "lang",
+                  header: "Language",
+                  question: "Which?",
+                  options: [
+                    { label: "Python", description: "Py" },
+                    { label: "Node", description: "JS" },
+                  ],
+                },
+              ],
+            });
+          }
           await tools
             .get("plan_mode_complete")
             ?.execute("1", { plan: `# Plan from ${options.spec.modelId} #${prompts.length}` });
@@ -48,9 +63,9 @@ function fakeSessions() {
   return { factory, prompts };
 }
 
-function setup() {
+function setup(options: { ask?: boolean } = {}) {
   const mock = createMockPi({ thinkingLevel: "high" });
-  const sessions = fakeSessions();
+  const sessions = fakeSessions(options.ask);
   planMode(mock.pi, {
     readSettings: async () => ({
       thinkingLevel: "inherit",
@@ -412,4 +427,28 @@ test("restoring a run resumes the turns a reload cut off or that had failed, and
   for (const handler of idle.mock.events.get("session_start") ?? []) await handler({}, idle.context.ctx);
   await flush();
   assert.equal(idle.sessions.prompts.length, 0);
+});
+
+test("a planner asking you something shows in herdr as blocked until it stops asking", async () => {
+  const { mock, context } = setup({ ask: true });
+  const blocked: unknown[] = [];
+  mock.eventBus.on("herdr:blocked", (data) => blocked.push(data));
+  mock.entries.push({
+    customType: "plan-run",
+    data: {
+      id: "r4",
+      createdAt: 1,
+      task: "add a cache",
+      state: "active",
+      planners: [
+        { id: "A", spec: "anthropic/claude-sonnet-5-5:low", name: "S", sessionFile: "/a.jsonl", turn: "interrupted" },
+      ],
+    },
+  });
+  for (const handler of mock.events.get("session_start") ?? []) await handler({}, context.ctx);
+  await flush();
+  assert.deepEqual(blocked, [{ active: true, label: "Planner question" }]);
+  for (const handler of mock.events.get("session_shutdown") ?? []) await handler({}, context.ctx);
+  await flush();
+  assert.deepEqual(blocked, [{ active: true, label: "Planner question" }, { active: false }]);
 });

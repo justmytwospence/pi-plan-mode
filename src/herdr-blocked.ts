@@ -1,7 +1,7 @@
 /**
  * herdr shows a pi agent as blocked while any extension holds `herdr:blocked`
- * (its pi integration counts active/inactive pairs). Plan-mode dialogs wait on
- * the user, so they hold it for as long as they are open.
+ * (its pi integration counts active/inactive pairs). Plan mode holds it while a
+ * planner waits for your answers, which outranks a `herdr:working` hold.
  *
  * `herdr:working` is the opposite hold, for work that runs outside the main
  * agent's turn (planner runs, planner replies). The herdr attention bridge
@@ -25,19 +25,9 @@ function emitter(events: EventBus | undefined, channel: string) {
   };
 }
 
-export async function whileBlocked<T>(events: EventBus | undefined, label: string, run: () => Promise<T>): Promise<T> {
-  const emit = emitter(events, HERDR_BLOCKED_CHANNEL);
-  emit({ active: true, label });
-  try {
-    return await run();
-  } finally {
-    emit({ active: false });
-  }
-}
-
-/** Hold `herdr:working` until the returned release runs; releasing twice is a no-op. */
-export function holdWorking(events: EventBus | undefined, label: string): () => void {
-  const emit = emitter(events, HERDR_WORKING_CHANNEL);
+/** Hold `channel` until the returned release runs; releasing twice is a no-op. */
+function hold(events: EventBus | undefined, channel: string, label: string): () => void {
+  const emit = emitter(events, channel);
   let held = true;
   emit({ active: true, label });
   return () => {
@@ -45,4 +35,14 @@ export function holdWorking(events: EventBus | undefined, label: string): () => 
     held = false;
     emit({ active: false });
   };
+}
+
+/** Hold `herdr:blocked` (waiting on you, e.g. a planner's questions) until released. */
+export function holdBlocked(events: EventBus | undefined, label: string): () => void {
+  return hold(events, HERDR_BLOCKED_CHANNEL, label);
+}
+
+/** Hold `herdr:working` until the returned release runs; releasing twice is a no-op. */
+export function holdWorking(events: EventBus | undefined, label: string): () => void {
+  return hold(events, HERDR_WORKING_CHANNEL, label);
 }

@@ -1,33 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "vitest";
-import { HERDR_WORKING_CHANNEL, holdWorking, whileBlocked } from "../src/herdr-blocked.js";
+import { HERDR_BLOCKED_CHANNEL, HERDR_WORKING_CHANNEL, holdBlocked, holdWorking } from "../src/herdr-blocked.js";
 
-test("whileBlocked emits active then inactive, also when the dialog throws", async () => {
-  const seen: unknown[] = [];
-  const events = { emit: (_channel: string, data: unknown) => seen.push(data) };
-  assert.equal(await whileBlocked(events, "Q", async () => 7), 7);
-  await assert.rejects(
-    whileBlocked(events, "Q", async () => {
-      throw new Error("boom");
-    }),
-    /boom/,
-  );
+test("holdBlocked holds herdr:blocked until released, once", () => {
+  const seen: [string, unknown][] = [];
+  const release = holdBlocked({ emit: (channel, data) => seen.push([channel, data]) }, "Planner question");
+  release();
+  release();
   assert.deepEqual(seen, [
-    { active: true, label: "Q" },
-    { active: false },
-    { active: true, label: "Q" },
-    { active: false },
+    [HERDR_BLOCKED_CHANNEL, { active: true, label: "Planner question" }],
+    [HERDR_BLOCKED_CHANNEL, { active: false }],
   ]);
-});
-
-test("whileBlocked survives a throwing listener and a missing bus", async () => {
-  const events = {
-    emit: () => {
-      throw new Error("listener");
-    },
-  };
-  assert.equal(await whileBlocked(events, "Q", async () => "ok"), "ok");
-  assert.equal(await whileBlocked(undefined, "Q", async () => "ok"), "ok");
 });
 
 test("holdWorking emits one active/inactive pair however often it is released", () => {

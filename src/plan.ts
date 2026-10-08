@@ -18,7 +18,7 @@ import { FULL_SCREEN } from "./app/frame.js";
 import { type LaneAction, LanesPage } from "./app/lanes-page.js";
 import { type OptionRow, OptionsPage, type TextArea } from "./app/options-page.js";
 import { formatImplementationPrompt } from "./handoff.js";
-import { holdWorking } from "./herdr-blocked.js";
+import { holdBlocked, holdWorking } from "./herdr-blocked.js";
 import {
   formatModelKey,
   formatModelSpec,
@@ -160,6 +160,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
   let run: PlanRun | undefined;
   let app: { close(): void; render(): void } | undefined;
   let releaseWorking: (() => void) | undefined;
+  let releaseBlocked: (() => void) | undefined;
   let hostCtx: ExtensionContext | undefined;
   /** Where you dragged the divider above M (a share of the space), for the rest of this process. */
   let mergerShare: number | undefined;
@@ -220,6 +221,13 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     if (!working && releaseWorking) {
       releaseWorking();
       releaseWorking = undefined;
+    }
+    // A planner waiting for your answers shows in herdr as blocked, over the working hold.
+    const asking = run.agents.some((agent) => agent.status === "asking");
+    if (asking && !releaseBlocked) releaseBlocked = holdBlocked(pi.events, "Planner question");
+    if (!asking && releaseBlocked) {
+      releaseBlocked();
+      releaseBlocked = undefined;
     }
     updateStatus();
     app?.render();
@@ -334,6 +342,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     for (const agent of run.agents) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
+    releaseBlocked?.();
+    releaseBlocked = undefined;
     run = undefined;
     saved.clear();
     notifiedPlans.clear();
@@ -453,6 +463,8 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     for (const agent of run?.agents ?? []) agent.dispose();
     releaseWorking?.();
     releaseWorking = undefined;
+    releaseBlocked?.();
+    releaseBlocked = undefined;
   });
 
   pi.registerCommand("plan", {

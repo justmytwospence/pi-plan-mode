@@ -15,6 +15,7 @@
   what you and the planner said since its previous version), and while a run is active your agent
   can question a planner (`plan_ask_planner`) and record the merged plan as plan M
   (`plan_submit_merged`) when you ask. You can still pick A or B, and keep talking to either.
+- Replies from your agent (in M) and from the planners render as Markdown in their panes.
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
   planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the

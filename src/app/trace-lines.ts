@@ -20,7 +20,7 @@ export class TraceRenderer {
         continue;
       }
       let rendered: string[];
-      if (entry.kind === "text") rendered = wrap(entry.text.trim(), width);
+      if (entry.kind === "text") rendered = markdown(entry.text.trim(), width);
       else if (entry.kind === "thinking") {
         rendered = wrap(entry.text.trim(), width).map((line) => theme.fg("thinkingText", theme.italic(line)));
       } else if (entry.kind === "tool") {
@@ -46,12 +46,7 @@ export class TraceRenderer {
   planLines(id: string, plan: string, width: number): string[] {
     const cached = this.plans.get(id);
     if (cached && cached.plan === plan && cached.width === width) return cached.lines;
-    let lines: string[];
-    try {
-      lines = new Markdown(plan, 0, 0, getMarkdownTheme()).render(Math.max(1, width));
-    } catch {
-      lines = wrap(plan, width);
-    }
+    const lines = markdown(plan, width);
     this.plans.set(id, { plan, width, lines });
     return lines;
   }
@@ -66,6 +61,16 @@ function entryKey(entry: TraceEntry) {
       return `tool:${entry.status}:${entry.result?.length ?? 0}`;
     default:
       return `${entry.kind}:${entry.text.length}`;
+  }
+}
+
+/** Markdown rendered for the terminal, or plain wrapped text if it cannot be rendered. */
+function markdown(text: string, width: number): string[] {
+  if (!text) return [];
+  try {
+    return new Markdown(text, 0, 0, getMarkdownTheme()).render(Math.max(1, width));
+  } catch {
+    return wrap(text, width);
   }
 }
 

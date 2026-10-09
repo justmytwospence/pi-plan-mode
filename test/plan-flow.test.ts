@@ -64,6 +64,13 @@ function fakeSessions(ask = false, failFirst?: { model: string; error: string })
         },
         steer: async () => undefined,
         abort: async () => undefined,
+        setModel: async (model: { id: string }) => {
+          prompts.push({ model: options.spec.modelId, text: `[setModel ${model.id}]` });
+        },
+        setThinkingLevel: (level: string) => {
+          prompts.push({ model: options.spec.modelId, text: `[setThinkingLevel ${level}]` });
+        },
+        getContextUsage: () => ({ tokens: 1000, contextWindow: 200_000, percent: 0.5 }),
       } as never,
       file: `/sessions/${options.spec.modelId}.jsonl`,
       subscribe: (listener) => {
@@ -526,4 +533,63 @@ test("a planner refused for its login offers to log in again from /plan, then tr
   app.handleInput("\u001b");
   app.handleInput("\r");
   await opened;
+});
+
+test("slash commands in a lane act on that planner; in M they go to your own editor", async () => {
+  const { mock, context, sessions, harness } = setup();
+  const opened = mock.commands.get("plan")?.handler("add a cache", context.ctx);
+  await flush();
+  const app = harness();
+  assert.ok(app);
+  app.handleInput("\r");
+  app.handleInput("\r");
+  app.handleInput("\r");
+  await flush();
+  const type = (text: string) => {
+    for (const char of text) app.handleInput(char);
+  };
+  // Lane A has focus: the hint lists the commands that match what you type.
+  type("/mo");
+  assert.match(app.render().join("\n"), /\/model \[query\]: switch its model/u);
+  type("del opus");
+  app.handleInput("\r");
+  await flush();
+  let screen = app.render().join("\n");
+  assert.match(screen, /A · Claude Opus 5\.5 low/u, "the lane shows its new model, effort kept");
+  assert.match(screen, /Model: Claude Opus 5\.5 low\./u);
+  assert.ok(sessions.prompts.some((prompt) => prompt.text === "[setModel claude-opus-5-5]"));
+  type("/thinking high");
+  app.handleInput("\r");
+  await flush();
+  assert.match(app.render().join("\n"), /A · Claude Opus 5\.5 high/u);
+  const stored = () =>
+    mock.entries.filter((entry) => entry.customType === "plan-run").at(-1)?.data as {
+      planners: Array<{ spec: string; name: string }>;
+    };
+  assert.deepEqual(stored().planners[0], {
+    ...stored().planners[0],
+    spec: "anthropic/claude-opus-5-5:high",
+    name: "Claude Opus 5.5",
+  });
+  const before = sessions.prompts.length;
+  type("//etc is fine");
+  app.handleInput("\r");
+  await flush();
+  assert.equal(sessions.prompts.at(-1)?.text, "/etc is fine", "// sends a message that starts with a slash");
+  assert.equal(sessions.prompts.length, before + 1);
+  screen = app.render().join("\n");
+
+  // With a second planner, M's pane sends a command to your own editor and leaves /plan.
+  app.handleInput("\t");
+  app.handleInput("\u001b[C");
+  app.handleInput("\r");
+  app.handleInput("\r");
+  await flush();
+  app.handleInput("\t");
+  app.handleInput("\t");
+  type("/model");
+  assert.match(app.render().join("\n"), /puts this command in your session's editor/u);
+  app.handleInput("\r");
+  await opened;
+  assert.equal(context.editorText, "/model");
 });

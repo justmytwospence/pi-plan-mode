@@ -68,6 +68,14 @@ covers the whole terminal. A step bar at the top right shows where you are:
    its chat. A lane's chat (and M's) is drawn by Pi's own components, as in pi itself: Markdown,
    thinking, and every tool call with its own renderer (extension tools included); ctrl+e expands
    or collapses tool output, as ctrl+o does in pi. A restored planner's chat shows its history.
+
+   Pi's built-in commands that matter for a planner work in its lane and act on its own session:
+   `/login [provider]` (a failed planner then retries), `/model [query]`, `/thinking [level]`
+   (or `/effort`), `/compact [instructions]`, `/context` (or `/usage`), `/copy` and `/help`.
+   The hint line lists the matching ones as you type; changes wait until the planner is idle, and
+   a new model or effort is kept with the run. Start a message with `//` to send one that begins
+   with a slash. In M's pane, which is your main session, a `/command` leaves `/plan` with the
+   command in your editor, so every Pi command is there.
 4. **Review.** With two planners, the full-width pane below the lanes is **M, your main agent**:
    the agent of the session you started `/plan` from, so it has all your context. What you type
    there goes to it (a new turn, or a steer while it works), and the pane shows its replies as they

@@ -21,6 +21,9 @@
   restored planner shows its history instead of only "restored".
 - Write plan M (then Revise plan M) in the Review actions asks M for the merged plan, so you need
   not word the request yourself.
+- Pi's important built-in commands work in a planner's lane on its own session: `/login`,
+  `/model`, `/thinking` (`/effort`), `/compact`, `/context` (`/usage`), `/copy`, `/help`. In M's
+  pane a `/command` goes to your own editor.
 - A planner refused for its login (e.g. `invalidated oauth token`) offers Log in to <provider>…,
   which runs Pi's login dialog inside /plan and then retries the planner.
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan

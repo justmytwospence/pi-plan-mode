@@ -37,6 +37,7 @@ export type LaneAgent = Pick<
   | "answer"
 >;
 
+import { matchingCommands } from "../lane-commands.js";
 import { formatCost, formatDuration, formatTokens } from "../planners.js";
 import type { PlanModeQuestionAnswer } from "../question-tool.js";
 import {
@@ -225,7 +226,11 @@ export class LanesPage {
   private inputFor(id: string) {
     let input = this.inputs.get(id);
     if (!input) {
-      input = new Input({ prompt: "", placeholder: `talk to ${id}…`, placeholderStyle: placeholderStyle(this.theme) });
+      input = new Input({
+        prompt: "",
+        placeholder: `talk to ${id}… (/ for commands)`,
+        placeholderStyle: placeholderStyle(this.theme),
+      });
       this.inputs.set(id, input);
     }
     return input;
@@ -1009,6 +1014,17 @@ export class LanesPage {
     const merger = target.kind === "merger";
     const agent = target.kind === "lane" ? target.agent : target.pane.agent;
     if (!agent) return "";
+    const typed = this.input(agent).getValue();
+    if (typed.startsWith("/") && !typed.startsWith("//") && !agent.pending) {
+      if (merger)
+        return "⏎ puts this command in your session's editor (M is your main session); // sends a slash message.";
+      const found = matchingCommands(typed);
+      return found.length === 0
+        ? "No such command. /help lists them; // sends a message that starts with a slash."
+        : found
+            .map((command) => `/${command.name}${command.args ? ` ${command.args}` : ""}: ${command.description}`)
+            .join(" · ");
+    }
     const sub = this.selectedSub(agent);
     if (sub) {
       return `Subagent ${sub.id} of ${agent.id}, on ${sub.model}. ^n/^p other subagents · esc back to ${agent.id} · typing talks to ${agent.id}.`;

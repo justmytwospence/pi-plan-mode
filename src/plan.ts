@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   CustomEditor,
+  copyToClipboard,
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
@@ -31,6 +32,7 @@ import {
   sameModel,
 } from "./implementation-models.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
+import { runLaneCommand } from "./lane-commands.js";
 import { isAuthError, loginInDialog, providerName } from "./login.js";
 import {
   MainAgentView,
@@ -566,7 +568,14 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             run && run.agents.length > 1 ? { agent: mainAgent, name: mainAgent.name, ready: true } : undefined,
           actions: () => laneActions(),
           onAction: (id, text) => onLaneAction(id, text),
-          say: (agent, text) => void run?.agents.find((candidate) => candidate.id === agent.id)?.say(text, ctx),
+          say: (agent, text) => {
+            const planner = run?.agents.find((candidate) => candidate.id === agent.id);
+            if (!planner) return;
+            // A slash command acts on the planner's session; `//text` sends "/text" as a message.
+            void runLaneCommand(text, planner, laneCommandHost).then((handled) => {
+              if (!handled) void planner.say(text.startsWith("//") ? text.slice(1) : text, ctx);
+            });
+          },
           mergerShare: {
             get: () => mergerShare,
             set: (share) => {
@@ -574,8 +583,16 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             },
           },
           sayToMerger: (text) => {
+            // M is your main session: its commands are Pi's own, so a command goes to your editor.
+            if (text.startsWith("/") && !text.startsWith("//")) {
+              close();
+              ctx.ui.setEditorText(text);
+              ctx.ui.notify("Press Enter to run it in your session; /plan brings the planning screen back.", "info");
+              return;
+            }
             // Like typing in your main editor: a new turn, or a steer while your agent is working.
-            pi.sendUserMessage(text, ctx.isIdle() ? undefined : { deliverAs: "steer" });
+            const message = text.startsWith("//") ? text.slice(1) : text;
+            pi.sendUserMessage(message, ctx.isIdle() ? undefined : { deliverAs: "steer" });
           },
           hide: close,
           stopAll: () => {
@@ -679,13 +696,16 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         return actions;
       };
 
-      /** Log in to a planner's provider in Pi's login dialog, then have the planner try again. */
-      const loginAndRetry = async (agent: PlannerAgent) => {
-        const providerId = agent.spec.provider;
+      /** Log in to a provider in Pi's login dialog; a planner that had failed then tries again. */
+      const loginAndRetry = async (agent: PlannerAgent, providerId = agent.spec.provider) => {
         const back = lanes();
         try {
           await (dependencies.login ?? loginWithDialog)(providerId, (dialog) => show(dialog));
           show(back);
+          if (agent.status !== "failed") {
+            agent.note(`Logged in to ${providerId}.`);
+            return;
+          }
           ctx.ui.notify(`Logged in to ${providerId}. Planner ${agent.id} is trying again.`, "info");
           void agent.say(resumeMessage("failed"), ctx, "try again (after logging in)");
         } catch (error: unknown) {
@@ -693,6 +713,18 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           const message = errorText(error);
           if (message !== "Login cancelled") ctx.ui.notify(`Login to ${providerId} failed: ${message}`, "error");
         }
+      };
+
+      /** What a planner's lane commands use from here. */
+      const laneCommandHost = {
+        models: () => models.map((spec) => ({ spec, name: catalog.name(spec) })),
+        efforts: (spec: ModelSpec) =>
+          catalog.efforts(spec).filter((level): level is ThinkingLevel => level !== undefined),
+        login: (agent: { id: string }, provider: string) => {
+          const planner = run?.agents.find((candidate) => candidate.id === agent.id);
+          if (planner) void loginAndRetry(planner, provider);
+        },
+        copy: (text: string) => copyToClipboard(text),
       };
 
       const loginWithDialog = async (providerId: string, showDialog: (dialog: Component) => void) => {
@@ -1341,7 +1373,7 @@ function turnState(agent: PlannerAgent): TurnState | undefined {
 }
 
 function savedSignature(agent: PlannerAgent) {
-  return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? ""}`;
+  return `${agent.revision}|${agent.sessionFile ?? ""}|${turnState(agent) ?? ""}|${agent.label}`;
 }
 
 /** A plan you can implement or export: a planner's, or M, the one your main agent merged. */

@@ -86,8 +86,9 @@ export interface PlannerAgentOptions {
 
 export class PlannerAgent {
   readonly id: string;
-  readonly spec: ModelSpec;
-  readonly name: string;
+  /** Its model and effort; /model and /thinking in its lane change them. */
+  spec: ModelSpec;
+  name: string;
   readonly trace = new PlannerTrace();
   /** Its conversation as Pi shows it: Pi's own message and tool components. */
   readonly chat: PiChat;
@@ -105,6 +106,8 @@ export class PlannerAgent {
   sessionFile: string | undefined;
 
   private handle: PlannerSessionHandle | undefined;
+  /** Your session's context, kept from when its own session opened (for model lookups). */
+  private host: ExtensionContext | undefined;
   private opening: Promise<PlannerSessionHandle | undefined> | undefined;
   private unsubscribe: (() => void) | undefined;
   private softTimer: ReturnType<typeof setTimeout> | undefined;
@@ -129,12 +132,12 @@ export class PlannerAgent {
       this.revision = options.revision ?? 1;
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
-      this.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
+      this.record(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
     } else if (options.sessionFile) {
       // Restored without a plan (e.g. mid-conversation): it waits for you, not starting.
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
-      this.note(`${this.id} restored.`);
+      this.record(`${this.id} restored.`);
     }
   }
 
@@ -232,7 +235,7 @@ export class PlannerAgent {
     if (!pending) return;
     this.pending = undefined;
     if (this.status === "asking") this.status = "working";
-    this.note(answers ? `Answered: ${answers.map((answer) => answer.answer).join(" · ")}` : "Questions skipped.");
+    this.record(answers ? `Answered: ${answers.map((answer) => answer.answer).join(" · ")}` : "Questions skipped.");
     pending.resolve(answers);
     this.changed();
   }
@@ -242,7 +245,7 @@ export class PlannerAgent {
     this.pending?.resolve(undefined);
     this.pending = undefined;
     if (!this.handle?.session.isStreaming) return;
-    this.note("Stopped by you.", "warning");
+    this.record("Stopped by you.", "warning");
     try {
       await this.handle.session.abort();
     } catch {
@@ -268,6 +271,7 @@ export class PlannerAgent {
   }
 
   private open(host: ExtensionContext) {
+    this.host = host;
     if (this.handle) return Promise.resolve(this.handle);
     this.opening ??= this.create(host);
     return this.opening;
@@ -286,7 +290,7 @@ export class PlannerAgent {
           this.plan = plan;
           this.revision += 1;
           this.stats.lastActivity = "submitted plan";
-          this.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} submitted.`);
+          this.record(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} submitted.`);
           this.changed();
         },
       };
@@ -372,7 +376,7 @@ export class PlannerAgent {
         if (!session?.isStreaming) return;
         this.stats.wrappingUp = true;
         this.stats.lastActivity = "asked to wrap up";
-        this.note("Time is almost up: asked the planner to finish now.", "warning");
+        this.record("Time is almost up: asked the planner to finish now.", "warning");
         void session.steer(WRAP_UP_MESSAGE).catch(() => undefined);
         this.changed();
       },
@@ -380,7 +384,7 @@ export class PlannerAgent {
     );
     this.hardTimer = setTimeout(() => {
       if (!this.handle?.session.isStreaming) return;
-      this.note(`Stopped at the ${Math.round(limit / 60_000)} min limit.`, "warning");
+      this.record(`Stopped at the ${Math.round(limit / 60_000)} min limit.`, "warning");
       void this.handle.session.abort().catch(() => undefined);
     }, limit);
     this.softTimer.unref?.();
@@ -470,7 +474,7 @@ export class PlannerAgent {
     this.error = error instanceof Error ? error.message : String(error);
     this.status = "failed";
     this.stats.endedAt = Date.now();
-    this.note(`Failed: ${this.error}`, "error");
+    this.record(`Failed: ${this.error}`, "error");
     this.changed();
     this.settle();
   }
@@ -482,9 +486,56 @@ export class PlannerAgent {
   }
 
   /** A line from plan mode itself, in both the trace and the chat. */
-  private note(text: string, tone: "info" | "warning" | "error" = "info") {
+  private record(text: string, tone: "info" | "warning" | "error" = "info") {
     this.trace.note(text, tone);
     this.chat.note(text, tone);
+  }
+
+  /** A line for you in its lane (a command's answer), shown now. */
+  note(text: string, tone: "info" | "warning" | "error" = "info") {
+    this.record(text, tone);
+    this.changed();
+  }
+
+  /** /model: the next turn runs on `spec` (a session not open yet starts on it). */
+  async switchModel(spec: ModelSpec, name: string) {
+    const session = this.handle?.session;
+    if (session) {
+      const model = this.host?.modelRegistry.find(spec.provider, spec.modelId);
+      if (!model) throw new Error(`${spec.provider}/${spec.modelId} is not available`);
+      await session.setModel(model);
+      if (spec.thinkingLevel) session.setThinkingLevel(spec.thinkingLevel);
+    }
+    this.spec = spec;
+    this.name = name;
+    this.note(`Model: ${name}${spec.thinkingLevel ? ` ${spec.thinkingLevel}` : ""}.`);
+  }
+
+  /** /thinking: the effort of its next turns. */
+  setEffort(level: ModelSpec["thinkingLevel"]) {
+    if (level) this.handle?.session.setThinkingLevel(level);
+    this.spec = {
+      provider: this.spec.provider,
+      modelId: this.spec.modelId,
+      ...(level ? { thinkingLevel: level } : {}),
+    };
+    this.note(`Effort: ${level ?? "model default"}.`);
+  }
+
+  /** /compact: summarize its context so far, as Pi does. */
+  async compact(instructions?: string) {
+    const session = this.handle?.session;
+    if (!session) {
+      this.note("Nothing to compact yet.", "warning");
+      return;
+    }
+    this.note("Compacting its context…");
+    await session.compact(instructions);
+    this.note("Compacted.");
+  }
+
+  contextUsage() {
+    return this.handle?.session.getContextUsage?.();
   }
 
   /** A restored planner's chat shows what it said since its task, as a live one would have. */

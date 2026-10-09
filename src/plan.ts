@@ -268,9 +268,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
           { kind: "plan", id: agent.id, model, revision: agent.revision, lines: agent.plan.split("\n").length },
         );
         current.delivered.set(agent.id, { revision: agent.revision, mark: conversation.mark });
-        mainAgent.trace.note(
-          `Plan ${agent.id}${agent.revision > 1 ? ` v${agent.revision}` : ""} delivered to your agent.`,
-        );
+        mainAgent.note(`Plan ${agent.id}${agent.revision > 1 ? ` v${agent.revision}` : ""} delivered to your agent.`);
         delivered = true;
       }
       if (agent.status === "failed" && agent.error) {
@@ -278,7 +276,7 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         if (!current.failuresReported.has(key)) {
           current.failuresReported.add(key);
           sendToMain(planFailureText(agent.id, model, agent.error), { kind: "failure", id: agent.id, model });
-          mainAgent.trace.note(`Planner ${agent.id} failed; your agent was told.`, "warning");
+          mainAgent.note(`Planner ${agent.id} failed; your agent was told.`, "warning");
         }
       }
     }
@@ -432,13 +430,16 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
     },
     merged: () => run?.merged,
     onChange: () => app?.render(),
+    cwd: () => hostCtx?.cwd ?? process.cwd(),
   });
   for (const event of [
     "agent_start",
     "agent_end",
+    "message_start",
     "message_update",
     "message_end",
     "tool_execution_start",
+    "tool_execution_update",
     "tool_execution_end",
   ] as const) {
     pi.on(event as "agent_start", (payload) => {

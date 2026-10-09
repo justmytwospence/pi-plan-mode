@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { otherTools, otherToolsNode, resolveAccess } from "../src/planner/access.js";
 import { type PlannerAccessConfig, PlannerAgent } from "../src/planner/agent.js";
@@ -33,6 +34,7 @@ function loadExtension(factory: (pi: never) => void, allTools: unknown[] = []) {
   return { tools, toolCall };
 }
 
+initTheme("dark");
 const access = (tools: string[]): PlannerAccessConfig => ({
   tools,
   extensions: [],

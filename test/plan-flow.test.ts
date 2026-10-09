@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import planMode from "../src/index.js";
 import type { PlannerSessionFactory } from "../src/planner/session.js";
 import { createCustomSelectorHarness, createMockContext, createMockPi } from "./support.js";
 
+initTheme("dark");
 const SONNET = { provider: "anthropic", id: "claude-sonnet-5-5", name: "Claude Sonnet 5.5", reasoning: true };
 const OPUS = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 5.5", reasoning: true };
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
@@ -229,14 +231,19 @@ test("/plan opens on the settings, goes through tools, plans with one planner, a
   for (const char of "which is safer?") app.handleInput(char);
   app.handleInput("\r");
   assert.equal(mock.sentUserMessages.at(-1)?.text, "which is safer?");
+  // Your session's events, in the order Pi emits them.
+  const user = { role: "user", content: "which is safer?" };
+  const reply = { role: "assistant", content: [{ type: "text", text: "B's invalidation is safer." }] };
   await mainEvent("agent_start");
-  await mainEvent("message_end", { message: { role: "user", content: "which is safer?" } });
+  await mainEvent("message_start", { message: user });
+  await mainEvent("message_end", { message: user });
+  await mainEvent("message_start", { message: { role: "assistant", content: [] } });
   await mainEvent("message_update", {
-    message: { role: "assistant" },
+    message: reply,
     assistantMessageEvent: { type: "text_delta", delta: "B's invalidation is safer." },
   });
   screen = app.render().join("\n");
-  assert.match(screen, /you › which is safer\?/u);
+  assert.match(screen, /which is safer\?/u, "your message, as Pi shows it");
   assert.match(screen, /B's invalidation is safer\./u);
   assert.match(screen, /M main agent · Claude Sonnet 5\.5.*writing/u, "its stats row shows it working");
   assert.doesNotMatch(screen, /Write plan M/u, "not offered while M is working");

@@ -16,6 +16,9 @@
   can question a planner (`plan_ask_planner`) and record the merged plan as plan M
   (`plan_submit_merged`) when you ask. You can still pick A or B, and keep talking to either.
 - Replies from your agent (in M) and from the planners render as Markdown in their panes.
+- Planner lanes and M draw their conversations with Pi's own message and tool components, so they
+  look as they do in pi (tool renderers, thinking, Markdown); ctrl+e expands tool output, and a
+  restored planner shows its history instead of only "restored".
 - Write plan M (then Revise plan M) in the Review actions asks M for the merged plan, so you need
   not word the request yourself.
 - A planner refused for its login (e.g. `invalidated oauth token`) offers Log in to <provider>…,

@@ -10,6 +10,7 @@ import {
   type Theme,
 } from "@earendil-works/pi-coding-agent";
 import { Markdown, Text } from "@earendil-works/pi-tui";
+import { PiChat, piChatTheme } from "./app/pi-chat.js";
 import type { ModelSpec } from "./implementation-models.js";
 import type { PlannerAgent, PlannerStats, PlannerStatus } from "./planner/agent.js";
 import { consultMessage, MAIN_AGENT_GUIDELINES } from "./planner/prompt.js";
@@ -159,6 +160,8 @@ const SEEDED_MESSAGES = 12;
 export class MainAgentView {
   readonly id = "M";
   readonly trace = new PlannerTrace();
+  /** Your conversation as Pi shows it, with Pi's own message and tool components. */
+  chat: PiChat;
   readonly subagents = new SubagentTracker("M");
   readonly pending = undefined;
   status: PlannerStatus = "idle";
@@ -171,9 +174,22 @@ export class MainAgentView {
       model(): { name: string; spec: ModelSpec };
       merged(): MergedPlan | undefined;
       onChange(): void;
+      /** Your session's working directory, for tool renderers. */
+      cwd?(): string;
     },
   ) {
     this.stats.endedAt = this.stats.startedAt;
+    this.chat = this.newChat();
+  }
+
+  private newChat() {
+    return new PiChat(piChatTheme, { cwd: this.source.cwd?.() ?? process.cwd(), userMessagesFromEvents: true });
+  }
+
+  /** A line from plan mode itself (a plan delivered, a planner failed). */
+  note(text: string, tone: "info" | "warning" | "error" = "info") {
+    this.trace.note(text, tone);
+    this.chat.note(text, tone);
   }
 
   get name() {
@@ -202,17 +218,21 @@ export class MainAgentView {
   /** Start over with the latest messages of a session (a new or resumed one). */
   reset(entries: readonly unknown[]) {
     this.trace.entries.length = 0;
+    this.chat = this.newChat();
     this.status = "idle";
     this.error = undefined;
     this.stats = { startedAt: Date.now(), toolCalls: 0, subagentTasks: 0, totalTokens: 0, costUsd: 0 };
     this.stats.endedAt = this.stats.startedAt;
-    const messages = entries
-      .flatMap((entry) => {
-        const message = (entry as { type?: string; message?: { role?: string; content?: unknown } }).message;
-        return (entry as { type?: string }).type === "message" && message ? [message] : [];
-      })
+    const all = entries.flatMap((entry) => {
+      const message = (entry as { type?: string; message?: { role?: string; content?: unknown } }).message;
+      return (entry as { type?: string }).type === "message" && message ? [message] : [];
+    });
+    const messages = all
       .filter((message) => message.role === "user" || message.role === "assistant")
       .slice(-SEEDED_MESSAGES);
+    // The chat shows the same stretch, with the tool calls' results in it.
+    const first = messages[0] ? all.indexOf(messages[0]) : all.length;
+    this.chat.seed(all.slice(first), (text) => ({ text }));
     for (const message of messages) {
       const text = contentText(message.content).trim();
       if (!text) continue;
@@ -261,6 +281,11 @@ export class MainAgentView {
         break;
     }
     this.trace.apply(event);
+    try {
+      this.chat.apply(event);
+    } catch {
+      // Drawing the chat must never break your session's event handling.
+    }
     this.source.onChange();
   }
 }

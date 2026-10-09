@@ -2,9 +2,10 @@
 // screen. The same class serves `/plan` with one planner and with two; nothing about it depends on
 // how many there are.
 import type { AgentSessionEvent, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { PiChat, piChatTheme } from "../app/pi-chat.js";
 import { formatModelSpec, type ModelSpec } from "../implementation-models.js";
 import { describeToolArgs, PlannerTrace } from "../planner-trace.js";
-import { buildPlannerConversation, buildPlannerTranscript } from "../planners.js";
+import { buildPlannerConversation, buildPlannerTranscript, PLANNER_SEED_END_ENTRY } from "../planners.js";
 import type { PlanModeQuestion, PlanModeQuestionAnswer } from "../question-tool.js";
 import { PLAN_SUBAGENTS_TOOL_NAME } from "../scout-process.js";
 import { SubagentTracker } from "../subagent-progress.js";
@@ -88,6 +89,8 @@ export class PlannerAgent {
   readonly spec: ModelSpec;
   readonly name: string;
   readonly trace = new PlannerTrace();
+  /** Its conversation as Pi shows it: Pi's own message and tool components. */
+  readonly chat: PiChat;
   readonly subagents: SubagentTracker;
   status: PlannerStatus = "starting";
   stats: PlannerStats = { startedAt: Date.now(), toolCalls: 0, subagentTasks: 0, totalTokens: 0, costUsd: 0 };
@@ -116,17 +119,22 @@ export class PlannerAgent {
     this.name = options.name;
     this.subagents = new SubagentTracker(options.id);
     this.sessionFile = options.sessionFile;
+    this.chat = new PiChat(piChatTheme, {
+      cwd: options.cwd,
+      toolDefinition: (name) => this.handle?.session.getToolDefinition?.(name) as never,
+    });
+    if (options.sessionFile) this.seedChat(options.sessionFile);
     if (options.plan) {
       this.plan = options.plan;
       this.revision = options.revision ?? 1;
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
-      this.trace.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
+      this.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} restored.`);
     } else if (options.sessionFile) {
       // Restored without a plan (e.g. mid-conversation): it waits for you, not starting.
       this.status = "idle";
       this.stats.endedAt = this.stats.startedAt;
-      this.trace.note(`${this.id} restored.`);
+      this.note(`${this.id} restored.`);
     }
   }
 
@@ -159,6 +167,7 @@ export class PlannerAgent {
     const message = text.trim();
     if (!message || this.disposed) return;
     this.trace.user(shown?.trim() || message, from);
+    this.chat.user(shown?.trim() || message, from);
     this.changed();
     const handle = await this.open(host);
     if (!handle) return;
@@ -223,7 +232,7 @@ export class PlannerAgent {
     if (!pending) return;
     this.pending = undefined;
     if (this.status === "asking") this.status = "working";
-    this.trace.note(answers ? `Answered: ${answers.map((answer) => answer.answer).join(" · ")}` : "Questions skipped.");
+    this.note(answers ? `Answered: ${answers.map((answer) => answer.answer).join(" · ")}` : "Questions skipped.");
     pending.resolve(answers);
     this.changed();
   }
@@ -233,7 +242,7 @@ export class PlannerAgent {
     this.pending?.resolve(undefined);
     this.pending = undefined;
     if (!this.handle?.session.isStreaming) return;
-    this.trace.note("Stopped by you.", "warning");
+    this.note("Stopped by you.", "warning");
     try {
       await this.handle.session.abort();
     } catch {
@@ -277,7 +286,7 @@ export class PlannerAgent {
           this.plan = plan;
           this.revision += 1;
           this.stats.lastActivity = "submitted plan";
-          this.trace.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} submitted.`);
+          this.note(`Plan ${this.id}${this.revision > 1 ? ` v${this.revision}` : ""} submitted.`);
           this.changed();
         },
       };
@@ -363,7 +372,7 @@ export class PlannerAgent {
         if (!session?.isStreaming) return;
         this.stats.wrappingUp = true;
         this.stats.lastActivity = "asked to wrap up";
-        this.trace.note("Time is almost up: asked the planner to finish now.", "warning");
+        this.note("Time is almost up: asked the planner to finish now.", "warning");
         void session.steer(WRAP_UP_MESSAGE).catch(() => undefined);
         this.changed();
       },
@@ -371,7 +380,7 @@ export class PlannerAgent {
     );
     this.hardTimer = setTimeout(() => {
       if (!this.handle?.session.isStreaming) return;
-      this.trace.note(`Stopped at the ${Math.round(limit / 60_000)} min limit.`, "warning");
+      this.note(`Stopped at the ${Math.round(limit / 60_000)} min limit.`, "warning");
       void this.handle.session.abort().catch(() => undefined);
     }, limit);
     this.softTimer.unref?.();
@@ -393,6 +402,11 @@ export class PlannerAgent {
       return;
     }
     this.trace.apply(record);
+    try {
+      this.chat.apply(record);
+    } catch {
+      // Drawing the chat must never break the planner.
+    }
     switch (record.type) {
       case "agent_start":
         if (this.status !== "asking") this.status = "working";
@@ -456,7 +470,7 @@ export class PlannerAgent {
     this.error = error instanceof Error ? error.message : String(error);
     this.status = "failed";
     this.stats.endedAt = Date.now();
-    this.trace.note(`Failed: ${this.error}`, "error");
+    this.note(`Failed: ${this.error}`, "error");
     this.changed();
     this.settle();
   }
@@ -467,6 +481,33 @@ export class PlannerAgent {
     for (const resolve of waiters) resolve();
   }
 
+  /** A line from plan mode itself, in both the trace and the chat. */
+  private note(text: string, tone: "info" | "warning" | "error" = "info") {
+    this.trace.note(text, tone);
+    this.chat.note(text, tone);
+  }
+
+  /** A restored planner's chat shows what it said since its task, as a live one would have. */
+  private seedChat(file: string) {
+    try {
+      const entries = readSessionEntries(file, this.options.cwd) as Array<{
+        type?: string;
+        customType?: string;
+        message?: unknown;
+      }>;
+      const start = entries.findIndex(
+        (entry) => entry.type === "custom" && entry.customType === PLANNER_SEED_END_ENTRY,
+      );
+      if (start === -1) return;
+      const messages = entries
+        .slice(start + 1)
+        .flatMap((entry) => (entry.type === "message" && entry.message ? [entry.message] : []));
+      this.chat.seed(messages, (text, index) => restoredUserLine(text, index));
+    } catch {
+      // A session that cannot be read starts with an empty chat.
+    }
+  }
+
   private changed() {
     try {
       this.options.onChange();
@@ -474,6 +515,14 @@ export class PlannerAgent {
       // Rendering must never break a planner.
     }
   }
+}
+
+/** How a restored user message shows: its task and plan mode's own nudges are left out. */
+function restoredUserLine(text: string, index: number): { text: string; from?: string } | undefined {
+  if (index === 0 || text === WRAP_UP_MESSAGE || text.startsWith("Your previous turn")) return undefined;
+  const consult = /^\[From the user's main agent[^\]]*\]\s*/u.exec(text);
+  if (consult) return { text: text.slice(consult[0].length), from: "main agent" };
+  return { text };
 }
 
 function assistantText(content: unknown) {

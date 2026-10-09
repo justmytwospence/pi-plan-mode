@@ -1,5 +1,5 @@
-// Planning and Review: one lane per planner (one or two), side by side. Each lane shows what its
-// planner is doing (or its plan, once it has one), the questions it is asking you, and a line to
+// Planning and Review: one lane per planner (one or two), side by side. Each lane shows its
+// planner's chat, drawn by Pi's own components (or its plan, once it has one), the questions it is asking you, and a line to
 // talk to it; you can talk to both at once. With two planners, a full-width pane below the lanes
 // talks to M, the merger: a third model that sees both plans and helps you merge them. The focused
 // pane gets the room: M grows while you talk to it and shrinks to a few lines otherwise. Below
@@ -25,6 +25,7 @@ export type LaneAgent = Pick<
   | "name"
   | "spec"
   | "trace"
+  | "chat"
   | "subagents"
   | "status"
   | "working"
@@ -54,6 +55,7 @@ import {
   type WorkflowStep,
 } from "../ui-kit.js";
 import { pageHeader } from "./frame.js";
+import { type PiChat, setPiChatTheme } from "./pi-chat.js";
 import { TraceRenderer, wrap } from "./trace-lines.js";
 
 export interface LaneAction {
@@ -139,6 +141,7 @@ export class LanesPage {
   private readonly questions = new Map<string, QuestionCursor>();
   private readonly scroll = new ScrollState();
   private readonly renderer: TraceRenderer;
+  private readonly chats = new Map<string, { chat: PiChat; version: number; width: number; lines: string[] }>();
   private readonly lineCounts = new Map<string, number>();
   /** The plan revision each lane last showed: a new one is shown from its top. */
   private readonly seenRevision = new Map<string, number>();
@@ -157,6 +160,20 @@ export class LanesPage {
     private readonly options: LanesPageOptions,
   ) {
     this.renderer = new TraceRenderer(theme);
+    setPiChatTheme(theme);
+  }
+
+  /** An agent's chat, drawn by Pi's own components; re-rendered only when it changed. */
+  private chatLines(agent: LaneAgent, width: number): string[] {
+    const cached = this.chats.get(agent.id);
+    if (cached && cached.chat === agent.chat && cached.version === agent.chat.version && cached.width === width) {
+      return cached.lines;
+    }
+    const lines = agent.chat.render(width);
+    // Pi pads its components with blank lines; a pane does not need the leading ones.
+    while (lines.length > 0 && !lines[0]?.trim()) lines.shift();
+    this.chats.set(agent.id, { chat: agent.chat, version: agent.chat.version, width, lines });
+    return lines;
   }
 
   /** The step the page stands for: Planning while a planner works, Review once plans are in. */
@@ -260,6 +277,7 @@ export class LanesPage {
     const focused = targets[this.focus];
     const laneAgent =
       focused?.kind === "lane" ? focused.agent : focused?.kind === "merger" ? focused.pane.agent : undefined;
+    if (laneAgent && is("ctrl+e") && (this.showsPlan(laneAgent) || this.selectedSub(laneAgent))) return;
     if (laneAgent && is("ctrl+n", "ctrl+p")) {
       this.stepSub(laneAgent, is("ctrl+n") ? 1 : -1);
       return this.options.requestRender();
@@ -293,7 +311,10 @@ export class LanesPage {
     const half = Math.max(1, Math.floor((this.laneHeights.get(agent.id) ?? 10) / 2));
     if (is("ctrl+u")) this.scrollLane(agent, -half);
     else if (is("ctrl+d")) this.scrollLane(agent, half);
-    else if (is("ctrl+o")) {
+    else if (is("ctrl+e")) {
+      // Expand or collapse tool output, as ctrl+o does in pi.
+      agent.chat.setExpanded(!agent.chat.isExpanded);
+    } else if (is("ctrl+o")) {
       this.subFocus.delete(agent.id);
       if (agent.plan !== undefined) {
         if (this.showTrace.has(agent.id)) this.showTrace.delete(agent.id);
@@ -700,7 +721,7 @@ export class LanesPage {
         ]
       : this.showsPlan(agent)
         ? this.renderer.planLines(`${agent.id}:${agent.revision}`, agent.plan ?? "", width)
-        : this.renderer.lines(agent.trace, width);
+        : this.chatLines(agent, width);
     this.lineCounts.set(key, all.length);
     const view = this.scroll.window(key, all, bodyHeight);
     const empty = agent.status === "starting" ? `${spinner()} starting…` : "(nothing yet)";
@@ -1038,6 +1059,9 @@ export class LanesPage {
         : []),
       ...(agent?.plan !== undefined
         ? [{ key: "^o", label: this.showsPlan(agent) ? (merger ? "chat" : "trace") : "plan" }]
+        : []),
+      ...(agent && !this.showsPlan(agent) && !this.selectedSub(agent)
+        ? [{ key: "^e", label: agent.chat.isExpanded ? "collapse tools" : "expand tools" }]
         : []),
       ...(merger && this.options.mergerShare ? [{ key: "⇧↑↓", label: "resize" }] : []),
       { key: "tab", label: panes > 1 ? "next pane / actions" : "actions" },

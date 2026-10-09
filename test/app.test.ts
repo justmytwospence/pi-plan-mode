@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { stripVTControlCharacters } from "node:util";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { test } from "vitest";
 import { type LaneAction, LanesPage, type MergerPane } from "../src/app/lanes-page.js";
 import { OptionsPage, type TextArea } from "../src/app/options-page.js";
+import { PiChat, piChatTheme } from "../src/app/pi-chat.js";
 import type { PlannerAgent } from "../src/planner/agent.js";
 import { PlannerTrace } from "../src/planner-trace.js";
 import { SubagentTracker } from "../src/subagent-progress.js";
@@ -12,6 +15,8 @@ const theme = {
   bold: (text: string) => text,
   italic: (text: string) => text,
 } as never;
+initTheme("dark");
+
 const KEY = { up: "\x1b[A", down: "\x1b[B", right: "\x1b[C", left: "\x1b[D", enter: "\r", escape: "\x1b", tab: "\t" };
 const ctrl = (letter: string) => String.fromCharCode(letter.charCodeAt(0) - 96);
 
@@ -74,8 +79,11 @@ test("the options page cycles the highlighted value with ←/→ and ctrl+h/ctrl
 function fakeAgent(id: string, extra: Partial<PlannerAgent> = {}): PlannerAgent {
   const trace = new PlannerTrace();
   trace.note("started");
+  const chat = new PiChat(piChatTheme, { cwd: "/" });
+  chat.note("started");
   return {
     id,
+    chat,
     name: `Model ${id}`,
     spec: { provider: "p", modelId: id, thinkingLevel: "high" },
     trace,
@@ -735,7 +743,7 @@ test("an action for M sends its message to M and moves to M's chat", () => {
   let lines = page.render(120);
   assert.match(lines.join("\n"), /Write plan M\s+·\s+Implement A…/u);
   assert.ok(
-    lines.some((line) => line.startsWith("# Plan M")),
+    lines.some((line) => stripVTControlCharacters(line).startsWith("Plan M")),
     "M shows its plan",
   );
   page.handleInput(KEY.enter);
@@ -744,4 +752,28 @@ test("an action for M sends its message to M and moves to M's chat", () => {
   lines = page.render(120);
   const footer = lines.slice(-2).join("\n");
   assert.match(footer, /\^o plan/u, "M's pane is focused, on its chat");
+});
+
+test("a lane draws its chat with Pi's components, and ctrl+e expands tool output", () => {
+  const a = fakeAgent("A");
+  const output = Array.from({ length: 40 }, (_unused, index) => `line ${index + 1}`).join("\n");
+  a.chat.apply({ type: "tool_execution_start", toolCallId: "1", toolName: "bash", args: { command: "seq 40" } });
+  a.chat.apply({
+    type: "tool_execution_end",
+    toolCallId: "1",
+    toolName: "bash",
+    result: { content: [{ type: "text", text: output }] },
+  });
+  const { page } = lanesPage([a], undefined, 80);
+  const shown = () =>
+    page
+      .render(100)
+      .map((line) => stripVTControlCharacters(line))
+      .join("\n");
+  assert.match(shown(), /\$ seq 40/u, "the call as Pi draws it");
+  assert.doesNotMatch(shown(), /line 1\b/u, "long output starts collapsed");
+  assert.match(shown(), /\^e expand tools/u);
+  page.handleInput("\x05");
+  assert.match(shown(), /line 1\b/u, "expanded");
+  assert.match(shown(), /\^e collapse tools/u);
 });

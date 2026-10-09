@@ -12,6 +12,9 @@ import {
   type ExtensionCommandContext,
   type ExtensionContext,
   getAgentDir,
+  LoginDialogComponent,
+  ModelRuntime,
+  SettingsManager,
 } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, TUI } from "@earendil-works/pi-tui";
 import { FULL_SCREEN } from "./app/frame.js";
@@ -28,6 +31,7 @@ import {
   sameModel,
 } from "./implementation-models.js";
 import { type JevToolPick, pickToolsWithJev } from "./jev-tool-picker.js";
+import { isAuthError, loginInDialog, providerName } from "./login.js";
 import {
   MainAgentView,
   type MergedPlan,
@@ -50,7 +54,7 @@ import {
   resumeMessage,
   writeMergedRequest,
 } from "./planner/prompt.js";
-import type { PlannerSessionFactory } from "./planner/session.js";
+import { inheritProviders, type PlannerSessionFactory } from "./planner/session.js";
 import { buildPlannerTranscript } from "./planners.js";
 import { extensionsForProvider, resolveProviderExtensions } from "./provider-extensions.js";
 import {
@@ -84,6 +88,8 @@ export interface PlanDependencies {
   readSettings?(): Promise<PlanModeSettings>;
   createSession?: PlannerSessionFactory;
   pickTools?: typeof pickToolsWithJev;
+  /** Log in to a provider again, showing the login dialog through `show`; rejects if it fails. */
+  login?(providerId: string, show: (dialog: Component) => void): Promise<void>;
 }
 
 /** What a planner may use, stored so a restored planner gets the same tools. */
@@ -621,6 +627,15 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
             : "Ask M to merge both plans and what you have discussed into plan M, which you can then implement or export.",
           toMerger: writeMergedRequest(merged !== undefined),
         };
+        // A planner its provider turned away for its credentials: log in again, here, and it retries.
+        for (const agent of agents) {
+          if (agent.status !== "failed" || !isAuthError(agent.error)) continue;
+          actions.push({
+            id: `login:${agent.id}`,
+            label: `Log in to ${agent.spec.provider}…`,
+            description: `${agent.id} was refused: ${agent.error}. Log in to ${agent.spec.provider} again (as /login does) and ${agent.id} tries again.`,
+          });
+        }
         if (mergeable && !merged) actions.push(merge);
         for (const source of ready) {
           actions.push({
@@ -663,6 +678,33 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
         return actions;
       };
 
+      /** Log in to a planner's provider in Pi's login dialog, then have the planner try again. */
+      const loginAndRetry = async (agent: PlannerAgent) => {
+        const providerId = agent.spec.provider;
+        const back = lanes();
+        try {
+          await (dependencies.login ?? loginWithDialog)(providerId, (dialog) => show(dialog));
+          show(back);
+          ctx.ui.notify(`Logged in to ${providerId}. Planner ${agent.id} is trying again.`, "info");
+          void agent.say(resumeMessage("failed"), ctx, "try again (after logging in)");
+        } catch (error: unknown) {
+          show(back);
+          const message = errorText(error);
+          if (message !== "Login cancelled") ctx.ui.notify(`Login to ${providerId} failed: ${message}`, "error");
+        }
+      };
+
+      const loginWithDialog = async (providerId: string, showDialog: (dialog: Component) => void) => {
+        const runtime = await ModelRuntime.create();
+        inheritProviders(ctx, runtime);
+        const dialog = new LoginDialogComponent(tui, providerId, () => undefined, providerName(runtime, providerId));
+        dialog.focused = true;
+        showDialog(dialog);
+        await loginInDialog(runtime, providerId, dialog, () =>
+          SettingsManager.create(ctx.cwd, getAgentDir()).getOrCreateDeviceId(),
+        );
+      };
+
       const onLaneAction = (id: string, text?: string) => {
         const [kind, sourceId] = id.split(":");
         const source = sources().find((candidate) => candidate.id === sourceId);
@@ -682,6 +724,11 @@ export default function plan(pi: ExtensionAPI, dependencies: PlanDependencies = 
               hook(ctx, source);
             })
             .catch((error: unknown) => ctx.ui.notify(`Export failed: ${errorText(error)}`, "error"));
+          return;
+        }
+        if (kind === "login") {
+          const agent = run?.agents.find((candidate) => candidate.id === sourceId);
+          if (agent) void loginAndRetry(agent);
           return;
         }
         if (kind === "add") return show(settingsPage("add"));

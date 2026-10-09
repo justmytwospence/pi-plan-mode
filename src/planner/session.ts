@@ -141,7 +141,7 @@ export function readSessionEntries(file: string, cwd: string): readonly unknown[
 }
 
 /** The planner reaches models the way your session does: the same registered providers. */
-function inheritProviders(host: ExtensionContext, runtime: ModelRuntime) {
+export function inheritProviders(host: ExtensionContext, runtime: ModelRuntime) {
   const registry = host.modelRegistry as unknown as {
     getRegisteredProviderIds?(): readonly string[];
     getRegisteredNativeProvider?(id: string): unknown;

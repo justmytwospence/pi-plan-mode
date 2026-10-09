@@ -997,6 +997,9 @@ export class LanesPage {
       return `${agent.id} is asking you: ↑↓ pick an answer and ⏎, or type your own answer.${several ? " ←→ (with nothing typed) move between its questions to change an answer." : ""}`;
     }
     if (agent.working) return `${agent.id} is working. Type to steer it; it reads your message after its current step.`;
+    if (agent.status === "failed") {
+      return `${agent.id} failed. Type a message to have it try again, or Tab to the actions (a login problem has its own).`;
+    }
     if (merger && agent.plan) {
       return "M's merged plan is ready. Talk to M and choose Revise plan M to change it; Tab to the actions to implement it.";
     }

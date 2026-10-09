@@ -18,6 +18,8 @@
 - Replies from your agent (in M) and from the planners render as Markdown in their panes.
 - Write plan M (then Revise plan M) in the Review actions asks M for the merged plan, so you need
   not word the request yourself.
+- A planner refused for its login (e.g. `invalidated oauth token`) offers Log in to <provider>…,
+  which runs Pi's login dialog inside /plan and then retries the planner.
 - Removed: the main-session Plan mode and its contracts, reinjection, saved-plan and active-plan
   menus, `/plan start|show|finalize|implement|save|export|exit|multi|talk|synthesize|compare|tools|settings`,
   planner subprocesses (scouts stay subprocesses and still get `providerExtensions`), and the

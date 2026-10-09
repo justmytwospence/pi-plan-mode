@@ -9,7 +9,7 @@ const OPUS = { provider: "anthropic", id: "claude-opus-5-5", name: "Claude Opus 
 const flush = () => new Promise((resolve) => setTimeout(resolve, 10));
 
 /** Planner sessions that submit `# Plan from <model>` for any prompt (or, with `ask`, ask first). */
-function fakeSessions(ask = false) {
+function fakeSessions(ask = false, failFirst?: { model: string; error: string }) {
   const prompts: Array<{ model: string; text: string }> = [];
   const factory: PlannerSessionFactory = async (_host, options) => {
     const tools = new Map<string, { execute(...args: unknown[]): Promise<unknown> }>();
@@ -29,6 +29,17 @@ function fakeSessions(ask = false) {
         prompt: async (text: string) => {
           prompts.push({ model: options.spec.modelId, text });
           emit({ type: "agent_start" });
+          if (
+            failFirst?.model === options.spec.modelId &&
+            prompts.filter((p) => p.model === failFirst.model).length === 1
+          ) {
+            emit({
+              type: "message_end",
+              message: { role: "assistant", content: [], stopReason: "error", errorMessage: failFirst.error },
+            });
+            emit({ type: "agent_settled" });
+            return;
+          }
           if (ask) {
             await tools.get("plan_mode_question")?.execute("q", {
               questions: [
@@ -63,10 +74,17 @@ function fakeSessions(ask = false) {
   return { factory, prompts };
 }
 
-function setup(options: { ask?: boolean } = {}) {
+function setup(
+  options: {
+    ask?: boolean;
+    failFirst?: { model: string; error: string };
+    login?: (providerId: string, show: (dialog: never) => void) => Promise<void>;
+  } = {},
+) {
   const mock = createMockPi({ thinkingLevel: "high" });
-  const sessions = fakeSessions(options.ask);
+  const sessions = fakeSessions(options.ask, options.failFirst);
   planMode(mock.pi, {
+    ...(options.login ? { login: options.login } : {}),
     readSettings: async () => ({
       thinkingLevel: "inherit",
       planners: [{ provider: "anthropic", modelId: "claude-sonnet-5-5", thinkingLevel: "low" }],
@@ -464,4 +482,41 @@ test("a planner asking you something shows in herdr as blocked until it stops as
   for (const handler of mock.events.get("session_shutdown") ?? []) await handler({}, context.ctx);
   await flush();
   assert.deepEqual(blocked, [{ active: true, label: "Planner question" }, { active: false }]);
+});
+
+test("a planner refused for its login offers to log in again from /plan, then tries again", async () => {
+  const logins: string[] = [];
+  const { mock, context, sessions, harness } = setup({
+    failFirst: { model: "claude-sonnet-5-5", error: "Encountered invalidated oauth token for user, failing request" },
+    login: async (providerId) => {
+      logins.push(providerId);
+    },
+  });
+  const opened = mock.commands.get("plan")?.handler("add a cache", context.ctx);
+  await flush();
+  const app = harness();
+  assert.ok(app);
+  app.handleInput("\r");
+  app.handleInput("\r");
+  app.handleInput("\r");
+  await flush();
+  let screen = app.render().join("\n");
+  assert.match(screen, /failed: Encountered invalidated oauth token/u);
+  assert.match(screen, /Log in to anthropic…/u, "a login action for the planner's provider");
+  // Tab to the actions; the login comes first.
+  app.handleInput("\t");
+  app.handleInput("\r");
+  await flush();
+  assert.deepEqual(logins, ["anthropic"]);
+  assert.equal(sessions.prompts.length, 2, "the planner tried again");
+  assert.match(sessions.prompts[1]?.text ?? "", /previous turn failed with an error/u);
+  screen = app.render().join("\n");
+  assert.doesNotMatch(screen, /Log in to anthropic/u, "gone once the planner recovered");
+  assert.match(screen, /plan ready/u);
+  assert.ok(
+    context.notifications.some((note) => /Logged in to anthropic\. Planner A is trying again\./u.test(note.message)),
+  );
+  app.handleInput("\u001b");
+  app.handleInput("\r");
+  await opened;
 });

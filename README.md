@@ -96,6 +96,9 @@ covers the whole terminal. A step bar at the top right shows where you are:
    - **Export M… / Export A… / Export B…**: write that plan to a Markdown file (path prefilled from
      settings).
    - **Save & close** and **Discard**.
+   - **Log in to <provider>…**, first, when a planner failed because its provider refused its
+     credentials (an expired or revoked login): it opens Pi's login dialog in place, as `/login`
+     does, and the planner tries again once you are logged in.
 
    You can keep talking to either planner in Review, too.
 5. **Implement.** The same row page: which plan, the **model**, its **effort**, and the **context**

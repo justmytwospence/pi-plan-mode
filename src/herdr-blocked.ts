@@ -4,9 +4,8 @@
  * planner waits for your answers, which outranks a `herdr:working` hold.
  *
  * `herdr:working` is the opposite hold, for work that runs outside the main
- * agent's turn (planner runs, planner replies). The herdr attention bridge
- * reports it as the pane's `activity=working`, and does not treat a dialog
- * opened during the hold (the live planner traces) as a question.
+ * agent's turn (planner runs, planner replies). pi-herdr shows it as the pane
+ * token `bg` in herdr's sidebar.
  */
 export const HERDR_BLOCKED_CHANNEL = "herdr:blocked";
 export const HERDR_WORKING_CHANNEL = "herdr:working";

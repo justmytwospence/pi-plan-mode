@@ -220,8 +220,8 @@ edits the common ones; the rest are JSON-only:
 ## 🤝 Herdr
 
 While planners work, the extension holds `herdr:working` on Pi's event bus, so
-[herdr-attention-queue](https://github.com/justmytwospence/herdr-attention-queue) shows the pane
-as working. Outside Herdr nothing listens and the events do nothing.
+[pi-herdr](https://github.com/justmytwospence/pi-herdr) shows the pending run in herdr's sidebar.
+Outside Herdr, or without pi-herdr, nothing listens and the events do nothing.
 
 ## 🗂️ Layout
 
